@@ -77,6 +77,7 @@ from codex_wechat_runtime import (
     start_all,
     stop_all,
 )
+from localization import Localizer
 
 
 class Card(QFrame):
@@ -87,9 +88,9 @@ class Card(QFrame):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
 
-        title_label = QLabel(title)
-        title_label.setObjectName("cardTitle")
-        layout.addWidget(title_label)
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("cardTitle")
+        layout.addWidget(self.title_label)
 
         self.body = QVBoxLayout()
         self.body.setSpacing(10)
@@ -104,6 +105,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         ensure_runtime_dirs()
+        self.localizer = Localizer()
         self.setWindowTitle("ChatBridge")
         self.setMinimumSize(1100, 760)
         icon_path = APP_DIR / "codex_wechat_desktop.ico"
@@ -124,6 +126,7 @@ class MainWindow(QMainWindow):
         self.runtime_refresh_requested.connect(self.refresh_runtime)
 
         self._build_ui()
+        self._apply_localized_static_texts()
         self.refresh_runtime()
         self.refresh_diagnostics()
 
@@ -356,11 +359,58 @@ class MainWindow(QMainWindow):
 
         self._apply_styles()
 
+    def _apply_localized_static_texts(self) -> None:
+        self.summary_label.setText(self._t("ui.summary.checking"))
+        self.next_step_label.setText(self._t("ui.next_step.initial"))
+        self.stack_badge.setText(self._t("ui.status.checking"))
+        self.primary_button.setText(self._t("ui.status.checking"))
+        self.refresh_button.setText(self._t("ui.button.refresh"))
+        self.agent_page_button.setText(self._t("ui.button.sessions"))
+        self.logs_button.setText(self._t("ui.button.logs"))
+        self.auto_refresh_button.setText(self._t("ui.auto_refresh.on"))
+
+        self.main_tabs.setTabText(0, self._t("ui.tab.home"))
+        self.main_tabs.setTabText(1, self._t("ui.tab.issues"))
+        self.main_tabs.setTabText(2, self._t("ui.tab.sessions"))
+        self.main_tabs.setTabText(3, self._t("ui.tab.logs"))
+
+        self.quickstart_card.title_label.setText(self._t("ui.card.quickstart"))
+        self.quickstart_status.setText(self._t("ui.quickstart.analyzing"))
+        self.system_card.title_label.setText(self._t("ui.card.system"))
+        self.issue_card.title_label.setText(self._t("ui.card.issues"))
+        self.issue_summary_label.setText(self._t("ui.issues.analyzing"))
+        self.issue_repair_button.setText(self._t("ui.button.repair"))
+        self.issue_login_button.setText(self._t("ui.button.open_accounts"))
+        self.issue_cleanup_button.setText(self._t("ui.button.cleanup"))
+        self.issue_open_dir_button.setText(self._t("ui.button.open_project"))
+        self.agent_card.title_label.setText(self._t("ui.card.sessions"))
+        self.agent_table.setHorizontalHeaderLabels(
+            [
+                self._t("ui.table.session"),
+                self._t("ui.table.status"),
+                self._t("ui.table.queue"),
+                self._t("ui.table.success"),
+                self._t("ui.table.failure"),
+            ]
+        )
+        self.agent_detail_text.setPlainText(self._t("ui.agent.select_session"))
+        self.agent_conversation_text.setPlainText(self._t("ui.agent.select_preview"))
+        self.diag_card.title_label.setText(self._t("ui.card.diagnostics"))
+        self.diag_time_label.setText(self._t("ui.diagnostics.not_completed"))
+        self.activity_card.title_label.setText(self._t("ui.card.activity"))
+        self.activity_text.setPlainText(self._t("ui.activity.empty"))
+
     def _readonly_text(self) -> QPlainTextEdit:
         widget = QPlainTextEdit()
         widget.setReadOnly(True)
         widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         return widget
+
+    def _t(self, key: str, **kwargs: object) -> str:
+        return self.localizer.translate(key, **kwargs)
+
+    def _task_status_text(self, status: str) -> str:
+        return self._t(f"ui.task_status.{status}")
 
     def _apply_styles(self) -> None:
         self.setStyleSheet(
@@ -996,6 +1046,331 @@ class MainWindow(QMainWindow):
         )
         if should_run == QMessageBox.Yes:
             self.repair_environment()
+
+    def refresh_runtime(self) -> None:
+        if not self._auto_refresh_enabled and self.sender() is self.runtime_timer:
+            return
+        snapshot = get_runtime_snapshot()
+        hub_state = read_json(HUB_STATE_PATH)
+        bridge_state = read_json(BRIDGE_STATE_PATH)
+
+        if snapshot.hub_running and snapshot.bridge_running:
+            self.stack_badge.setText(self._t("ui.status.running"))
+            self.stack_badge.setStyleSheet("background:#d9f3e4;color:#12633b;border:1px solid #b9dfca;border-radius:16px;padding:10px 12px;font-weight:700;")
+        elif snapshot.hub_running or snapshot.bridge_running:
+            self.stack_badge.setText(self._t("ui.status.partial"))
+            self.stack_badge.setStyleSheet("background:#fff2cc;color:#946200;border:1px solid #eadcb0;border-radius:16px;padding:10px 12px;font-weight:700;")
+        else:
+            self.stack_badge.setText(self._t("ui.status.stopped"))
+            self.stack_badge.setStyleSheet("background:#f8d7da;color:#8a1c2b;border:1px solid #efbac2;border-radius:16px;padding:10px 12px;font-weight:700;")
+
+        overview_lines = [
+            self._t("ui.overview.hub", status=self._t("ui.status.running") if snapshot.hub_running else self._t("ui.status.stopped"), pid=self._pid_text(snapshot.hub_pid)),
+            self._t("ui.overview.bridge", status=self._t("ui.status.running") if snapshot.bridge_running else self._t("ui.status.stopped"), pid=self._pid_text(snapshot.bridge_pid)),
+            self._t("ui.overview.agent_processes", count=len(snapshot.codex_processes)),
+            "",
+        ]
+        if snapshot.codex_processes:
+            overview_lines.extend(snapshot.codex_processes[:8])
+        else:
+            overview_lines.append(self._t("ui.overview.none_agents"))
+
+        if bridge_state:
+            overview_lines.extend(["", self._t("ui.overview.bridge_state")])
+            overview_lines.extend(f"{key}: {value}" for key, value in list(bridge_state.items())[:8])
+
+        self.overview_text.setPlainText("\n".join(overview_lines))
+        hub_signature = self._build_hub_signature(hub_state)
+        if hub_signature != self._last_hub_signature:
+            self._render_agents(hub_state)
+            self._last_hub_signature = hub_signature
+        self._render_issues(snapshot, bridge_state)
+        self._refresh_summary(snapshot)
+
+    def _refresh_summary(self, snapshot) -> None:
+        missing = [item.label for item in self.checks.values() if not item.ok] if self.checks else []
+        if missing:
+            self.summary_label.setText(self._t("ui.summary.missing", count=len(missing), items="、".join(missing[:4])))
+        elif snapshot.hub_running and snapshot.bridge_running:
+            self.summary_label.setText(self._t("ui.summary.ready_running"))
+        else:
+            self.summary_label.setText(self._t("ui.summary.ready_waiting"))
+
+        action_key, label, hint = self._decide_primary_action(snapshot)
+        self.primary_action = action_key
+        self.primary_button.setText(label)
+        self.next_step_label.setText(hint)
+        self._render_quickstart(snapshot)
+
+    def run_command(self, label: str, command: str) -> None:
+        should_run = QMessageBox.question(self, self._t("ui.confirm.run.title"), self._t("ui.confirm.run.body", label=label, command=command))
+        if should_run != QMessageBox.Yes:
+            return
+
+        def worker() -> None:
+            code, output = run_shell_command(command, APP_DIR)
+            self.activity_logged.emit(self._t("ui.activity.command", label=label, command=command, code=code, output=output or "(no output)"))
+            self.diagnostics_ready.emit({item.key: item for item in collect_checks(APP_DIR)}, datetime.now().strftime("%H:%M:%S"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def run_async_action(self, label: str, action) -> None:
+        def worker() -> None:
+            for line in action():
+                self.activity_logged.emit(self._t("ui.activity.action", label=label, line=line))
+            self.runtime_refresh_requested.emit()
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def confirm_emergency_stop(self) -> None:
+        should_run = QMessageBox.question(self, self._t("ui.confirm.cleanup.title"), self._t("ui.confirm.cleanup.body"))
+        if should_run == QMessageBox.Yes:
+            self.run_async_action(self._t("ui.button.cleanup"), emergency_stop)
+
+    def open_path(self, path: Path) -> None:
+        if not path.exists():
+            QMessageBox.critical(self, self._t("ui.error.path_missing.title"), str(path))
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        snapshot = get_runtime_snapshot()
+        if snapshot.hub_running or snapshot.bridge_running:
+            should_stop = QMessageBox.question(self, self._t("ui.confirm.close.title"), self._t("ui.confirm.close.body"))
+            if should_stop == QMessageBox.Yes:
+                for line in stop_all():
+                    self.activity_logged.emit(self._t("ui.activity.action", label=self._t("ui.primary.stop.label"), line=line))
+        event.accept()
+
+    def _apply_diagnostics(self, checks: dict, diag_at: str) -> None:
+        self._diagnostics_running = False
+        self.checks = checks
+        self.last_diag_at = diag_at
+        self.diag_time_label.setText(self._t("ui.diagnostics.label", time=diag_at))
+
+        ordered_keys = ["python", "winget", "nvm", "pyside6", "psutil", "node", "npm", "codex", "opencode", "weixin_account", "project_files"]
+        lines: list[str] = []
+        for key in ordered_keys:
+            item = checks.get(key)
+            if item is None:
+                continue
+            status = self._t("ui.diagnostics.ok") if item.ok else self._t("ui.diagnostics.missing")
+            lines.append(f"[{status}] {item.label}: {item.detail}")
+        self.diag_text.setPlainText("\n".join(lines))
+        self.refresh_runtime()
+        self._maybe_prompt_auto_repair()
+
+    def _decide_primary_action(self, snapshot) -> tuple[str, str, str]:
+        checks = self.checks
+        if snapshot.hub_running or snapshot.bridge_running:
+            return "stop", self._t("ui.primary.stop.label"), self._t("ui.primary.stop.hint")
+
+        blocking = [key for key in ["python", "project_files"] if checks.get(key) and not checks[key].ok]
+        if self._is_missing("nvm") and self._is_missing("winget"):
+            blocking.append("nvm")
+        if blocking:
+            return "manual", self._t("ui.primary.manual.label"), self._t("ui.primary.manual.hint")
+
+        auto_fixable = [key for key in ["pyside6", "psutil", "nvm", "node", "npm", "codex", "opencode"] if checks.get(key) and not checks[key].ok]
+        if auto_fixable:
+            return "repair", self._t("ui.primary.repair.label"), self._t("ui.primary.repair.hint")
+
+        if checks.get("weixin_account") and not checks["weixin_account"].ok:
+            return "login", self._t("ui.primary.login.label"), self._t("ui.primary.login.hint")
+
+        return "start", self._t("ui.primary.start.label"), self._t("ui.primary.start.hint")
+
+    def repair_environment(self) -> None:
+        self._auto_repair_prompted = True
+        commands: list[tuple[str, str]] = []
+        will_have_node = not (self._is_missing("node") or self._is_missing("npm"))
+        if self._is_missing("pyside6") or self._is_missing("psutil"):
+            commands.append((self._t("ui.quickstart.step.desktop"), "python -m pip install PySide6 psutil"))
+        if self._is_missing("nvm") and not self._is_missing("winget"):
+            commands.append(("NVM for Windows", "winget install CoreyButler.NVMforWindows --accept-package-agreements --accept-source-agreements"))
+        if self._is_missing("node") or self._is_missing("npm"):
+            commands.append(("Node 24.14.1", build_nvm_node_command()))
+            will_have_node = True
+        if self._is_missing("codex") and will_have_node:
+            commands.append(("Codex CLI", "npm.cmd install -g codex"))
+        if self._is_missing("opencode") and will_have_node:
+            commands.append(("OpenCode CLI", "npm.cmd install -g opencode-ai"))
+
+        if not commands:
+            QMessageBox.information(self, self._t("ui.info.no_repair.title"), self._t("ui.info.no_repair.body"))
+            return
+
+        summary = "\n".join(f"- {label}: {command}" for label, command in commands)
+        should_run = QMessageBox.question(self, self._t("ui.confirm.repair.title"), self._t("ui.confirm.repair.body", summary=summary))
+        if should_run != QMessageBox.Yes:
+            return
+
+        def worker() -> None:
+            for label, command in commands:
+                code, output = run_shell_command(command, APP_DIR)
+                self.activity_logged.emit(self._t("ui.activity.command", label=label, command=command, code=code, output=output or "(no output)"))
+            self.diagnostics_ready.emit({item.key: item for item in collect_checks(APP_DIR)}, datetime.now().strftime("%H:%M:%S"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _render_quickstart(self, snapshot) -> None:
+        stage_lines = [
+            self._step_line(self._t("ui.quickstart.step.desktop"), not self._is_missing("pyside6") and not self._is_missing("psutil")),
+            self._step_line(self._t("ui.quickstart.step.node"), not any(self._is_missing(key) for key in ["node", "npm", "codex", "opencode"])),
+            self._step_line(self._t("ui.quickstart.step.accounts"), not self._is_missing("weixin_account")),
+            self._step_line(self._t("ui.quickstart.step.start"), snapshot.hub_running and snapshot.bridge_running),
+        ]
+        self.quickstart_steps.setPlainText(
+            "\n".join(
+                stage_lines
+                + [
+                    "",
+                    self._t("ui.quickstart.commands"),
+                    "/help",
+                    "/status",
+                    "/new <name>",
+                    "/list",
+                    "/use <name>",
+                    "/backend",
+                    "/backend <codex|opencode>",
+                    "/close",
+                    "/reset",
+                    "",
+                    self._t("ui.quickstart.accounts_dir"),
+                    str((APP_DIR / "accounts").resolve()),
+                ]
+            )
+        )
+
+        status_map = {
+            "repair": self._t("ui.quickstart.repair"),
+            "login": self._t("ui.quickstart.login"),
+            "start": self._t("ui.quickstart.start"),
+            "stop": self._t("ui.quickstart.stop"),
+        }
+        self.quickstart_status.setText(status_map.get(self.primary_action, self._t("ui.quickstart.manual")))
+
+    def _render_issues(self, snapshot, bridge_state: dict) -> None:
+        issues: list[dict[str, str]] = []
+        if any(self._is_missing(key) for key in ["pyside6", "psutil", "nvm", "node", "npm", "codex", "opencode"]):
+            issues.append({"kind": "dependencies", "title": self._t("ui.issue.dependencies.title"), "detail": self._t("ui.issue.dependencies.detail")})
+        if self._is_missing("weixin_account"):
+            issues.append({"kind": "login", "title": self._t("ui.issue.login.title"), "detail": self._t("ui.issue.login.detail")})
+        if snapshot.hub_running != snapshot.bridge_running:
+            issues.append({"kind": "processes", "title": self._t("ui.issue.process_mismatch.title"), "detail": self._t("ui.issue.process_mismatch.detail")})
+        if bridge_state.get("last_error"):
+            issues.append({"kind": "logs", "title": self._t("ui.issue.logs.title"), "detail": str(bridge_state.get("last_error") or "").strip()})
+        if snapshot.codex_processes and not (snapshot.hub_running or snapshot.bridge_running):
+            issues.append({"kind": "processes", "title": self._t("ui.issue.residual.title"), "detail": self._t("ui.issue.residual.detail")})
+
+        if not issues:
+            self.issue_summary_label.setText(self._t("ui.issue.none.summary"))
+            self.issue_text.setPlainText(self._t("ui.issue.none.detail"))
+        else:
+            self.issue_summary_label.setText(self._t("ui.issue.summary.count", count=len(issues)))
+            self.issue_text.setPlainText("\n\n".join(f"[{issue['title']}]\n{issue['detail']}" for issue in issues))
+
+        issue_kinds = {issue["kind"] for issue in issues}
+        self.issue_repair_button.setVisible("dependencies" in issue_kinds)
+        self.issue_login_button.setVisible("login" in issue_kinds)
+        self.issue_cleanup_button.setVisible("processes" in issue_kinds)
+        self.issue_open_dir_button.setVisible(True)
+
+    def _render_agent_detail(self, hub_state: dict) -> None:
+        session_name = self._selected_agent_id()
+        if not session_name:
+            self._reset_agent_session_list()
+            self.agent_detail_text.setPlainText(self._t("ui.agent.select_session"))
+            self.agent_conversation_text.setPlainText(self._t("ui.agent.select_preview"))
+            return
+
+        self.agent_session_list.blockSignals(True)
+        self.agent_session_list.clear()
+        self.agent_session_list.blockSignals(False)
+
+        all_tasks = hub_state.get("tasks", [])
+        tasks = [task for task in all_tasks if self._normalize_task_session_name(task) == session_name][:8]
+        tasks = sorted(tasks, key=lambda item: str(item.get("created_at") or ""), reverse=True)
+
+        session_dir = APP_DIR / ".runtime" / "sessions"
+        selected_session_file = self._session_file_for_name(session_dir, session_name)
+        selected_session_id = selected_session_file.read_text(encoding="utf-8").strip() if selected_session_file.exists() else ""
+
+        queue_size = sum(1 for task in tasks if task.get("status") in {"queued", "running"})
+        success_count = sum(1 for task in all_tasks if self._normalize_task_session_name(task) == session_name and task.get("status") == "succeeded")
+        failure_count = sum(1 for task in all_tasks if self._normalize_task_session_name(task) == session_name and task.get("status") == "failed")
+        if queue_size:
+            status = "running" if any(task.get("status") == "running" for task in tasks) else "queued"
+        elif tasks:
+            status = str(tasks[0].get("status") or "idle")
+        else:
+            status = "idle"
+
+        detail_lines = [
+            self._t("ui.agent.detail.session", value=session_name),
+            self._t("ui.agent.detail.status", value=self._task_status_text(status)),
+            self._t("ui.agent.detail.queue", value=queue_size),
+            self._t("ui.agent.detail.result", success=success_count, failure=failure_count),
+            self._t("ui.agent.detail.file", value=selected_session_file),
+            self._t("ui.agent.detail.id", value=selected_session_id or "(empty)"),
+        ]
+
+        if tasks:
+            detail_lines.extend(["", self._t("ui.agent.detail.recent")])
+            for task in tasks:
+                detail_lines.append(f"[{self._task_status_text(str(task.get('status') or 'idle'))}] {task.get('created_at')}  session={self._normalize_task_session_name(task)}  source={task.get('source') or '-'}")
+                detail_lines.append(str(task.get("prompt") or ""))
+                if task.get("output"):
+                    detail_lines.append(f"output: {str(task.get('output'))[:240]}")
+                if task.get("error"):
+                    detail_lines.append(f"error: {str(task.get('error'))[:240]}")
+                detail_lines.append("")
+
+            conversation_lines = [self._t("ui.agent.preview.title")]
+            for index, task in enumerate(reversed(tasks[-6:]), start=1):
+                conversation_lines.append(self._t("ui.agent.preview.round", index=index, time=task.get("created_at")))
+                conversation_lines.append(self._t("ui.agent.preview.user", text=str(task.get("prompt") or "(empty)")[:320]))
+                if task.get("output"):
+                    conversation_lines.append(self._t("ui.agent.preview.assistant", text=str(task.get("output") or "")[:320]))
+                elif task.get("error"):
+                    conversation_lines.append(self._t("ui.agent.preview.error", text=str(task.get("error") or "")[:320]))
+                else:
+                    conversation_lines.append(self._t("ui.agent.preview.no_output"))
+                conversation_lines.append("")
+        else:
+            conversation_lines = [self._t("ui.agent.preview.title"), self._t("ui.agent.preview.none")]
+
+        self.agent_detail_text.setPlainText("\n".join(detail_lines).strip())
+        self.agent_conversation_text.setPlainText("\n".join(conversation_lines).strip())
+
+    def toggle_auto_refresh(self) -> None:
+        self._auto_refresh_enabled = self.auto_refresh_button.isChecked()
+        self.auto_refresh_button.setText(self._t("ui.auto_refresh.on") if self._auto_refresh_enabled else self._t("ui.auto_refresh.off"))
+        if self._auto_refresh_enabled:
+            self.refresh_runtime()
+            self.refresh_diagnostics()
+
+    def _reset_agent_session_list(self) -> None:
+        self.agent_session_list.blockSignals(True)
+        self.agent_session_list.clear()
+        default_item = QListWidgetItem(self._t("ui.agent.all_sessions"))
+        default_item.setData(Qt.UserRole, "__all__")
+        self.agent_session_list.addItem(default_item)
+        self.agent_session_list.setCurrentRow(0)
+        self.agent_session_list.blockSignals(False)
+
+    def _maybe_prompt_auto_repair(self) -> None:
+        if self._auto_repair_prompted:
+            return
+        if self.primary_action != "repair":
+            return
+        self._auto_repair_prompted = True
+        should_run = QMessageBox.question(self, self._t("ui.confirm.auto_repair.title"), self._t("ui.confirm.auto_repair.body"))
+        if should_run == QMessageBox.Yes:
+            self.repair_environment()
+
+    def _step_line(self, title: str, done: bool) -> str:
+        return self._t("ui.step.done", title=title) if done else self._t("ui.step.pending", title=title)
 
     @staticmethod
     def _pid_text(pid: int | None) -> str:
