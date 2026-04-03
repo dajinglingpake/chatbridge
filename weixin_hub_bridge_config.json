@@ -3,6 +3,7 @@
   "account_file": "accounts/wechat-bot.json",
   "sync_file": "accounts/wechat-bot.sync.json",
   "backend_id": "main",
+  "default_backend": "codex",
   "poll_timeout_ms": 35000,
   "hub_task_timeout_seconds": 600,
   "bridge_name": "weixin-bridge",

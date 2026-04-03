@@ -108,6 +108,7 @@ def collect_checks(project_dir: Path) -> list[CheckResult]:
         ("node", "Node.js", ["node", "--version"]),
         ("npm", "npm", ["npm.cmd", "--version"]),
         ("codex", "Codex CLI", ["codex.cmd", "--version"]),
+        ("opencode", "OpenCode CLI", ["opencode.cmd", "--version"]),
     ]:
         ok, detail = _run_capture(cmd)
         results.append(CheckResult(key=key, label=label, ok=ok, detail=detail or "not found"))
@@ -153,6 +154,7 @@ def suggested_install_commands() -> list[tuple[str, str]]:
         ("Install NVM for Windows", "winget install CoreyButler.NVMforWindows --accept-package-agreements --accept-source-agreements"),
         ("Install Node via NVM", build_nvm_node_command()),
         ("Install Codex CLI", "npm.cmd install -g codex"),
+        ("Install OpenCode CLI", "npm.cmd install -g opencode-ai"),
     ]
 
 
@@ -162,6 +164,7 @@ def suggested_upgrade_commands() -> list[tuple[str, str]]:
         ("Upgrade Desktop deps", "python -m pip install --upgrade PySide6 psutil"),
         ("Upgrade Node via NVM", build_nvm_node_command()),
         ("Upgrade Codex CLI", "npm.cmd install -g codex@latest"),
+        ("Upgrade OpenCode CLI", "npm.cmd install -g opencode-ai@latest"),
     ]
 
 

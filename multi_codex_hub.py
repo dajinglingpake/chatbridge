@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from codex_wechat_ipc import REQUEST_DIR, create_request, ensure_ipc_dirs, mark_processed, read_request, write_response
+from codex_wechat_ipc import REQUEST_DIR, ensure_ipc_dirs, mark_processed, read_request, write_response
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -24,6 +24,7 @@ WORKSPACE_DIR = APP_DIR / "workspace"
 CONFIG_PATH = APP_DIR / "multi_codex_hub_config.json"
 STATE_PATH = STATE_DIR / "multi_codex_hub_state.json"
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+SUPPORTED_BACKENDS = {"codex", "opencode"}
 
 
 def now_iso() -> str:
@@ -48,12 +49,20 @@ def _to_rel_path(value: str) -> str:
         return path.as_posix()
 
 
-def discover_codex_processes() -> list[dict[str, Any]]:
+def normalize_backend(value: str) -> str:
+    backend = (value or "codex").strip().lower()
+    return backend if backend in SUPPORTED_BACKENDS else "codex"
+
+
+def discover_agent_processes() -> list[dict[str, Any]]:
     if os.name != "nt":
         return []
     script = (
         "Get-CimInstance Win32_Process | "
-        "Where-Object { $_.CommandLine -and ( $_.CommandLine -like '*codex*' -or $_.Name -like 'codex*' ) } | "
+        "Where-Object { $_.CommandLine -and ( "
+        "$_.CommandLine -like '*codex*' -or $_.Name -like 'codex*' -or "
+        "$_.CommandLine -like '*opencode*' -or $_.Name -like 'opencode*' "
+        ") } | "
         "Select-Object ProcessId,Name,CommandLine | ConvertTo-Json -Compress"
     )
     completed = subprocess.run(
@@ -93,6 +102,7 @@ class AgentConfig:
     name: str
     workdir: str
     session_file: str
+    backend: str = "codex"
     model: str = ""
     prompt_prefix: str = ""
     enabled: bool = True
@@ -101,6 +111,7 @@ class AgentConfig:
 @dataclass
 class HubConfig:
     codex_command: str = "codex.cmd"
+    opencode_command: str = "opencode.cmd"
     agents: list[AgentConfig] = field(default_factory=list)
 
     @classmethod
@@ -124,8 +135,8 @@ class HubConfig:
             agent.name = (agent.name or "默认会话").strip()
             agent.workdir = _to_abs_path(agent.workdir, WORKSPACE_DIR)
             agent.session_file = _to_abs_path(agent.session_file, SESSION_DIR / f"{agent.id}.txt")
-            workdir = Path(agent.workdir)
-            workdir.mkdir(parents=True, exist_ok=True)
+            agent.backend = normalize_backend(agent.backend)
+            Path(agent.workdir).mkdir(parents=True, exist_ok=True)
         return cls(**raw)
 
     def save(self) -> None:
@@ -133,6 +144,7 @@ class HubConfig:
         for agent in data.get("agents", []):
             agent["workdir"] = _to_rel_path(str(agent.get("workdir") or WORKSPACE_DIR))
             agent["session_file"] = _to_rel_path(str(agent.get("session_file") or (SESSION_DIR / "main.txt")))
+            agent["backend"] = normalize_backend(str(agent.get("backend") or "codex"))
         CONFIG_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -163,6 +175,8 @@ class MultiCodexHub:
                 task["status"] = "unknown_after_restart"
                 task["error"] = "Hub restarted while this task was running."
                 task["finished_at"] = now_iso()
+            if not task.get("backend"):
+                task["backend"] = "codex"
             self.tasks.append(task)
         for agent in previous.get("agents", []):
             agent_id = agent.get("id")
@@ -215,6 +229,7 @@ class MultiCodexHub:
             agent.name = (payload.get("name") or agent.name).strip()
             agent.workdir = (payload.get("workdir") or agent.workdir).strip()
             agent.session_file = (payload.get("session_file") or agent.session_file).strip()
+            agent.backend = normalize_backend(str(payload.get("backend") or agent.backend))
             agent.model = (payload.get("model") or "").strip()
             agent.prompt_prefix = (payload.get("prompt_prefix") or "").strip()
             self._ensure_agent(agent)
@@ -222,7 +237,15 @@ class MultiCodexHub:
             self._save_state()
             return agent
 
-    def submit_task(self, agent_id: str, prompt: str, source: str = "desktop", sender_id: str = "", session_name: str = "") -> dict[str, Any]:
+    def submit_task(
+        self,
+        agent_id: str,
+        prompt: str,
+        source: str = "desktop",
+        sender_id: str = "",
+        session_name: str = "",
+        backend: str = "",
+    ) -> dict[str, Any]:
         prompt = (prompt or "").strip()
         if not prompt:
             raise ValueError("prompt is required")
@@ -233,6 +256,7 @@ class MultiCodexHub:
             "id": f"task-{uuid.uuid4().hex[:10]}",
             "agent_id": agent.id,
             "agent_name": agent.name,
+            "backend": normalize_backend(backend or agent.backend),
             "source": source,
             "sender_id": sender_id,
             "prompt": prompt,
@@ -258,7 +282,14 @@ class MultiCodexHub:
         agent_id = preferred or (enabled[0].id if enabled else "")
         if not agent_id:
             raise ValueError("no enabled agent configured")
-        return self.submit_task(agent_id, str(payload.get("text") or ""), source="wechat", sender_id=str(payload.get("sender_id") or ""))
+        return self.submit_task(
+            agent_id,
+            str(payload.get("text") or ""),
+            source="wechat",
+            sender_id=str(payload.get("sender_id") or ""),
+            session_name=str(payload.get("session_name") or ""),
+            backend=str(payload.get("backend") or ""),
+        )
 
     def _worker(self, agent_id: str) -> None:
         q = self.queues[agent_id]
@@ -281,7 +312,7 @@ class MultiCodexHub:
             self.runtimes[agent_id]["status"] = "running"
             self._save_state()
         try:
-            result = self._invoke_codex(agent, task["prompt"], task.get("session_name", ""))
+            result = self._invoke_backend(agent, task["prompt"], task.get("session_name", ""), task.get("backend", "codex"))
             with self.lock:
                 task["status"] = "succeeded"
                 task["finished_at"] = now_iso()
@@ -301,6 +332,11 @@ class MultiCodexHub:
                 self.runtimes[agent_id]["failure_count"] += 1
                 self.runtimes[agent_id]["last_error"] = str(exc)
                 self._save_state()
+
+    def _invoke_backend(self, agent: AgentConfig, prompt: str, session_name: str = "", backend: str = "") -> dict[str, str]:
+        if normalize_backend(backend or agent.backend) == "opencode":
+            return self._invoke_opencode(agent, prompt, session_name)
+        return self._invoke_codex(agent, prompt, session_name)
 
     def _invoke_codex(self, agent: AgentConfig, prompt: str, session_name: str = "") -> dict[str, str]:
         workdir = Path(agent.workdir)
@@ -355,6 +391,162 @@ class MultiCodexHub:
             session_file.write_text(session_id, encoding="utf-8")
         return {"output": output, "session_id": session_id}
 
+    def _invoke_opencode(self, agent: AgentConfig, prompt: str, session_name: str = "") -> dict[str, str]:
+        workdir = Path(agent.workdir)
+        workdir.mkdir(parents=True, exist_ok=True)
+        session_file = self._resolve_session_file(agent, session_name)
+        session_file.parent.mkdir(parents=True, exist_ok=True)
+        existing_session = session_file.read_text(encoding="utf-8").strip() if session_file.exists() else ""
+        final_prompt = prompt if not agent.prompt_prefix else f"{agent.prompt_prefix}\n\n{prompt}"
+
+        argv = [self.config.opencode_command, "run", "--format", "json"]
+        if agent.model:
+            argv.extend(["--model", agent.model])
+        if existing_session:
+            argv.extend(["--session", existing_session])
+        argv.append(final_prompt)
+
+        completed = subprocess.run(
+            argv,
+            cwd=str(workdir),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+            check=False,
+            shell=False,
+        )
+
+        output, session_id, error_message = self._parse_opencode_stdout(completed.stdout)
+        if not session_id:
+            session_id = existing_session or self._find_latest_opencode_session(workdir)
+        if completed.returncode != 0:
+            raise RuntimeError(error_message or completed.stderr.strip() or f"OpenCode exited with code {completed.returncode}")
+        if not output:
+            output = completed.stdout.strip()
+        if not output:
+            raise RuntimeError("OpenCode returned an empty result")
+        if session_id:
+            session_file.write_text(session_id, encoding="utf-8")
+        return {"output": output, "session_id": session_id}
+
+    def _parse_opencode_stdout(self, stdout: str) -> tuple[str, str, str]:
+        fragments: list[str] = []
+        session_id = ""
+        error_message = ""
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            session_id = session_id or self._extract_session_id(payload)
+            error_message = error_message or self._extract_error_text(payload)
+            fragments.extend(self._collect_text_fragments(payload))
+        unique_fragments: list[str] = []
+        for fragment in fragments:
+            text = fragment.strip()
+            if text and text not in unique_fragments:
+                unique_fragments.append(text)
+        return "\n".join(unique_fragments).strip(), session_id, error_message
+
+    def _collect_text_fragments(self, value: Any) -> list[str]:
+        if isinstance(value, list):
+            fragments: list[str] = []
+            for item in value:
+                fragments.extend(self._collect_text_fragments(item))
+            return fragments
+        if not isinstance(value, dict):
+            return []
+
+        fragments: list[str] = []
+        text_keys = {"text", "message", "content", "output", "response"}
+        role = str(value.get("role") or "").lower()
+        event_type = str(value.get("type") or value.get("event") or "").lower()
+        for key, item in value.items():
+            if isinstance(item, str) and key in text_keys:
+                if role in {"assistant", ""} or "assistant" in event_type or "message" in event_type or "response" in event_type:
+                    fragments.append(item)
+                continue
+            if isinstance(item, (dict, list)):
+                fragments.extend(self._collect_text_fragments(item))
+        return fragments
+
+    @staticmethod
+    def _extract_session_id(value: Any) -> str:
+        if isinstance(value, dict):
+            for key in ("session_id", "sessionId", "thread_id", "threadId"):
+                raw = value.get(key)
+                if isinstance(raw, str) and raw.strip():
+                    return raw.strip()
+            session = value.get("session")
+            if isinstance(session, dict):
+                for key in ("id", "session_id", "sessionId"):
+                    raw = session.get(key)
+                    if isinstance(raw, str) and raw.strip():
+                        return raw.strip()
+            for item in value.values():
+                found = MultiCodexHub._extract_session_id(item)
+                if found:
+                    return found
+        if isinstance(value, list):
+            for item in value:
+                found = MultiCodexHub._extract_session_id(item)
+                if found:
+                    return found
+        return ""
+
+    @staticmethod
+    def _extract_error_text(value: Any) -> str:
+        if isinstance(value, dict):
+            event_type = str(value.get("type") or value.get("event") or "").lower()
+            if "error" in event_type:
+                for key in ("message", "error", "content"):
+                    raw = value.get(key)
+                    if isinstance(raw, str) and raw.strip():
+                        return raw.strip()
+            for item in value.values():
+                nested = MultiCodexHub._extract_error_text(item)
+                if nested:
+                    return nested
+        if isinstance(value, list):
+            for item in value:
+                nested = MultiCodexHub._extract_error_text(item)
+                if nested:
+                    return nested
+        return ""
+
+    def _find_latest_opencode_session(self, workdir: Path) -> str:
+        completed = subprocess.run(
+            [self.config.opencode_command, "session", "list", "-n", "1", "--format", "json"],
+            cwd=str(workdir),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+            check=False,
+            shell=False,
+        )
+        if completed.returncode != 0 or not completed.stdout.strip():
+            return ""
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            return ""
+        items = payload if isinstance(payload, list) else [payload]
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            for key in ("id", "session_id", "sessionId"):
+                raw = item.get(key)
+                if isinstance(raw, str) and raw.strip():
+                    return raw.strip()
+        return ""
+
     def _resolve_session_file(self, agent: AgentConfig, session_name: str) -> Path:
         raw_name = (session_name or "").strip()
         if not raw_name:
@@ -369,10 +561,13 @@ class MultiCodexHub:
             json.dumps(
                 {
                     "generated_at": now_iso(),
-                    "config": {"codex_command": self.config.codex_command},
+                    "config": {
+                        "codex_command": self.config.codex_command,
+                        "opencode_command": self.config.opencode_command,
+                    },
                     "agents": self.list_agents(),
                     "tasks": self.list_tasks(),
-                    "external_codex_processes": discover_codex_processes(),
+                    "external_agent_processes": discover_agent_processes(),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -406,6 +601,7 @@ class MultiCodexHub:
                     str(payload.get("source") or "desktop"),
                     str(payload.get("sender_id") or ""),
                     str(payload.get("session_name") or ""),
+                    str(payload.get("backend") or ""),
                 ),
             }
         if action == "get_task":
@@ -421,10 +617,13 @@ class MultiCodexHub:
             return {
                 "ok": True,
                 "generated_at": now_iso(),
-                "config": {"codex_command": self.config.codex_command},
+                "config": {
+                    "codex_command": self.config.codex_command,
+                    "opencode_command": self.config.opencode_command,
+                },
                 "agents": self.list_agents(),
                 "tasks": self.list_tasks(),
-                "external_codex_processes": discover_codex_processes(),
+                "external_agent_processes": discover_agent_processes(),
             }
         raise ValueError(f"unsupported action: {action}")
 

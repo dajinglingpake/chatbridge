@@ -70,6 +70,7 @@ On first run, the app will automatically:
   - `nvm for Windows`
   - `Node.js 24.14.1`
   - `Codex CLI`
+  - `OpenCode CLI`
 
 After that, the desktop app will tell the user what the next step is.
 
@@ -79,6 +80,7 @@ The project still depends on these external tools:
 
 - Node.js / npm
 - Codex CLI
+- OpenCode CLI
 
 The preferred installation path is:
 

@@ -1,11 +1,13 @@
 {
   "codex_command": "codex.cmd",
+  "opencode_command": "opencode.cmd",
   "agents": [
     {
       "id": "main",
       "name": "默认会话",
       "workdir": "workspace",
       "session_file": ".runtime/sessions/main.txt",
+      "backend": "codex",
       "model": "",
       "prompt_prefix": "",
       "enabled": true

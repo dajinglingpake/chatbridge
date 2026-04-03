@@ -203,18 +203,19 @@ def emergency_stop() -> list[str]:
         for proc in psutil.process_iter(["pid", "name", "cmdline"]):
             cmdline = " ".join(proc.info.get("cmdline") or [])
             name = (proc.info.get("name") or "").lower()
-            if "codex" in cmdline.lower() or name.startswith("codex"):
+            lowered = cmdline.lower()
+            if "codex" in lowered or "opencode" in lowered or name.startswith("codex") or name.startswith("opencode"):
                 targets.append(proc.info["pid"])
         for pid in sorted(set(targets)):
             _taskkill(pid)
         if targets:
-            messages.append(f"Codex child processes killed: {len(set(targets))}")
+            messages.append(f"Agent child processes killed: {len(set(targets))}")
     return messages
 
 
 def list_codex_processes() -> list[str]:
     if psutil is None:
-        return ["psutil missing; Codex process discovery is unavailable"]
+        return ["psutil missing; agent process discovery is unavailable"]
 
     rendered: list[str] = []
     current_pid = os.getpid()
@@ -224,7 +225,8 @@ def list_codex_processes() -> list[str]:
             continue
         cmdline = " ".join(proc.info.get("cmdline") or [])
         name = (proc.info.get("name") or "").lower()
-        if "codex" not in cmdline.lower() and not name.startswith("codex"):
+        lowered = cmdline.lower()
+        if "codex" not in lowered and "opencode" not in lowered and not name.startswith("codex") and not name.startswith("opencode"):
             continue
         rendered.append(f"PID {pid} :: {cmdline or name}")
     return sorted(rendered)

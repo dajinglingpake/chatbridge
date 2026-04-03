@@ -3,8 +3,8 @@
 ChatBridge is a desktop control app for:
 
 - WeChat transport
-- multiple Codex conversations
-- lifecycle control for Hub / Bridge / Codex child processes
+- multiple AI conversations
+- lifecycle control for Hub / Bridge / Codex / OpenCode child processes
 
 ## Repository Status
 
@@ -88,6 +88,7 @@ On startup, the desktop app will:
   - `nvm for Windows`
   - `Node.js 24.14.1`
   - `Codex CLI`
+  - `OpenCode CLI`
 
 ## User Expectation
 
@@ -150,7 +151,7 @@ The repo already ignores:
 - `main.py`: desktop UI entry
 - `codex_wechat_runtime.py`: Python runtime and process control
 - `codex_wechat_bootstrap.py`: environment checks and install helpers
-- `multi_codex_hub.py`: conversation backend
+- `multi_codex_hub.py`: conversation backend with `codex` / `opencode` support
 - `weixin_hub_bridge.py`: WeChat bridge
 - `start-codex-wechat-desktop.cmd`: desktop launcher
 
@@ -161,6 +162,20 @@ The repo already ignores:
 - The desktop app is responsible for showing the current state and the next recommended step
 - The preferred Node path is `nvm for Windows` with `Node.js 24.14.1`
 - Hub and bridge communicate through local runtime IPC
+
+## WeChat Commands
+
+The bridge supports per-session backend switching:
+
+- `/help`
+- `/status`
+- `/new <name>`
+- `/list`
+- `/use <name>`
+- `/backend`
+- `/backend <codex|opencode>`
+- `/close`
+- `/reset`
 
 ## Suggested First Commit Flow
 

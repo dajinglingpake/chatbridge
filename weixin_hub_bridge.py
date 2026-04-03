@@ -26,6 +26,7 @@ CONVERSATION_PATH = STATE_DIR / "weixin_conversations.json"
 DEFAULT_WEIXIN_BASE_URL = "https://ilinkai.weixin.qq.com"
 ILINK_APP_ID = "bot"
 ILINK_APP_CLIENT_VERSION = (2 << 16) | (1 << 8) | 1
+SUPPORTED_BACKENDS = {"codex", "opencode"}
 
 
 def now_iso() -> str:
@@ -50,12 +51,18 @@ def _to_rel_path(value: str) -> str:
         return path.as_posix()
 
 
+def normalize_backend(value: str) -> str:
+    backend = (value or "codex").strip().lower()
+    return backend if backend in SUPPORTED_BACKENDS else "codex"
+
+
 @dataclass
 class BridgeConfig:
     account_id: str = "wechat-bot"
     account_file: str = "accounts/wechat-bot.json"
     sync_file: str = "accounts/wechat-bot.sync.json"
     backend_id: str = "main"
+    default_backend: str = "codex"
     poll_timeout_ms: int = 35000
     hub_task_timeout_seconds: int = 600
     bridge_name: str = "weixin-bridge"
@@ -73,12 +80,14 @@ class BridgeConfig:
             raw["backend_id"] = raw.pop("default_agent_id")
         raw["account_file"] = _to_abs_path(str(raw.get("account_file") or "accounts/wechat-bot.json"), WEIXIN_ACCOUNTS_DIR / "wechat-bot.json")
         raw["sync_file"] = _to_abs_path(str(raw.get("sync_file") or "accounts/wechat-bot.sync.json"), WEIXIN_ACCOUNTS_DIR / "wechat-bot.sync.json")
+        raw["default_backend"] = normalize_backend(str(raw.get("default_backend") or "codex"))
         return cls(**raw)
 
     def save(self) -> None:
         data = asdict(self)
         data["account_file"] = _to_rel_path(str(data.get("account_file") or (WEIXIN_ACCOUNTS_DIR / "wechat-bot.json")))
         data["sync_file"] = _to_rel_path(str(data.get("sync_file") or (WEIXIN_ACCOUNTS_DIR / "wechat-bot.sync.json")))
+        data["default_backend"] = normalize_backend(str(data.get("default_backend") or "codex"))
         CONFIG_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -168,7 +177,7 @@ class WeixinBridge:
 
         binding = self._ensure_conversation(sender_id)
         session_name = str(binding.get("current_session") or "default")
-        session_meta = (binding.get("sessions") or {}).get(session_name) or {}
+        session_meta = (binding.get("sessions") or {}).get(session_name) or self._new_session_meta()
         prompt = text.strip()
         if not prompt:
             return
@@ -184,6 +193,7 @@ class WeixinBridge:
                 "source": "wechat",
                 "sender_id": sender_id,
                 "session_name": session_name,
+                "backend": normalize_backend(str(session_meta.get("backend") or self.config.default_backend)),
             },
             timeout_seconds=15,
         )
@@ -199,8 +209,9 @@ class WeixinBridge:
             self._send_text(base_url, token, sender_id, msg.get("context_token"), reply)
             self.state["handled_messages"] += 1
         else:
+            backend_name = str(result.get("backend") or session_meta.get("backend") or self.config.default_backend).strip()
             error_text = str(result.get("error") or "task failed").strip()
-            self._send_text(base_url, token, sender_id, msg.get("context_token"), f"Codex task failed:\n{error_text}")
+            self._send_text(base_url, token, sender_id, msg.get("context_token"), f"{backend_name} task failed:\n{error_text}")
             self.state["failed_messages"] += 1
 
     def _wait_for_task(self, task_id: str) -> dict[str, Any]:
@@ -275,7 +286,7 @@ class WeixinBridge:
         binding = self._ensure_conversation(sender_id)
         current_session = str(binding.get("current_session") or "default")
         sessions = binding.setdefault("sessions", {})
-        sessions.setdefault(current_session, self._new_session_meta())
+        current_meta = sessions.setdefault(current_session, self._new_session_meta())
 
         parts = raw.split(maxsplit=2)
         command = parts[0].lower()
@@ -288,6 +299,8 @@ class WeixinBridge:
                 "/new <name> 新建会话并切换",
                 "/list 列出所有会话",
                 "/use <name> 切换到指定会话",
+                "/backend 查看当前后端",
+                "/backend <codex|opencode> 切换当前会话后端",
                 "/close 结束当前会话",
                 "/reset 重置回默认会话",
                 "",
@@ -299,16 +312,17 @@ class WeixinBridge:
         if command == "/new":
             requested = parts[1].strip() if len(parts) >= 2 else ""
             session_name = self._allocate_session_name(binding, requested or "session")
-            sessions[session_name] = self._new_session_meta()
+            sessions[session_name] = self._new_session_meta(current_meta.get("backend"))
             binding["current_session"] = session_name
             self._save_conversations()
-            return f"已创建并切换到会话: {session_name}", True
+            return f"已创建并切换到会话: {session_name}\n当前后端: {sessions[session_name]['backend']}", True
 
         if command == "/list":
             lines = ["会话列表:"]
             for name in sorted(sessions):
                 marker = "*" if name == binding.get("current_session") else "-"
-                lines.append(f"{marker} {name}")
+                backend = normalize_backend(str((sessions.get(name) or {}).get("backend") or self.config.default_backend))
+                lines.append(f"{marker} {name} [{backend}]")
             return "\n".join(lines), True
 
         if command == "/use":
@@ -319,7 +333,21 @@ class WeixinBridge:
                 return f"未找到会话: {session_name}", True
             binding["current_session"] = session_name
             self._save_conversations()
-            return f"已切换到会话: {session_name}", True
+            backend = normalize_backend(str((sessions.get(session_name) or {}).get("backend") or self.config.default_backend))
+            return f"已切换到会话: {session_name}\n当前后端: {backend}", True
+
+        if command == "/backend":
+            if len(parts) < 2:
+                backend = normalize_backend(str(current_meta.get("backend") or self.config.default_backend))
+                return f"当前会话: {current_session}\n当前后端: {backend}", True
+            requested_backend = parts[1].strip().lower()
+            if requested_backend not in SUPPORTED_BACKENDS:
+                return "用法: /backend <codex|opencode>", True
+            current_meta["backend"] = requested_backend
+            current_meta["updated_at"] = now_iso()
+            sessions[current_session] = current_meta
+            self._save_conversations()
+            return f"已切换当前会话后端: {requested_backend}\n会话: {current_session}", True
 
         if command in {"/close", "/end"}:
             if current_session == "default":
@@ -331,8 +359,10 @@ class WeixinBridge:
             return f"已结束会话: {current_session}\n已切回默认会话: default", True
 
         if command == "/status":
+            backend = normalize_backend(str(current_meta.get("backend") or self.config.default_backend))
             return (
                 f"当前会话: {binding.get('current_session')}\n"
+                f"当前后端: {backend}\n"
                 f"会话数量: {len(sessions)}"
             ), True
 
@@ -340,7 +370,9 @@ class WeixinBridge:
             self.conversations.pop(sender_id, None)
             self._save_conversations()
             reset = self._ensure_conversation(sender_id)
-            return f"已重置到默认会话: {reset.get('current_session')}", True
+            reset_meta = (reset.get("sessions") or {}).get(str(reset.get("current_session") or "default")) or {}
+            backend = normalize_backend(str(reset_meta.get("backend") or self.config.default_backend))
+            return f"已重置到默认会话: {reset.get('current_session')}\n当前后端: {backend}", True
 
         return "未知命令。发送 /help 查看当前支持的命令。", True
 
@@ -362,6 +394,9 @@ class WeixinBridge:
             for meta in (existing.get("sessions") or {}).values():
                 if isinstance(meta, dict):
                     meta.pop("agent_id", None)
+                    meta["backend"] = normalize_backend(str(meta.get("backend") or self.config.default_backend))
+                    meta.setdefault("created_at", now_iso())
+                    meta.setdefault("updated_at", now_iso())
             if existing["current_session"] not in existing["sessions"]:
                 existing["sessions"][existing["current_session"]] = self._new_session_meta()
             return existing
@@ -374,8 +409,9 @@ class WeixinBridge:
         self._save_conversations()
         return created
 
-    def _new_session_meta(self) -> dict[str, Any]:
+    def _new_session_meta(self, backend: Any = "") -> dict[str, Any]:
         return {
+            "backend": normalize_backend(str(backend or self.config.default_backend)),
             "created_at": now_iso(),
             "updated_at": now_iso(),
         }
