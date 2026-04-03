@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from codex_wechat_ipc import create_request, wait_for_response
+from localization import Localizer
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -63,6 +64,7 @@ class BridgeConfig:
     sync_file: str = "accounts/wechat-bot.sync.json"
     backend_id: str = "main"
     default_backend: str = "codex"
+    language: str = "auto"
     poll_timeout_ms: int = 35000
     hub_task_timeout_seconds: int = 600
     bridge_name: str = "weixin-bridge"
@@ -81,6 +83,7 @@ class BridgeConfig:
         raw["account_file"] = _to_abs_path(str(raw.get("account_file") or "accounts/wechat-bot.json"), WEIXIN_ACCOUNTS_DIR / "wechat-bot.json")
         raw["sync_file"] = _to_abs_path(str(raw.get("sync_file") or "accounts/wechat-bot.sync.json"), WEIXIN_ACCOUNTS_DIR / "wechat-bot.sync.json")
         raw["default_backend"] = normalize_backend(str(raw.get("default_backend") or "codex"))
+        raw["language"] = str(raw.get("language") or "auto")
         return cls(**raw)
 
     def save(self) -> None:
@@ -88,12 +91,14 @@ class BridgeConfig:
         data["account_file"] = _to_rel_path(str(data.get("account_file") or (WEIXIN_ACCOUNTS_DIR / "wechat-bot.json")))
         data["sync_file"] = _to_rel_path(str(data.get("sync_file") or (WEIXIN_ACCOUNTS_DIR / "wechat-bot.sync.json")))
         data["default_backend"] = normalize_backend(str(data.get("default_backend") or "codex"))
+        data["language"] = str(data.get("language") or "auto")
         CONFIG_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 class WeixinBridge:
     def __init__(self, config: BridgeConfig) -> None:
         self.config = config
+        self.localizer = Localizer(config.language)
         self.account_path = Path(config.account_file)
         self.sync_path = Path(config.sync_file)
         self._ensure_local_account_storage()
@@ -211,7 +216,13 @@ class WeixinBridge:
         else:
             backend_name = str(result.get("backend") or session_meta.get("backend") or self.config.default_backend).strip()
             error_text = str(result.get("error") or "task failed").strip()
-            self._send_text(base_url, token, sender_id, msg.get("context_token"), f"{backend_name} task failed:\n{error_text}")
+            self._send_text(
+                base_url,
+                token,
+                sender_id,
+                msg.get("context_token"),
+                self._t("bridge.task.failed", backend=backend_name, error=error_text),
+            )
             self.state["failed_messages"] += 1
 
     def _wait_for_task(self, task_id: str) -> dict[str, Any]:
@@ -293,19 +304,19 @@ class WeixinBridge:
 
         if command in {"/help", "/h", "/?"}:
             help_lines = [
-                "可用命令:",
-                "/help 查看帮助",
-                "/status 查看当前会话状态",
-                "/new <name> 新建会话并切换",
-                "/list 列出所有会话",
-                "/use <name> 切换到指定会话",
-                "/backend 查看当前后端",
-                "/backend <codex|opencode> 切换当前会话后端",
-                "/close 结束当前会话",
-                "/reset 重置回默认会话",
+                self._t("bridge.help.title"),
+                self._t("bridge.help.help"),
+                self._t("bridge.help.status"),
+                self._t("bridge.help.new"),
+                self._t("bridge.help.list"),
+                self._t("bridge.help.use"),
+                self._t("bridge.help.backend.current"),
+                self._t("bridge.help.backend.switch"),
+                self._t("bridge.help.close"),
+                self._t("bridge.help.reset"),
                 "",
-                "普通消息:",
-                "不带斜杠的消息会继续发送到当前会话。",
+                self._t("bridge.help.normal"),
+                self._t("bridge.help.normal.detail"),
             ]
             return "\n".join(help_lines), True
 
@@ -315,56 +326,52 @@ class WeixinBridge:
             sessions[session_name] = self._new_session_meta(current_meta.get("backend"))
             binding["current_session"] = session_name
             self._save_conversations()
-            return f"已创建并切换到会话: {session_name}\n当前后端: {sessions[session_name]['backend']}", True
+            return self._t("bridge.session.created", session=session_name, backend=sessions[session_name]["backend"]), True
 
         if command == "/list":
-            lines = ["会话列表:"]
+            lines = [self._t("bridge.session.list.title")]
             for name in sorted(sessions):
                 marker = "*" if name == binding.get("current_session") else "-"
                 backend = normalize_backend(str((sessions.get(name) or {}).get("backend") or self.config.default_backend))
-                lines.append(f"{marker} {name} [{backend}]")
+                lines.append(self._t("bridge.list.item", marker=marker, name=name, backend=backend))
             return "\n".join(lines), True
 
         if command == "/use":
             if len(parts) < 2:
-                return "用法: /use <session>", True
+                return self._t("bridge.use.usage"), True
             session_name = parts[1].strip()
             if session_name not in sessions:
-                return f"未找到会话: {session_name}", True
+                return self._t("bridge.session.not_found", session=session_name), True
             binding["current_session"] = session_name
             self._save_conversations()
             backend = normalize_backend(str((sessions.get(session_name) or {}).get("backend") or self.config.default_backend))
-            return f"已切换到会话: {session_name}\n当前后端: {backend}", True
+            return self._t("bridge.session.switched", session=session_name, backend=backend), True
 
         if command == "/backend":
             if len(parts) < 2:
                 backend = normalize_backend(str(current_meta.get("backend") or self.config.default_backend))
-                return f"当前会话: {current_session}\n当前后端: {backend}", True
+                return self._t("bridge.backend.current", session=current_session, backend=backend), True
             requested_backend = parts[1].strip().lower()
             if requested_backend not in SUPPORTED_BACKENDS:
-                return "用法: /backend <codex|opencode>", True
+                return self._t("bridge.backend.usage"), True
             current_meta["backend"] = requested_backend
             current_meta["updated_at"] = now_iso()
             sessions[current_session] = current_meta
             self._save_conversations()
-            return f"已切换当前会话后端: {requested_backend}\n会话: {current_session}", True
+            return self._t("bridge.backend.switched", backend=requested_backend, session=current_session), True
 
         if command in {"/close", "/end"}:
             if current_session == "default":
-                return "默认会话不能结束。可以发送 /new <name> 创建新会话，或 /reset 重置状态。", True
+                return self._t("bridge.session.default_close_blocked"), True
             sessions.pop(current_session, None)
             binding["current_session"] = "default"
             sessions.setdefault("default", self._new_session_meta())
             self._save_conversations()
-            return f"已结束会话: {current_session}\n已切回默认会话: default", True
+            return self._t("bridge.session.closed", session=current_session), True
 
         if command == "/status":
             backend = normalize_backend(str(current_meta.get("backend") or self.config.default_backend))
-            return (
-                f"当前会话: {binding.get('current_session')}\n"
-                f"当前后端: {backend}\n"
-                f"会话数量: {len(sessions)}"
-            ), True
+            return self._t("bridge.status", session=binding.get("current_session"), backend=backend, count=len(sessions)), True
 
         if command == "/reset":
             self.conversations.pop(sender_id, None)
@@ -372,9 +379,9 @@ class WeixinBridge:
             reset = self._ensure_conversation(sender_id)
             reset_meta = (reset.get("sessions") or {}).get(str(reset.get("current_session") or "default")) or {}
             backend = normalize_backend(str(reset_meta.get("backend") or self.config.default_backend))
-            return f"已重置到默认会话: {reset.get('current_session')}\n当前后端: {backend}", True
+            return self._t("bridge.session.reset", session=reset.get("current_session"), backend=backend), True
 
-        return "未知命令。发送 /help 查看当前支持的命令。", True
+        return self._t("bridge.command.unknown"), True
 
     @staticmethod
     def _normalize_command_text(text: str) -> str:
@@ -494,6 +501,9 @@ class WeixinBridge:
     def _save_conversations(self) -> None:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         CONVERSATION_PATH.write_text(json.dumps(self.conversations, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _t(self, key: str, **kwargs: Any) -> str:
+        return self.localizer.translate(key, **kwargs)
 
 
 def main() -> int:

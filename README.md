@@ -62,6 +62,14 @@ Install desktop dependencies before launch if you do not want the app to auto-in
 python -m pip install -r requirements.txt
 ```
 
+## Language
+
+The project now supports a file-based bilingual path for bridge responses.
+
+- Default behavior: auto-detect from the system locale
+- Override with env var: `CHATBRIDGE_LANG=zh-CN` or `CHATBRIDGE_LANG=en-US`
+- Bridge config also supports `"language": "auto" | "zh-CN" | "en-US"`
+
 ## First Run
 
 Preferred launcher:

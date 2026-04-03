@@ -3,6 +3,7 @@ setlocal
 set "ROOT=%~dp0..\\"
 python -m py_compile ^
   "%ROOT%codex_wechat_bootstrap.py" ^
+  "%ROOT%localization.py" ^
   "%ROOT%main.py" ^
   "%ROOT%codex_wechat_runtime.py" ^
   "%ROOT%multi_codex_hub.py" ^

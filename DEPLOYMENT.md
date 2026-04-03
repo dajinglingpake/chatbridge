@@ -120,6 +120,7 @@ Typical fields that may need adjustment on a new machine:
 - session file paths
 - WeChat account file path
 - WeChat sync file path
+- language selection (`auto`, `zh-CN`, `en-US`)
 
 ## 8. Runtime Output
 
