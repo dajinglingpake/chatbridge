@@ -1,5 +1,7 @@
 # ChatBridge Deployment
 
+[中文部署说明](DEPLOYMENT.zh-CN.md)
+
 This document describes the intended deployment model for ChatBridge on a new Windows machine.
 
 ## Deployment Policy

@@ -1,5 +1,7 @@
 # ChatBridge
 
+[中文说明](README.zh-CN.md)
+
 ChatBridge is a desktop control app for:
 
 - WeChat transport
