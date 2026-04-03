@@ -165,6 +165,7 @@
   "ui.account.qr_login.title": "Scan QR code to login",
   "ui.account.qr_login.getting": "Getting QR code...",
   "ui.account.qr_login.scan": "Please scan with WeChat",
+  "ui.account.qr_login.confirming": "Scanned, please confirm in WeChat...",
   "ui.account.qr_login.hint": "Open WeChat → Settings → ClawBot → Scan the QR code",
   "ui.account.qr_login.success": "Login successful!",
   "ui.account.qr_login.saving": "Saving account...",

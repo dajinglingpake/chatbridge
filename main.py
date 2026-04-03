@@ -10,6 +10,15 @@ from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parent
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+LOG_FILE = APP_DIR / ".runtime" / "logs" / "qr_login.log"
+
+def _qr_log(msg: str) -> None:
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"{datetime.now().strftime('%H:%M:%S')} {msg}\n")
+    except Exception:
+        pass
 
 
 def running_under_debugger() -> bool:
@@ -70,6 +79,7 @@ except ImportError as exc:
 import base64
 import io
 import json
+import logging
 import urllib.parse
 import urllib.request
 
@@ -1179,92 +1189,167 @@ class MainWindow(QMainWindow):
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
 
-        qr_code: str = ""
         login_finished = False
+        qr_code = ""
 
-        def fetch_qrcode() -> None:
+        def update_status(text: str) -> None:
+            status_label.setText(text)
+
+        def update_hint(text: str) -> None:
+            hint_label.setText(text)
+
+        def update_qr_and_status(pixmap: QPixmap, status_text: str) -> None:
+            _qr_log(f"update_qr_and_status called: pixmap size={pixmap.width()}x{pixmap.height()}")
+            qr_label.setPixmap(pixmap)
+            status_label.setText(status_text)
+            _qr_log("update_qr_and_status done")
+
+        def do_update() -> None:
             nonlocal qr_code
+            base_url = self._ilink_base_url()
+            _qr_log(f"fetching QR from {base_url}")
+
+            headers = {
+                "AuthorizationType": "ilink_bot_token",
+                "iLink-App-Id": "bot",
+                "iLink-App-ClientVersion": "131073",
+            }
+
             try:
-                url = f"{self._ilink_base_url()}/ilink/bot/get_bot_qrcode?bot_type=3"
-                headers = {
-                    "AuthorizationType": "ilink_bot_token",
-                    "iLink-App-Id": "bot",
-                    "iLink-App-ClientVersion": "131073",
-                }
-                req = urllib.request.Request(url=url, headers=headers)
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
+                url = f"{base_url}/ilink/bot/get_bot_qrcode?bot_type=3"
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    raw_data = resp.read().decode("utf-8")
+                    data = json.loads(raw_data)
                     qr_code = data.get("qrcode", "")
-                    if qr_code:
-                        pixmap = self._generate_qr_pixmap(qr_code)
-                        qr_label.setPixmap(pixmap)
-                        status_label.setText(self._t("ui.account.qr_login.scan"))
-                        QTimer.singleShot(100, lambda: poll_status())
-                    else:
+                    qr_url = data.get("qrcode_img_content", "")
+                    _qr_log(f"qrcode={qr_code}, qr_url={qr_url}")
+
+                    if not qr_code or not qr_url:
                         status_label.setText(self._t("ui.account.qr_login.error"))
+                        return
+
+                    pixmap = self._generate_qr_pixmap(qr_url)
+                    _qr_log(f"Pixmap generated: {pixmap.width()}x{pixmap.height()}")
+                    qr_label.setPixmap(pixmap)
+                    status_label.setText(self._t("ui.account.qr_login.scan"))
+                    _qr_log("UI updated, starting poll...")
+
+                    import time
+                    scanned = False
+                    qr_refresh_count = 0
+                    max_refresh = 3
+                    login_finished = False
+
+                    while not login_finished:
+                        qr_refresh_count += 1
+                        if qr_refresh_count > max_refresh:
+                            _qr_log("QR expired too many times, giving up")
+                            status_label.setText(self._t("ui.account.qr_login.expired"))
+                            hint_label.setText(self._t("ui.account.qr_login.retry"))
+                            return
+
+                        try:
+                            poll_url = f"{base_url}/ilink/bot/get_qrcode_status?qrcode={urllib.parse.quote(qr_code)}"
+                            poll_req = urllib.request.Request(poll_url, headers=headers)
+                            _qr_log(f"polling status for qrcode={qr_code[:8]}...")
+                            with urllib.request.urlopen(poll_req, timeout=60) as poll_resp:
+                                raw = poll_resp.read().decode("utf-8")
+                                poll_data = json.loads(raw)
+                                status = poll_data.get("status", "")
+                                _qr_log(f"poll response: status={status}")
+
+                                if status == "confirmed":
+                                    login_finished = True
+                                    status_label.setText(self._t("ui.account.qr_login.success"))
+                                    hint_label.setText(self._t("ui.account.qr_login.saving"))
+                                    _qr_log("Status confirmed, saving account...")
+                                    self._save_account_from_qr(poll_data)
+                                    _qr_log("Account saved, closing dialog...")
+                                    from PySide6.QtCore import QMetaObject
+                                    QMetaObject.invokeMethod(dialog, "accept", Qt.QueuedConnection)
+                                    _qr_log("Dialog close requested")
+                                    return
+                                elif status == "scaned":
+                                    if not scanned:
+                                        scanned = True
+                                        hint_label.setText(self._t("ui.account.qr_login.confirming"))
+                                elif status == "expired":
+                                    _qr_log(f"QR expired, refreshing ({qr_refresh_count}/{max_refresh})")
+                                    try:
+                                        refresh_url = f"{base_url}/ilink/bot/get_bot_qrcode?bot_type=3"
+                                        refresh_req = urllib.request.Request(refresh_url, headers=headers)
+                                        with urllib.request.urlopen(refresh_req, timeout=10) as refresh_resp:
+                                            refresh_data = json.loads(refresh_resp.read().decode("utf-8"))
+                                            new_qr_code = refresh_data.get("qrcode", "")
+                                            new_qr_url = refresh_data.get("qrcode_img_content", "")
+                                            if new_qr_code and new_qr_url:
+                                                new_pixmap = self._generate_qr_pixmap(new_qr_url)
+                                                qr_label.setPixmap(new_pixmap)
+                                                status_label.setText(self._t("ui.account.qr_login.scan"))
+                                                scanned = False
+                                                qr_code = new_qr_code
+                                    except Exception as e:
+                                        _qr_log(f"refresh failed: {e}")
+                                    continue
+                                elif status == "scaned_but_redirect":
+                                    redirect_host = poll_data.get("redirect_host", "")
+                                    if redirect_host:
+                                        base_url = f"https://{redirect_host}"
+                                        _qr_log(f"IDC redirect to {base_url}")
+
+                        except urllib.error.HTTPError as e:
+                            _qr_log(f"HTTPError: {e.code}")
+                        except Exception as exc:
+                            _qr_log(f"poll error: {exc}")
+
+                        time.sleep(1)
+
             except Exception as exc:
+                _qr_log(f"fetch error: {exc}")
                 status_label.setText(self._t("ui.account.qr_login.error_detail", error=str(exc)))
 
-        def poll_status() -> None:
-            nonlocal login_finished
-            if login_finished or not qr_code:
+        threading.Thread(target=do_update, daemon=True).start()
+        dialog.exec()
+
+    def _save_account_from_qr(self, data: dict) -> None:
+        try:
+            _qr_log(f"save_account called with: {json.dumps(data, ensure_ascii=False)[:500]}")
+            account_id = data.get("ilink_bot_id", f"wechat-{datetime.now().strftime('%Y%m%d%H%M%S')}")
+            base_url = data.get("baseurl", self._ilink_base_url())
+            bot_token = data.get("bot_token", "")
+
+            _qr_log(f"account_id={account_id} base_url={base_url} bot_token={'present' if bot_token else 'missing'}")
+
+            if not bot_token:
                 return
-            try:
-                url = f"{self._ilink_base_url()}/ilink/bot/get_qrcode_status?qrcode={urllib.parse.quote(qr_code)}"
-                headers = {
-                    "AuthorizationType": "ilink_bot_token",
-                    "iLink-App-Id": "bot",
-                    "iLink-App-ClientVersion": "131073",
-                }
-                req = urllib.request.Request(url=url, headers=headers)
-                with urllib.request.urlopen(req, timeout=60) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    status = data.get("status", "")
-                    if status == "confirmed":
-                        login_finished = True
-                        status_label.setText(self._t("ui.account.qr_login.success"))
-                        hint_label.setText(self._t("ui.account.qr_login.saving"))
-                        save_account(data)
-                    elif status == "expired":
-                        status_label.setText(self._t("ui.account.qr_login.expired"))
-                        hint_label.setText(self._t("ui.account.qr_login.retry"))
-                    else:
-                        QTimer.singleShot(1000, poll_status)
-            except urllib.error.HTTPError:
-                QTimer.singleShot(1000, poll_status)
-            except Exception:
-                QTimer.singleShot(3000, poll_status)
 
-        def save_account(data: dict) -> None:
-            try:
-                account_id = data.get("bot_info", {}).get("name", f"wechat-{datetime.now().strftime('%Y%m%d%H%M%S')}")
-                account_file = APP_DIR / "accounts" / f"{account_id}.json"
-                sync_file = APP_DIR / "accounts" / f"{account_id}.sync.json"
+            account_file = APP_DIR / "accounts" / f"{account_id}.json"
+            sync_file = APP_DIR / "accounts" / f"{account_id}.sync.json"
 
-                account_file.parent.mkdir(parents=True, exist_ok=True)
-                account_info = {
-                    "token": data.get("bot_token", ""),
-                    "baseUrl": data.get("base_url", self._ilink_base_url()),
-                    "name": account_id,
-                }
-                account_file.write_text(json.dumps(account_info, ensure_ascii=False, indent=2), encoding="utf-8")
-                sync_file.write_text(json.dumps({"get_updates_buf": ""}, ensure_ascii=False), encoding="utf-8")
+            account_file.parent.mkdir(parents=True, exist_ok=True)
+            account_info = {
+                "token": bot_token,
+                "baseUrl": base_url,
+                "name": account_id,
+            }
+            account_file.write_text(json.dumps(account_info, ensure_ascii=False, indent=2), encoding="utf-8")
+            sync_file.write_text(json.dumps({"get_updates_buf": ""}, ensure_ascii=False), encoding="utf-8")
+            _qr_log(f"account files saved to {account_file}")
 
-                config = BridgeConfig.load()
-                new_profile = config.add_account(account_id, str(account_file), str(sync_file))
-                if new_profile:
-                    config.set_active_account(new_profile.account_id)
-                    config.save()
+            config = BridgeConfig.load()
+            new_profile = config.add_account(account_id, str(account_file), str(sync_file))
+            if new_profile:
+                config.set_active_account(new_profile.account_id)
+                config.save()
+                _qr_log(f"config saved, refreshing UI")
+                try:
                     self.activity_logged.emit(self._t("ui.account.qr_login.saved", account=account_id))
                     self.refresh_runtime()
-                    QTimer.singleShot(500, dialog.accept)
-                else:
-                    hint_label.setText(self._t("ui.account.qr_login.save_failed"))
-            except Exception as exc:
-                hint_label.setText(self._t("ui.account.qr_login.save_failed_detail", error=str(exc)))
-
-        threading.Thread(target=fetch_qrcode, daemon=True).start()
-        dialog.exec()
+                except Exception as e:
+                    _qr_log(f"emit/refresh error: {e}")
+        except Exception as exc:
+            _qr_log(f"save error: {exc}")
 
     def _ilink_base_url(self) -> str:
         try:
