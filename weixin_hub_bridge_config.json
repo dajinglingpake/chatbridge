@@ -1,4 +1,12 @@
 {
+  "active_account_id": "wechat-bot",
+  "accounts": [
+    {
+      "account_id": "wechat-bot",
+      "account_file": "accounts/wechat-bot.json",
+      "sync_file": "accounts/wechat-bot.sync.json"
+    }
+  ],
   "account_id": "wechat-bot",
   "account_file": "accounts/wechat-bot.json",
   "sync_file": "accounts/wechat-bot.sync.json",

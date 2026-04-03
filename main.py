@@ -40,11 +40,13 @@ ensure_desktop_dependencies()
 
 try:
     from PySide6.QtCore import QTimer, Qt, Signal, QUrl
-    from PySide6.QtGui import QDesktopServices, QFont, QIcon
+    from PySide6.QtGui import QDesktopServices, QFont, QIcon, QPixmap
     from PySide6.QtWidgets import (
         QApplication,
+        QDialog,
         QFrame,
         QHBoxLayout,
+        QInputDialog,
         QLabel,
         QListWidget,
         QListWidgetItem,
@@ -65,6 +67,13 @@ except ImportError as exc:
         "Missing desktop dependencies. Run install-dependencies.cmd first, or install PySide6 and psutil manually."
     ) from exc
 
+import base64
+import io
+import json
+import urllib.parse
+import urllib.request
+
+from bridge_config import BridgeConfig
 from codex_wechat_bootstrap import build_nvm_node_command, collect_checks, run_shell_command
 from codex_wechat_runtime import (
     BRIDGE_STATE_PATH,
@@ -189,6 +198,10 @@ class MainWindow(QMainWindow):
         self.refresh_button.clicked.connect(self.refresh_diagnostics)
         actions.addWidget(self.refresh_button)
 
+        self.scan_login_button = QPushButton("扫码登录微信")
+        self.scan_login_button.clicked.connect(self.configure_accounts)
+        actions.addWidget(self.scan_login_button)
+
         self.agent_page_button = QPushButton("查看会话")
         self.agent_page_button.clicked.connect(lambda: self.main_tabs.setCurrentIndex(2))
         actions.addWidget(self.agent_page_button)
@@ -257,6 +270,10 @@ class MainWindow(QMainWindow):
         self.issue_repair_button = QPushButton("处理依赖")
         self.issue_repair_button.clicked.connect(self.repair_environment)
         issue_actions.addWidget(self.issue_repair_button)
+
+        self.issue_manage_accounts_button = QPushButton("管理微信账号")
+        self.issue_manage_accounts_button.clicked.connect(self.configure_accounts)
+        issue_actions.addWidget(self.issue_manage_accounts_button)
 
         self.issue_login_button = QPushButton("打开微信账号目录")
         self.issue_login_button.clicked.connect(lambda: self.open_path(APP_DIR / "accounts"))
@@ -380,6 +397,7 @@ class MainWindow(QMainWindow):
         self.issue_card.title_label.setText(self._t("ui.card.issues"))
         self.issue_summary_label.setText(self._t("ui.issues.analyzing"))
         self.issue_repair_button.setText(self._t("ui.button.repair"))
+        self.issue_manage_accounts_button.setText(self._t("ui.button.manage_accounts"))
         self.issue_login_button.setText(self._t("ui.button.open_accounts"))
         self.issue_cleanup_button.setText(self._t("ui.button.cleanup"))
         self.issue_open_dir_button.setText(self._t("ui.button.open_project"))
@@ -723,7 +741,7 @@ class MainWindow(QMainWindow):
         elif self.primary_action == "repair":
             self.repair_environment()
         elif self.primary_action == "login":
-            self.open_path(APP_DIR / "accounts")
+            self.configure_accounts()
         elif self.primary_action == "start":
             self.run_async_action("启动整套服务", start_all)
         else:
@@ -1068,6 +1086,7 @@ class MainWindow(QMainWindow):
             self._t("ui.overview.hub", status=self._t("ui.status.running") if snapshot.hub_running else self._t("ui.status.stopped"), pid=self._pid_text(snapshot.hub_pid)),
             self._t("ui.overview.bridge", status=self._t("ui.status.running") if snapshot.bridge_running else self._t("ui.status.stopped"), pid=self._pid_text(snapshot.bridge_pid)),
             self._t("ui.overview.agent_processes", count=len(snapshot.codex_processes)),
+            self._t("ui.overview.active_account", account=BridgeConfig.load().active_account_id),
             "",
         ]
         if snapshot.codex_processes:
@@ -1132,6 +1151,231 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, self._t("ui.error.path_missing.title"), str(path))
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def _show_qr_login_dialog(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(self._t("ui.account.qr_login.title"))
+        dialog.setMinimumSize(400, 520)
+        layout = QVBoxLayout(dialog)
+
+        status_label = QLabel(self._t("ui.account.qr_login.getting"))
+        status_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(status_label)
+
+        qr_label = QLabel()
+        qr_label.setAlignment(Qt.AlignCenter)
+        qr_label.setMinimumSize(300, 300)
+        layout.addWidget(qr_label)
+
+        hint_label = QLabel(self._t("ui.account.qr_login.hint"))
+        hint_label.setAlignment(Qt.AlignCenter)
+        hint_label.setWordWrap(True)
+        layout.addWidget(hint_label)
+
+        btn_layout = QHBoxLayout()
+        cancel_btn = QPushButton(self._t("ui.button.cancel"))
+        cancel_btn.clicked.connect(dialog.reject)
+        btn_layout.addWidget(cancel_btn)
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
+
+        qr_code: str = ""
+        login_finished = False
+
+        def fetch_qrcode() -> None:
+            nonlocal qr_code
+            try:
+                url = f"{self._ilink_base_url()}/ilink/bot/get_bot_qrcode?bot_type=3"
+                headers = {
+                    "AuthorizationType": "ilink_bot_token",
+                    "iLink-App-Id": "bot",
+                    "iLink-App-ClientVersion": "131073",
+                }
+                req = urllib.request.Request(url=url, headers=headers)
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    qr_code = data.get("qrcode", "")
+                    qr_img_url = data.get("qrcode_img_content", "")
+                    if qr_code:
+                        if qr_img_url:
+                            pixmap = self._load_qr_image(qr_img_url)
+                            if not pixmap.isNull():
+                                qr_label.setPixmap(pixmap)
+                            else:
+                                qr_label.setText(self._t("ui.account.qr_login.load_failed"))
+                                return
+                        else:
+                            qr_label.setText(self._t("ui.account.qr_login.load_failed"))
+                            return
+                        status_label.setText(self._t("ui.account.qr_login.scan"))
+                        QTimer.singleShot(100, lambda: poll_status())
+                    else:
+                        status_label.setText(self._t("ui.account.qr_login.error"))
+            except Exception as exc:
+                status_label.setText(self._t("ui.account.qr_login.error_detail", error=str(exc)))
+
+        def poll_status() -> None:
+            nonlocal login_finished
+            if login_finished or not qr_code:
+                return
+            try:
+                url = f"{self._ilink_base_url()}/ilink/bot/get_qrcode_status?qrcode={urllib.parse.quote(qr_code)}"
+                headers = {
+                    "AuthorizationType": "ilink_bot_token",
+                    "iLink-App-Id": "bot",
+                    "iLink-App-ClientVersion": "131073",
+                }
+                req = urllib.request.Request(url=url, headers=headers)
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    status = data.get("status", "")
+                    if status == "confirmed":
+                        login_finished = True
+                        status_label.setText(self._t("ui.account.qr_login.success"))
+                        hint_label.setText(self._t("ui.account.qr_login.saving"))
+                        save_account(data)
+                    elif status == "expired":
+                        status_label.setText(self._t("ui.account.qr_login.expired"))
+                        hint_label.setText(self._t("ui.account.qr_login.retry"))
+                    else:
+                        QTimer.singleShot(1000, poll_status)
+            except urllib.error.HTTPError:
+                QTimer.singleShot(1000, poll_status)
+            except Exception:
+                QTimer.singleShot(3000, poll_status)
+
+        def save_account(data: dict) -> None:
+            try:
+                account_id = data.get("bot_info", {}).get("name", f"wechat-{datetime.now().strftime('%Y%m%d%H%M%S')}")
+                account_file = APP_DIR / "accounts" / f"{account_id}.json"
+                sync_file = APP_DIR / "accounts" / f"{account_id}.sync.json"
+
+                account_file.parent.mkdir(parents=True, exist_ok=True)
+                account_info = {
+                    "token": data.get("bot_token", ""),
+                    "baseUrl": data.get("base_url", self._ilink_base_url()),
+                    "name": account_id,
+                }
+                account_file.write_text(json.dumps(account_info, ensure_ascii=False, indent=2), encoding="utf-8")
+                sync_file.write_text(json.dumps({"get_updates_buf": ""}, ensure_ascii=False), encoding="utf-8")
+
+                config = BridgeConfig.load()
+                new_profile = config.add_account(account_id, str(account_file), str(sync_file))
+                if new_profile:
+                    config.set_active_account(new_profile.account_id)
+                    config.save()
+                    self.activity_logged.emit(self._t("ui.account.qr_login.saved", account=account_id))
+                    self.refresh_runtime()
+                    QTimer.singleShot(500, dialog.accept)
+                else:
+                    hint_label.setText(self._t("ui.account.qr_login.save_failed"))
+            except Exception as exc:
+                hint_label.setText(self._t("ui.account.qr_login.save_failed_detail", error=str(exc)))
+
+        threading.Thread(target=fetch_qrcode, daemon=True).start()
+        dialog.exec()
+
+    def _ilink_base_url(self) -> str:
+        try:
+            config = BridgeConfig.load()
+            if config.accounts:
+                first_account = config.accounts[0]
+                if first_account.account_path.exists():
+                    data = json.loads(first_account.account_path.read_text(encoding="utf-8"))
+                    base_url = data.get("baseUrl", "").strip()
+                    if base_url:
+                        return base_url
+        except Exception:
+            pass
+        return "https://ilinkai.weixin.qq.com"
+
+    def _load_qr_image(self, url: str) -> QPixmap:
+        try:
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                img_data = resp.read()
+                pixmap = QPixmap()
+                pixmap.loadFromData(img_data)
+                return pixmap
+        except Exception:
+            return QPixmap()
+
+    def _account_option_text(self, config: BridgeConfig, account) -> str:
+        status = self._t("ui.account.status.ready") if account.is_usable else self._t("ui.account.status.missing")
+        marker = self._t("ui.account.option.active") if account.account_id == config.active_account_id else self._t("ui.account.option.inactive")
+        return self._t(
+            "ui.account.option.label",
+            marker=marker,
+            account=account.account_id,
+            file=Path(account.account_file).name,
+            status=status,
+        )
+
+    def _restart_services_after_account_switch(self, account_id: str) -> None:
+        def worker() -> None:
+            for line in stop_all():
+                self.activity_logged.emit(self._t("ui.activity.action", label=self._t("ui.account.restart.label", account=account_id), line=line))
+            for line in start_all():
+                self.activity_logged.emit(self._t("ui.activity.action", label=self._t("ui.account.restart.label", account=account_id), line=line))
+            self.diagnostics_ready.emit({item.key: item for item in collect_checks(APP_DIR)}, datetime.now().strftime("%H:%M:%S"))
+            self.runtime_refresh_requested.emit()
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def configure_accounts(self) -> None:
+        config = BridgeConfig.load()
+        
+        options = []
+        option_map = {}
+        
+        if config.accounts:
+            for account in config.accounts:
+                text = self._account_option_text(config, account)
+                option_map[text] = ("existing", account)
+                options.append(text)
+        
+        qr_login_text = self._t("ui.account.qr_login.option")
+        option_map[qr_login_text] = ("qr_login", None)
+        options.append(qr_login_text)
+        
+        current_index = 0
+        if config.accounts:
+            for index, account in enumerate(config.accounts):
+                if account.account_id == config.active_account_id:
+                    current_index = index
+                    break
+        
+        selected_text, accepted = QInputDialog.getItem(
+            self,
+            self._t("ui.account.dialog.title"),
+            self._t("ui.account.dialog.label"),
+            options,
+            current_index,
+            False,
+        )
+        if not accepted or not selected_text:
+            return
+
+        choice = option_map[selected_text]
+        if choice[0] == "qr_login":
+            self._show_qr_login_dialog()
+            return
+
+        selected = choice[1]
+        if selected.account_id == config.active_account_id:
+            self.activity_logged.emit(self._t("ui.account.already_active", account=selected.account_id))
+            self.refresh_diagnostics()
+            return
+
+        config.set_active_account(selected.account_id)
+        config.save()
+        self.activity_logged.emit(self._t("ui.account.activated", account=selected.account_id))
+        snapshot = get_runtime_snapshot()
+        if snapshot.hub_running or snapshot.bridge_running:
+            self._restart_services_after_account_switch(selected.account_id)
+            return
+        self.refresh_runtime()
+        self.refresh_diagnostics()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         snapshot = get_runtime_snapshot()
@@ -1272,6 +1516,7 @@ class MainWindow(QMainWindow):
 
         issue_kinds = {issue["kind"] for issue in issues}
         self.issue_repair_button.setVisible("dependencies" in issue_kinds)
+        self.issue_manage_accounts_button.setVisible(True)
         self.issue_login_button.setVisible("login" in issue_kinds)
         self.issue_cleanup_button.setVisible("processes" in issue_kinds)
         self.issue_open_dir_button.setVisible(True)

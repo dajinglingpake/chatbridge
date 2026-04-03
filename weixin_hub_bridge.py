@@ -8,20 +8,17 @@ import time
 import unicodedata
 import urllib.error
 import urllib.request
-from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from bridge_config import APP_DIR, CONFIG_PATH, WEIXIN_ACCOUNTS_DIR, BridgeConfig, normalize_backend
 from codex_wechat_ipc import create_request, wait_for_response
 from localization import Localizer
 
 
-APP_DIR = Path(__file__).resolve().parent
 RUNTIME_DIR = APP_DIR / ".runtime"
 STATE_DIR = RUNTIME_DIR / "state"
-WEIXIN_ACCOUNTS_DIR = APP_DIR / "accounts"
-CONFIG_PATH = APP_DIR / "weixin_hub_bridge_config.json"
 STATE_PATH = STATE_DIR / "weixin_hub_bridge_state.json"
 CONVERSATION_PATH = STATE_DIR / "weixin_conversations.json"
 DEFAULT_WEIXIN_BASE_URL = "https://ilinkai.weixin.qq.com"
@@ -32,67 +29,6 @@ SUPPORTED_BACKENDS = {"codex", "opencode"}
 
 def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
-
-
-def _to_abs_path(value: str, default: Path) -> str:
-    raw = (value or "").strip()
-    path = Path(raw) if raw else default
-    if not path.is_absolute():
-        path = APP_DIR / path
-    return str(path.resolve())
-
-
-def _to_rel_path(value: str) -> str:
-    path = Path(value)
-    if not path.is_absolute():
-        return path.as_posix()
-    try:
-        return path.resolve().relative_to(APP_DIR.resolve()).as_posix()
-    except ValueError:
-        return path.as_posix()
-
-
-def normalize_backend(value: str) -> str:
-    backend = (value or "codex").strip().lower()
-    return backend if backend in SUPPORTED_BACKENDS else "codex"
-
-
-@dataclass
-class BridgeConfig:
-    account_id: str = "wechat-bot"
-    account_file: str = "accounts/wechat-bot.json"
-    sync_file: str = "accounts/wechat-bot.sync.json"
-    backend_id: str = "main"
-    default_backend: str = "codex"
-    language: str = "auto"
-    poll_timeout_ms: int = 35000
-    hub_task_timeout_seconds: int = 600
-    bridge_name: str = "weixin-bridge"
-    auto_reply_prefix: str = ""
-    ignore_prefixes: list[str] = field(default_factory=lambda: ["/ignore"])
-
-    @classmethod
-    def load(cls) -> "BridgeConfig":
-        if not CONFIG_PATH.exists():
-            cfg = cls()
-            cfg.save()
-            return cfg
-        raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        if "default_agent_id" in raw and "backend_id" not in raw:
-            raw["backend_id"] = raw.pop("default_agent_id")
-        raw["account_file"] = _to_abs_path(str(raw.get("account_file") or "accounts/wechat-bot.json"), WEIXIN_ACCOUNTS_DIR / "wechat-bot.json")
-        raw["sync_file"] = _to_abs_path(str(raw.get("sync_file") or "accounts/wechat-bot.sync.json"), WEIXIN_ACCOUNTS_DIR / "wechat-bot.sync.json")
-        raw["default_backend"] = normalize_backend(str(raw.get("default_backend") or "codex"))
-        raw["language"] = str(raw.get("language") or "auto")
-        return cls(**raw)
-
-    def save(self) -> None:
-        data = asdict(self)
-        data["account_file"] = _to_rel_path(str(data.get("account_file") or (WEIXIN_ACCOUNTS_DIR / "wechat-bot.json")))
-        data["sync_file"] = _to_rel_path(str(data.get("sync_file") or (WEIXIN_ACCOUNTS_DIR / "wechat-bot.sync.json")))
-        data["default_backend"] = normalize_backend(str(data.get("default_backend") or "codex"))
-        data["language"] = str(data.get("language") or "auto")
-        CONFIG_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 class WeixinBridge:

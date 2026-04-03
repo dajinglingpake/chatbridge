@@ -8,6 +8,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from bridge_config import BridgeConfig
+
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 DEFAULT_NODE_VERSION = "24.14.1"
@@ -119,15 +121,16 @@ def collect_checks(project_dir: Path) -> list[CheckResult]:
     psutil_ok = importlib.util.find_spec("psutil") is not None
     results.append(CheckResult(key="psutil", label="psutil", ok=psutil_ok, detail="installed" if psutil_ok else "missing"))
 
+    bridge_config = BridgeConfig.load()
+    active_account = bridge_config.get_active_account()
     account_dir = WEIXIN_ACCOUNTS_DIR
-    account_files = list(account_dir.glob("*.json")) if account_dir.exists() else []
-    account_ok = any(not path.name.endswith(".sync.json") and not path.name.endswith(".context-tokens.json") for path in account_files)
+    account_ok = active_account.is_usable
     results.append(
         CheckResult(
             key="weixin_account",
             label="Weixin Account Files",
             ok=account_ok,
-            detail=str(account_dir),
+            detail=f"{active_account.account_id} -> {active_account.account_path}",
         )
     )
 
