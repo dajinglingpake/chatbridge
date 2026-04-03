@@ -17,14 +17,14 @@ def running_under_debugger() -> bool:
 
 
 def ensure_desktop_dependencies() -> None:
-    required = ("PySide6", "psutil")
+    required = ("PySide6", "psutil", "qrcode")
     missing = [name for name in required if importlib.util.find_spec(name) is None]
     if not missing:
         return
 
     print(f"Installing missing desktop dependencies: {', '.join(missing)}", file=sys.stderr, flush=True)
     completed = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "PySide6", "psutil"],
+        [sys.executable, "-m", "pip", "install", *missing],
         cwd=str(APP_DIR),
         text=True,
         encoding="utf-8",
@@ -33,7 +33,7 @@ def ensure_desktop_dependencies() -> None:
         check=False,
     )
     if completed.returncode != 0:
-        raise SystemExit("Failed to install desktop dependencies: PySide6 psutil")
+        raise SystemExit(f"Failed to install desktop dependencies: {', '.join(missing)}")
 
 
 ensure_desktop_dependencies()
@@ -1195,18 +1195,9 @@ class MainWindow(QMainWindow):
                 with urllib.request.urlopen(req, timeout=10) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
                     qr_code = data.get("qrcode", "")
-                    qr_img_url = data.get("qrcode_img_content", "")
                     if qr_code:
-                        if qr_img_url:
-                            pixmap = self._load_qr_image(qr_img_url)
-                            if not pixmap.isNull():
-                                qr_label.setPixmap(pixmap)
-                            else:
-                                qr_label.setText(self._t("ui.account.qr_login.load_failed"))
-                                return
-                        else:
-                            qr_label.setText(self._t("ui.account.qr_login.load_failed"))
-                            return
+                        pixmap = self._generate_qr_pixmap(qr_code)
+                        qr_label.setPixmap(pixmap)
                         status_label.setText(self._t("ui.account.qr_login.scan"))
                         QTimer.singleShot(100, lambda: poll_status())
                     else:
@@ -1289,14 +1280,17 @@ class MainWindow(QMainWindow):
             pass
         return "https://ilinkai.weixin.qq.com"
 
-    def _load_qr_image(self, url: str) -> QPixmap:
+    def _generate_qr_pixmap(self, data: str) -> QPixmap:
         try:
-            req = urllib.request.Request(url)
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                img_data = resp.read()
-                pixmap = QPixmap()
-                pixmap.loadFromData(img_data)
-                return pixmap
+            import qrcode
+            qr = qrcode.QRCode(version=3, box_size=8, border=2)
+            qr.add_data(data)
+            img = qr.make_image(fill_color="black", back_color="white")
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            pixmap = QPixmap()
+            pixmap.loadFromData(buf.getvalue())
+            return pixmap
         except Exception:
             return QPixmap()
 
