@@ -9,9 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from bridge_config import BridgeConfig
+from core.platform_compat import IS_WINDOWS, command_candidates, creationflags, resolve_command, shell_command
 
 
-CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 DEFAULT_NODE_VERSION = "24.14.1"
 WEIXIN_ACCOUNTS_DIR = Path(__file__).resolve().parent / "accounts"
 
@@ -32,7 +32,7 @@ def _run_capture(command: list[str]) -> tuple[bool, str]:
             text=True,
             encoding="utf-8",
             errors="replace",
-            creationflags=CREATE_NO_WINDOW,
+            creationflags=creationflags(),
             check=False,
         )
     except OSError as exc:
@@ -89,30 +89,38 @@ def collect_checks(project_dir: Path) -> list[CheckResult]:
         )
     )
 
-    winget_exe = find_winget_exe()
-    results.append(
-        CheckResult(
-            key="winget",
-            label="winget",
-            ok=winget_exe is not None,
-            detail=winget_exe or "not found",
+    if IS_WINDOWS:
+        winget_exe = find_winget_exe()
+        results.append(
+            CheckResult(
+                key="winget",
+                label="winget",
+                ok=winget_exe is not None,
+                detail=winget_exe or "not found",
+            )
         )
-    )
 
-    nvm_exe = find_nvm_exe()
-    if nvm_exe:
-        ok, detail = _run_capture([nvm_exe, "version"])
-        results.append(CheckResult(key="nvm", label="NVM for Windows", ok=ok, detail=detail or nvm_exe))
+        nvm_exe = find_nvm_exe()
+        if nvm_exe:
+            ok, detail = _run_capture([nvm_exe, "version"])
+            results.append(CheckResult(key="nvm", label="NVM for Windows", ok=ok, detail=detail or nvm_exe))
+        else:
+            results.append(CheckResult(key="nvm", label="NVM for Windows", ok=False, detail="not found"))
     else:
-        results.append(CheckResult(key="nvm", label="NVM for Windows", ok=False, detail="not found"))
+        results.append(CheckResult(key="node_manager", label="Node Manager", ok=True, detail="not required on this platform"))
 
-    for key, label, cmd in [
-        ("node", "Node.js", ["node", "--version"]),
-        ("npm", "npm", ["npm.cmd", "--version"]),
-        ("codex", "Codex CLI", ["codex.cmd", "--version"]),
-        ("opencode", "OpenCode CLI", ["opencode.cmd", "--version"]),
+    for key, label, binary in [
+        ("node", "Node.js", "node"),
+        ("npm", "npm", "npm"),
+        ("codex", "Codex CLI", "codex"),
+        ("opencode", "OpenCode CLI", "opencode"),
     ]:
-        ok, detail = _run_capture(cmd)
+        ok = False
+        detail = "not found"
+        for candidate in command_candidates(binary):
+            ok, detail = _run_capture([candidate, "--version"])
+            if ok:
+                break
         results.append(CheckResult(key=key, label=label, ok=ok, detail=detail or "not found"))
 
     pyside6_ok = importlib.util.find_spec("PySide6") is not None
@@ -152,34 +160,52 @@ def collect_checks(project_dir: Path) -> list[CheckResult]:
 
 
 def suggested_install_commands() -> list[tuple[str, str]]:
-    return [
-        ("Install Desktop deps", "python -m pip install PySide6 psutil"),
-        ("Install NVM for Windows", "winget install CoreyButler.NVMforWindows --accept-package-agreements --accept-source-agreements"),
-        ("Install Node via NVM", build_nvm_node_command()),
-        ("Install Codex CLI", "npm.cmd install -g codex"),
-        ("Install OpenCode CLI", "npm.cmd install -g opencode-ai"),
-    ]
+    commands = [("Install Desktop deps", "python -m pip install PySide6 psutil")]
+    if IS_WINDOWS:
+        commands.extend(
+            [
+                ("Install NVM for Windows", "winget install CoreyButler.NVMforWindows --accept-package-agreements --accept-source-agreements"),
+                ("Install Node via NVM", build_nvm_node_command()),
+                ("Install Codex CLI", f"{resolve_command('npm')} install -g codex"),
+                ("Install OpenCode CLI", f"{resolve_command('npm')} install -g opencode-ai"),
+            ]
+        )
+    else:
+        commands.extend(
+            [
+                ("Install Node.js", "Use your Linux package manager to install nodejs and npm"),
+                ("Install Codex CLI", f"{resolve_command('npm')} install -g codex"),
+                ("Install OpenCode CLI", f"{resolve_command('npm')} install -g opencode-ai"),
+            ]
+        )
+    return commands
 
 
 def suggested_upgrade_commands() -> list[tuple[str, str]]:
-    return [
+    commands = [
         ("Upgrade pip", "python -m pip install --upgrade pip"),
         ("Upgrade Desktop deps", "python -m pip install --upgrade PySide6 psutil"),
-        ("Upgrade Node via NVM", build_nvm_node_command()),
-        ("Upgrade Codex CLI", "npm.cmd install -g codex@latest"),
-        ("Upgrade OpenCode CLI", "npm.cmd install -g opencode-ai@latest"),
     ]
+    if IS_WINDOWS:
+        commands.append(("Upgrade Node via NVM", build_nvm_node_command()))
+    commands.extend(
+        [
+            ("Upgrade Codex CLI", f"{resolve_command('npm')} install -g codex@latest"),
+            ("Upgrade OpenCode CLI", f"{resolve_command('npm')} install -g opencode-ai@latest"),
+        ]
+    )
+    return commands
 
 
 def run_shell_command(command: str, workdir: Path) -> tuple[int, str]:
     completed = subprocess.run(
-        ["cmd", "/c", command],
+        shell_command(command),
         cwd=str(workdir),
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
-        creationflags=CREATE_NO_WINDOW,
+        creationflags=creationflags(),
         check=False,
     )
     output = "\n".join(part for part in [completed.stdout.strip(), completed.stderr.strip()] if part)

@@ -2,7 +2,7 @@
 
 [English README](README.md)
 
-ChatBridge 是一个桌面控制应用，主要用于：
+ChatBridge 最初是一个桌面控制应用，现在也支持在无图形界面的 Linux 环境下通过 Web 控制台运行，主要用于：
 
 - 微信消息传输
 - 多个 AI 会话管理
@@ -58,10 +58,16 @@ python --version
 
 ## 安装 Python 依赖
 
-如果你不想让应用在启动时自动安装桌面依赖，可以先手动执行：
+如果你需要桌面模式，可以先手动执行：
 
 ```powershell
 python -m pip install -r requirements.txt
+```
+
+如果你只需要 Linux Web 模式，最小依赖通常只需要：
+
+```bash
+python3 -m pip install psutil
 ```
 
 ## 语言
@@ -74,7 +80,7 @@ python -m pip install -r requirements.txt
 
 ## 首次运行
 
-优先使用：
+桌面模式优先使用：
 
 ```bat
 start-codex-wechat-desktop.cmd
@@ -83,10 +89,34 @@ start-codex-wechat-desktop.cmd
 也可以直接运行：
 
 ```powershell
-python .\main.py
+python .\ui_main.py --native
 ```
 
-应用启动后会自动：
+Linux / 无桌面环境可以使用 Web 模式：
+
+```bash
+python3 ./ui_main.py --host 127.0.0.1 --port 8765
+```
+
+或者：
+
+```bash
+./start-chatbridge-web.sh
+```
+
+如果你要开始切统一的 Web/Desktop 双模 UI，可以使用新的 NiceGUI 入口：
+
+```bash
+python3 ./ui_main.py --host 127.0.0.1 --port 8765
+```
+
+本地壳模式：
+
+```bash
+python3 ./ui_main.py --native
+```
+
+桌面应用启动后会自动：
 
 - 创建 `.runtime/`
 - 如有缺失则自动安装桌面 Python 依赖
@@ -100,18 +130,29 @@ python .\main.py
   - `Codex CLI`
   - `OpenCode CLI`
 
+Web 模式启动后，浏览器打开 `http://127.0.0.1:8765`，即可完成：
+
+- 查看运行状态
+- 启动 / 停止 / 重启 Hub 与 Bridge
+- 查看环境检查结果
+- 直接向 Hub 提交测试任务
+
 ## 面向用户的预期流程
 
 新用户推荐流程如下：
 
 1. 先安装 Python
-2. 启动桌面应用
-3. 让应用自动检测并补齐缺失依赖
+2. 在有图形界面的机器上启动桌面应用，或在 Linux 上启动 Web 控制台
+3. 让应用检测并补齐缺失依赖
 4. 按提示完成微信登录
    将微信账号 `json/sync` 文件放入 `accounts/`
 5. 通过主按钮启动整套服务
 
-桌面应用应当是普通用户唯一的正常入口。
+当前推荐入口：
+
+- Windows / Linux 统一 UI 场景：`ui_main.py`
+- 旧桌面兼容入口：`main.py`
+- 旧 Web 兼容入口：`web_main.py`
 
 ## 运行时文件
 
@@ -158,7 +199,9 @@ python .\main.py
 
 ## 主要文件
 
-- `main.py`：桌面 UI 入口
+- `ui_main.py`：统一 UI 主入口
+- `main.py`：旧桌面兼容入口
+- `web_main.py`：旧 Web 兼容入口
 - `codex_wechat_runtime.py`：Python 运行时与进程控制
 - `codex_wechat_bootstrap.py`：环境检查与安装辅助
 - `multi_codex_hub.py`：支持 `codex` / `opencode` 的会话后端
@@ -167,10 +210,11 @@ python .\main.py
 
 ## 说明
 
-- 当前项目默认运行在 Windows 上
+- 当前项目已支持基础跨平台运行，桌面模式仍主要面向 Windows
 - 关闭桌面窗口不一定等于干净关闭后台，除非应用主动停止整套服务
 - 桌面应用负责展示当前状态以及推荐的下一步操作
-- 推荐的 Node 安装路径是 `nvm for Windows` + `Node.js 24.14.1`
+- Linux Web 模式不会依赖 `PySide6`
+- 推荐的 Node 安装路径在 Windows 上是 `nvm for Windows` + `Node.js 24.14.1`
 - Hub 与 Bridge 通过本地运行时 IPC 通信
 
 ## 微信命令

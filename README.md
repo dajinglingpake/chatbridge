@@ -2,7 +2,7 @@
 
 [中文说明](README.zh-CN.md)
 
-ChatBridge is a desktop control app for:
+ChatBridge is moving to a unified UI entry that can run both as a web app and as a local native shell for:
 
 - WeChat transport
 - multiple AI conversations
@@ -58,7 +58,7 @@ If Python is missing, install it first.
 
 ## Install Python Dependencies
 
-Install desktop dependencies before launch if you do not want the app to auto-install them:
+Install Python dependencies before launch:
 
 ```powershell
 python -m pip install -r requirements.txt
@@ -80,18 +80,22 @@ Preferred launcher:
 start-codex-wechat-desktop.cmd
 ```
 
-Direct Python launch also works:
+Unified UI entry:
 
 ```powershell
-python .\main.py
+python .\ui_main.py --native
 ```
 
-On startup, the desktop app will:
+Linux / headless web mode:
+
+```bash
+python3 ./ui_main.py --host 127.0.0.1 --port 8765
+```
+
+On startup, the unified UI will:
 
 - create `.runtime/` if needed
-- auto-install desktop Python dependencies if missing
-  - `PySide6`
-  - `psutil`
+- rely on Python dependencies from `requirements.txt`
 - auto-detect the rest of the environment
 - auto-repair the Windows toolchain when possible
   - `winget`
@@ -105,13 +109,17 @@ On startup, the desktop app will:
 For a new user, the intended flow is:
 
 1. Install Python
-2. Launch the desktop app
+2. Launch the unified UI
 3. Let the app auto-detect and auto-repair missing dependencies
 4. Complete WeChat login when prompted
    Put the WeChat account `json/sync` files into `accounts/`
 5. Start the stack from the main button
 
-The desktop app should be the only normal user entrypoint.
+Recommended entrypoints:
+
+- `ui_main.py`: unified primary entry
+- `main.py`: legacy desktop compatibility wrapper
+- `web_main.py`: legacy web compatibility wrapper
 
 ## Runtime Files
 
@@ -158,7 +166,9 @@ The repo already ignores:
 
 ## Main Files
 
-- `main.py`: desktop UI entry
+- `ui_main.py`: unified UI primary entry
+- `main.py`: legacy desktop compatibility entry
+- `web_main.py`: legacy web compatibility entry
 - `codex_wechat_runtime.py`: Python runtime and process control
 - `codex_wechat_bootstrap.py`: environment checks and install helpers
 - `multi_codex_hub.py`: conversation backend with `codex` / `opencode` support
@@ -167,9 +177,8 @@ The repo already ignores:
 
 ## Notes
 
-- This project currently assumes Windows
-- Closing the desktop window is not the same as a clean backend stop unless the app stops the stack
-- The desktop app is responsible for showing the current state and the next recommended step
+- The project now has a unified UI direction for Windows, Linux, and headless mode
+- `main.py` and `web_main.py` are compatibility wrappers around the unified UI
 - The preferred Node path is `nvm for Windows` with `Node.js 24.14.1`
 - Hub and bridge communicate through local runtime IPC
 

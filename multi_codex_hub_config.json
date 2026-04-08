@@ -1,6 +1,6 @@
 {
-  "codex_command": "codex.cmd",
-  "opencode_command": "opencode.cmd",
+  "codex_command": "codex",
+  "opencode_command": "opencode",
   "agents": [
     {
       "id": "main",

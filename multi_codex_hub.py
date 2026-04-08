@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from codex_wechat_ipc import REQUEST_DIR, ensure_ipc_dirs, mark_processed, read_request, write_response
+from core.platform_compat import creationflags, resolve_command
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -23,7 +24,6 @@ SESSION_DIR = RUNTIME_DIR / "sessions"
 WORKSPACE_DIR = APP_DIR / "workspace"
 CONFIG_PATH = APP_DIR / "multi_codex_hub_config.json"
 STATE_PATH = STATE_DIR / "multi_codex_hub_state.json"
-CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 SUPPORTED_BACKENDS = {"codex", "opencode"}
 
 
@@ -55,42 +55,27 @@ def normalize_backend(value: str) -> str:
 
 
 def discover_agent_processes() -> list[dict[str, Any]]:
-    if os.name != "nt":
-        return []
-    script = (
-        "Get-CimInstance Win32_Process | "
-        "Where-Object { $_.CommandLine -and ( "
-        "$_.CommandLine -like '*codex*' -or $_.Name -like 'codex*' -or "
-        "$_.CommandLine -like '*opencode*' -or $_.Name -like 'opencode*' "
-        ") } | "
-        "Select-Object ProcessId,Name,CommandLine | ConvertTo-Json -Compress"
-    )
-    completed = subprocess.run(
-        ["powershell", "-NoProfile", "-Command", script],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        creationflags=CREATE_NO_WINDOW,
-        check=False,
-    )
-    if completed.returncode != 0 or not completed.stdout.strip():
-        return []
     try:
-        data = json.loads(completed.stdout)
-    except json.JSONDecodeError:
+        import psutil
+    except ImportError:
         return []
-    if isinstance(data, dict):
-        data = [data]
-    result = []
-    for item in data if isinstance(data, list) else []:
-        if not isinstance(item, dict):
+
+    current_pid = os.getpid()
+    result: list[dict[str, Any]] = []
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        pid = proc.info.get("pid")
+        if pid == current_pid:
+            continue
+        cmdline = " ".join(proc.info.get("cmdline") or [])
+        name = proc.info.get("name") or ""
+        lowered = f"{name} {cmdline}".lower()
+        if "codex" not in lowered and "opencode" not in lowered:
             continue
         result.append(
             {
-                "pid": item.get("ProcessId"),
-                "name": item.get("Name") or "",
-                "command_line": item.get("CommandLine") or "",
+                "pid": pid,
+                "name": name,
+                "command_line": cmdline,
             }
         )
     return result
@@ -110,8 +95,8 @@ class AgentConfig:
 
 @dataclass
 class HubConfig:
-    codex_command: str = "codex.cmd"
-    opencode_command: str = "opencode.cmd"
+    codex_command: str = field(default_factory=lambda: resolve_command("codex"))
+    opencode_command: str = field(default_factory=lambda: resolve_command("opencode"))
     agents: list[AgentConfig] = field(default_factory=list)
 
     @classmethod
@@ -131,6 +116,8 @@ class HubConfig:
         raw.pop("host", None)
         raw.pop("port", None)
         raw.pop("auto_open_browser", None)
+        raw["codex_command"] = resolve_command(str(raw.get("codex_command") or "codex"))
+        raw["opencode_command"] = resolve_command(str(raw.get("opencode_command") or "opencode"))
         for agent in raw["agents"]:
             agent.name = (agent.name or "默认会话").strip()
             agent.workdir = _to_abs_path(agent.workdir, WORKSPACE_DIR)
@@ -362,7 +349,7 @@ class MultiCodexHub:
             text=True,
             encoding="utf-8",
             errors="replace",
-            creationflags=CREATE_NO_WINDOW,
+            creationflags=creationflags(),
             check=False,
             shell=False,
         )
@@ -413,7 +400,7 @@ class MultiCodexHub:
             text=True,
             encoding="utf-8",
             errors="replace",
-            creationflags=CREATE_NO_WINDOW,
+            creationflags=creationflags(),
             check=False,
             shell=False,
         )
@@ -527,7 +514,7 @@ class MultiCodexHub:
             text=True,
             encoding="utf-8",
             errors="replace",
-            creationflags=CREATE_NO_WINDOW,
+            creationflags=creationflags(),
             check=False,
             shell=False,
         )

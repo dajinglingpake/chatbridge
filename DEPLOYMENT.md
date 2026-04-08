@@ -2,7 +2,7 @@
 
 [中文部署说明](DEPLOYMENT.zh-CN.md)
 
-This document describes the intended deployment model for ChatBridge on a new Windows machine.
+This document describes the intended deployment model for ChatBridge with the unified UI entry.
 
 ## Deployment Policy
 
@@ -13,7 +13,7 @@ Current policy:
 - keep the project as normal Python source
 - allow direct debugging on the target machine
 - require Python to be installed in advance
-- use the desktop app as the only user-facing control surface
+- use the unified UI as the main user-facing control surface
 
 Minimum prerequisite:
 
@@ -47,16 +47,22 @@ Any path is fine, as long as the config files use the correct local paths.
 
 ## 3. Start The App
 
-Preferred:
+Preferred desktop/native shell:
 
 ```bat
 start-codex-wechat-desktop.cmd
 ```
 
-Alternative:
+Alternative native launch:
 
 ```powershell
-python .\main.py
+python .\ui_main.py --native
+```
+
+Web launch:
+
+```bash
+python3 ./ui_main.py --host 127.0.0.1 --port 8765
 ```
 
 ## 4. What Happens On First Run
@@ -64,9 +70,6 @@ python .\main.py
 On first run, the app will automatically:
 
 - create `.runtime/`
-- auto-install missing desktop Python dependencies
-  - `PySide6`
-  - `psutil`
 - run environment detection
 - try to auto-install missing Windows toolchain components when possible
   - `nvm for Windows`
@@ -74,7 +77,7 @@ On first run, the app will automatically:
   - `Codex CLI`
   - `OpenCode CLI`
 
-After that, the desktop app will tell the user what the next step is.
+After that, the unified UI will tell the user what the next step is.
 
 ## 5. Remaining Dependencies
 
@@ -90,7 +93,7 @@ The preferred installation path is:
 - `nvm for Windows`
 - `Node.js 24.14.1`
 
-The desktop app detects these items and should auto-repair them when the machine supports it.
+The unified UI detects these items and should auto-repair them when the machine supports it.
 
 ## 6. WeChat Account Files
 
@@ -107,7 +110,7 @@ Expected files:
 - `<account-id>.json`
 - `<account-id>.sync.json`
 
-The desktop app checks this directory automatically.
+The unified UI checks this directory automatically.
 
 ## 7. Config Files
 
@@ -147,7 +150,7 @@ These are disposable runtime artifacts and should not be committed.
 For end users, the simplified message is:
 
 1. Install Python first
-2. Double-click the desktop launcher
+2. Start the unified UI
 3. Let the app auto-install missing dependencies
 4. Put the WeChat account `json/sync` files into `accounts/`
 

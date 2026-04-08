@@ -1,9 +1,9 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('PySide6') and importlib.util.find_spec('psutil') else 1)" >nul 2>nul
+python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('nicegui') else 1)" >nul 2>nul
 if errorlevel 1 (
-  echo Installing desktop dependencies: PySide6 psutil
-  python -m pip install PySide6 psutil
+  echo Installing UI dependency: nicegui
+  python -m pip install nicegui
 )
-start "" pythonw "%~dp0main.py"
+start "" pythonw "%~dp0ui_main.py" --native

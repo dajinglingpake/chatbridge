@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -12,6 +13,8 @@ try:
     import psutil
 except ImportError:  # pragma: no cover - optional dependency
     psutil = None
+
+from core.platform_compat import IS_WINDOWS, creationflags
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -31,9 +34,6 @@ BRIDGE_OUT_LOG = LOG_DIR / "weixin_hub_bridge.out.log"
 BRIDGE_ERR_LOG = LOG_DIR / "weixin_hub_bridge.err.log"
 HUB_STATE_PATH = STATE_DIR / "multi_codex_hub_state.json"
 BRIDGE_STATE_PATH = STATE_DIR / "weixin_hub_bridge_state.json"
-
-CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
 
 @dataclass
 class ManagedStatus:
@@ -150,22 +150,66 @@ def start_managed(name: str, script_path: Path, pid_file: Path, stdout_log: Path
             cwd=str(APP_DIR),
             stdout=out_handle,
             stderr=err_handle,
-            creationflags=CREATE_NO_WINDOW,
+            creationflags=creationflags(),
+            start_new_session=not IS_WINDOWS,
         )
     _write_pid_file(pid_file, proc.pid)
     return f"{name} started (PID {proc.pid})"
 
 
 def _taskkill(pid: int) -> None:
-    subprocess.run(
-        ["taskkill", "/PID", str(pid), "/T", "/F"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        creationflags=CREATE_NO_WINDOW,
-        check=False,
-    )
+    if IS_WINDOWS:
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=creationflags(),
+            check=False,
+        )
+        return
+
+    if psutil is not None:
+        proc = _get_process(pid)
+        if proc is None:
+            return
+        children = proc.children(recursive=True)
+        for child in children:
+            try:
+                child.terminate()
+            except psutil.Error:
+                pass
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except (psutil.Error, TimeoutError):
+            try:
+                proc.kill()
+            except psutil.Error:
+                pass
+        for child in children:
+            try:
+                child.wait(timeout=2)
+            except psutil.Error:
+                try:
+                    child.kill()
+                except psutil.Error:
+                    pass
+        return
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+        time.sleep(0.5)
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return
+    except OSError:
+        return
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
 
 
 def stop_managed(name: str, script_path: Path, pid_file: Path) -> str:
