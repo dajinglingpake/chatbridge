@@ -228,14 +228,43 @@ Web 模式启动后，浏览器打开 `http://127.0.0.1:8765`，即可完成：
 
 ## 微信命令
 
-桥接层支持按会话切换后端：
+当前桥接层支持以下微信命令：
 
 - `/help`
+  查看帮助
 - `/status`
+  查看当前微信桥 Agent、当前会话、当前后端和会话数量
 - `/new <name>`
+  新建会话并切换到该会话
 - `/list`
+  列出当前发送方的所有会话
 - `/use <name>`
+  切换到指定会话
 - `/backend`
+  查看当前会话后端
 - `/backend <codex|claude|opencode>`
+  切换当前会话后端
+- `/agent`
+  查看当前微信桥默认 Agent
+- `/agent <name>`
+  切换微信桥默认 Agent
+- `/notify`
+  查看系统通知开关状态
+- `/notify on|off`
+  一次性开关全部通知
+- `/notify service-on|service-off`
+  开关服务生命周期通知
+- `/notify config-on|config-off`
+  开关配置变更通知
+- `/notify task-on|task-off`
+  开关任务通知
+- `/task <task_id>`
+  查看指定任务详情
+- `/last`
+  查看当前发送方最近任务
 - `/close`
+  结束当前会话
 - `/reset`
+  重置当前发送方的会话状态
+
+异步任务执行完成后，任务通知会直接回推到微信，并提示可继续使用 `/task <task_id>` 或 `/last` 查看详情。

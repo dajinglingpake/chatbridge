@@ -193,14 +193,43 @@ The repo already ignores:
 
 ## WeChat Commands
 
-The bridge supports per-session backend switching:
+The bridge supports the following WeChat commands:
 
 - `/help`
+  Show help
 - `/status`
+  Show the current bridge agent, current session, current backend, and session count
 - `/new <name>`
+  Create and switch to a new session
 - `/list`
+  List all sessions for the current sender
 - `/use <name>`
+  Switch to the target session
 - `/backend`
+  Show the current session backend
 - `/backend <codex|claude|opencode>`
+  Switch the current session backend
+- `/agent`
+  Show the current default bridge agent
+- `/agent <name>`
+  Switch the default bridge agent
+- `/notify`
+  Show system notice status
+- `/notify on|off`
+  Toggle all notices at once
+- `/notify service-on|service-off`
+  Toggle service lifecycle notices
+- `/notify config-on|config-off`
+  Toggle configuration change notices
+- `/notify task-on|task-off`
+  Toggle task notices
+- `/task <task_id>`
+  Show details for a specific task
+- `/last`
+  Show the latest task for the current sender
 - `/close`
+  Close the current session
 - `/reset`
+  Reset the current sender session state
+
+When asynchronous tasks finish, task notices are pushed back into WeChat and include follow-up commands like `/task <task_id>` or `/last`.
