@@ -62,16 +62,30 @@ def _has_ui_dependency() -> bool:
     return importlib.util.find_spec("nicegui") is not None
 
 
+def _clean_subprocess_env() -> dict[str, str]:
+    blocked_exact = {"PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "__PYVENV_LAUNCHER__"}
+    cleaned: dict[str, str] = {}
+    for key, value in os.environ.items():
+        upper = key.upper()
+        if upper in blocked_exact:
+            continue
+        if "PYCHARM" in upper or "PYDEV" in upper:
+            continue
+        cleaned[key] = value
+    return cleaned
+
+
+def _python_module_cmd(python_executable: str, module: str, *args: str) -> list[str]:
+    return [python_executable, "-I", "-m", module, *args]
+
+
 def _venv_has_ui_dependency(python_executable: str) -> bool:
     completed = subprocess.run(
-        [
-            python_executable,
-            "-c",
-            "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('nicegui') else 1)",
-        ],
+        [python_executable, "-I", "-c", "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('nicegui') else 1)"],
         cwd=str(APP_DIR),
         capture_output=True,
         text=True,
+        env=_clean_subprocess_env(),
         check=False,
     )
     return completed.returncode == 0
@@ -85,6 +99,7 @@ def _run_command(argv: list[str]) -> None:
         text=True,
         encoding="utf-8",
         errors="replace",
+        env=_clean_subprocess_env(),
         check=False,
     )
     if completed.stdout:
@@ -102,17 +117,18 @@ def _run_command(argv: list[str]) -> None:
 
 def _ensure_venv_pip(python_executable: str) -> None:
     pip_check = subprocess.run(
-        [python_executable, "-m", "pip", "--version"],
+        _python_module_cmd(python_executable, "pip", "--version"),
         cwd=str(APP_DIR),
         capture_output=True,
         text=True,
+        env=_clean_subprocess_env(),
         check=False,
     )
     if pip_check.returncode == 0:
         return
 
     print("[chatbridge] pip missing in local virtual environment, bootstrapping with ensurepip", file=sys.stderr)
-    _run_command([python_executable, "-m", "ensurepip", "--upgrade", "--default-pip"])
+    _run_command(_python_module_cmd(python_executable, "ensurepip", "--upgrade", "--default-pip"))
     importlib.invalidate_caches()
 
 
@@ -123,7 +139,7 @@ def _ensure_local_venv() -> Path:
 
     print(f"[chatbridge] Creating local virtual environment: {VENV_DIR}", file=sys.stderr)
     try:
-        _run_command([sys.executable, "-m", "venv", str(VENV_DIR)])
+        _run_command(_python_module_cmd(sys.executable, "venv", str(VENV_DIR)))
     except subprocess.CalledProcessError:
         if not venv_python.exists():
             raise
@@ -145,8 +161,8 @@ def ensure_ui_dependencies(launcher_path: Path | None = None) -> None:
     if not _has_ui_dependency():
         _ensure_venv_pip(installer_python)
         print(f"[chatbridge] Installing Python dependencies from {REQUIREMENTS_PATH.name}", file=sys.stderr)
-        _run_command([installer_python, "-m", "pip", "install", "--upgrade", "pip"])
-        _run_command([installer_python, "-m", "pip", "install", "-r", str(REQUIREMENTS_PATH)])
+        _run_command(_python_module_cmd(installer_python, "pip", "install", "--upgrade", "pip"))
+        _run_command(_python_module_cmd(installer_python, "pip", "install", "-r", str(REQUIREMENTS_PATH)))
         importlib.invalidate_caches()
         if not _is_running_in_project_venv():
             if _is_debugger_attached():
