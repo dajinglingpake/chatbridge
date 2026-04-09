@@ -54,10 +54,27 @@ def _activate_venv_in_process() -> None:
     os.environ["PATH"] = str(scripts_dir) + os.pathsep + os.environ.get("PATH", "")
     if site_packages.exists():
         site.addsitedir(str(site_packages))
+    importlib.invalidate_caches()
 
 
 def _has_ui_dependency() -> bool:
+    importlib.invalidate_caches()
     return importlib.util.find_spec("nicegui") is not None
+
+
+def _venv_has_ui_dependency(python_executable: str) -> bool:
+    completed = subprocess.run(
+        [
+            python_executable,
+            "-c",
+            "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('nicegui') else 1)",
+        ],
+        cwd=str(APP_DIR),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return completed.returncode == 0
 
 
 def _run_command(argv: list[str]) -> None:
@@ -96,6 +113,7 @@ def _ensure_venv_pip(python_executable: str) -> None:
 
     print("[chatbridge] pip missing in local virtual environment, bootstrapping with ensurepip", file=sys.stderr)
     _run_command([python_executable, "-m", "ensurepip", "--upgrade", "--default-pip"])
+    importlib.invalidate_caches()
 
 
 def _ensure_local_venv() -> Path:
@@ -129,12 +147,13 @@ def ensure_ui_dependencies(launcher_path: Path | None = None) -> None:
         print(f"[chatbridge] Installing Python dependencies from {REQUIREMENTS_PATH.name}", file=sys.stderr)
         _run_command([installer_python, "-m", "pip", "install", "--upgrade", "pip"])
         _run_command([installer_python, "-m", "pip", "install", "-r", str(REQUIREMENTS_PATH)])
+        importlib.invalidate_caches()
         if not _is_running_in_project_venv():
             if _is_debugger_attached():
                 _activate_venv_in_process()
             else:
                 os.execv(installer_python, [installer_python, entry_script, *sys.argv[1:]])
-        if not _has_ui_dependency():
+        if not _has_ui_dependency() and not _venv_has_ui_dependency(installer_python):
             raise RuntimeError("nicegui is still unavailable after installing requirements into the local virtual environment")
         return
 
