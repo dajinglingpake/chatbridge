@@ -73,8 +73,10 @@ class WebConsoleViewModel:
     issues: list[IssueViewModel]
     repair_commands: list[RepairCommand]
     checks: list[CheckViewModel]
+    log_sections: list[tuple[str, str]]
     tasks: list[TaskViewModel]
     session_rows: list[SessionRow]
+    selected_session_name: str
     session_detail_lines: list[str]
     session_conversation_lines: list[str]
     account_options: list[AccountOptionViewModel]
@@ -220,23 +222,27 @@ def build_diagnostics_view_model(checks: dict[str, Any], diag_at: str, t: Transl
     )
 
 
-def build_web_console_view_model(app_dir: Path, t: Translator) -> WebConsoleViewModel:
+def build_web_console_view_model(app_dir: Path, t: Translator, selected_session_name: str = "") -> WebConsoleViewModel:
     dashboard = load_dashboard_state(app_dir)
-    return build_web_console_view_model_from_dashboard(dashboard, app_dir, t)
+    return build_web_console_view_model_from_dashboard(dashboard, app_dir, t, selected_session_name=selected_session_name)
 
 
 def build_web_console_view_model_from_dashboard(
     dashboard: DashboardState,
     app_dir: Path,
     t: Translator,
+    selected_session_name: str = "",
 ) -> WebConsoleViewModel:
     checks_map = dashboard.checks
     hub_state = dashboard.hub_state
     bridge_state = dashboard.bridge_state
     session_dir = app_dir / ".runtime" / "sessions"
     session_rows = build_session_rows(hub_state, session_dir)
-    default_session_name = session_rows[0].name if session_rows else ""
-    session_detail = build_session_detail_view_model(hub_state, session_dir, default_session_name)
+    available_session_names = {row.name for row in session_rows}
+    resolved_session_name = selected_session_name if selected_session_name in available_session_names else ""
+    if not resolved_session_name and session_rows:
+        resolved_session_name = session_rows[0].name
+    session_detail = build_session_detail_view_model(hub_state, session_dir, resolved_session_name)
     account_management = build_account_management_view_model(t)
 
     agent_options: list[AgentOptionViewModel] = []
@@ -277,6 +283,12 @@ def build_web_console_view_model_from_dashboard(
         for item in build_issues(dashboard.snapshot, bridge_state, checks_map, t)
     ]
     repair_commands = build_repair_command_models(checks_map, t)
+    log_sections = [
+        ("Hub stdout", dashboard.logs.get("hub_out", "(empty)")),
+        ("Hub stderr", dashboard.logs.get("hub_err", "(empty)")),
+        ("Bridge stdout", dashboard.logs.get("bridge_out", "(empty)")),
+        ("Bridge stderr", dashboard.logs.get("bridge_err", "(empty)")),
+    ]
 
     return WebConsoleViewModel(
         home=build_home_view_model(
@@ -292,8 +304,10 @@ def build_web_console_view_model_from_dashboard(
         issues=issues,
         repair_commands=repair_commands,
         checks=checks,
+        log_sections=log_sections,
         tasks=tasks,
         session_rows=session_rows,
+        selected_session_name=resolved_session_name,
         session_detail_lines=session_detail.detail_text.splitlines(),
         session_conversation_lines=session_detail.conversation_text.splitlines(),
         account_options=account_management.options,

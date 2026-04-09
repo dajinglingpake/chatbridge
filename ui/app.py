@@ -26,10 +26,16 @@ def _load_nicegui():
 def create_ui() -> None:
     ui = _load_nicegui()
     localizer = Localizer()
-    state = {"auto_refresh": True}
+    state = {"auto_refresh": True, "selected_session_name": ""}
 
     def refresh_model():
-        return build_web_console_view_model(APP_DIR, localizer.translate)
+        model = build_web_console_view_model(
+            APP_DIR,
+            localizer.translate,
+            selected_session_name=state["selected_session_name"],
+        )
+        state["selected_session_name"] = model.selected_session_name
+        return model
 
     def jump_to(anchor: str) -> None:
         ui.run_javascript(f"window.location.hash = '{anchor}'")
@@ -71,7 +77,7 @@ def create_ui() -> None:
         with ui.column().classes("w-full max-w-7xl mx-auto gap-6 p-4"):
             render_home_section(ui, model, _run_action, _submit_task, _switch_account, _run_primary_action, open_qr_login)
             render_issues_section(ui, model, _run_repair_command)
-            render_sessions_section(ui, model)
+            render_sessions_section(ui, model, _select_session)
             render_diagnostics_section(ui, model)
 
     def _notify(result_message: str) -> None:
@@ -102,6 +108,10 @@ def create_ui() -> None:
             notify=_notify,
             open_qr_login=open_qr_login,
         )
+
+    def _select_session(session_name: str) -> None:
+        state["selected_session_name"] = session_name
+        shell_view.refresh()
 
     def toggle_auto_refresh() -> None:
         state["auto_refresh"] = not state["auto_refresh"]

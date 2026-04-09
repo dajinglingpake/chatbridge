@@ -96,13 +96,20 @@ def render_issues_section(ui: Any, model: WebConsoleViewModel, on_run_repair_com
                             ui.label("当前平台下这条修复建议需要手动执行。").classes("text-sm text-slate-500")
 
 
-def render_sessions_section(ui: Any, model: WebConsoleViewModel) -> None:
+def render_sessions_section(ui: Any, model: WebConsoleViewModel, on_select_session) -> None:
     with ui.element("section").props(f"id={SESSIONS_PAGE.anchor}").classes("w-full"):
         ui.label(SESSIONS_PAGE.title).classes("text-2xl font-semibold")
         ui.label(SESSIONS_PAGE.description).classes("text-slate-500")
         with ui.grid(columns=2).classes("w-full gap-4"):
             with ui.card().classes("w-full"):
                 ui.label("会话概览").classes("text-lg font-semibold")
+                session_options = {row.name: row.name for row in model.session_rows}
+                ui.select(
+                    session_options,
+                    value=model.selected_session_name or None,
+                    label="选择会话",
+                    on_change=lambda event: on_select_session(event.value or ""),
+                ).classes("w-full")
                 rows = [
                     {
                         "会话": row.name,
@@ -119,10 +126,10 @@ def render_sessions_section(ui: Any, model: WebConsoleViewModel) -> None:
                     row_key="会话",
                 ).classes("w-full")
             with ui.card().classes("w-full"):
-                ui.label("默认会话详情").classes("text-lg font-semibold")
+                ui.label(f"会话详情: {model.selected_session_name or '(未选择)'}").classes("text-lg font-semibold")
                 ui.code("\n".join(model.session_detail_lines)).classes("w-full whitespace-pre-wrap")
                 ui.separator()
-                ui.label("默认会话预览").classes("text-lg font-semibold")
+                ui.label(f"会话预览: {model.selected_session_name or '(未选择)'}").classes("text-lg font-semibold")
                 ui.code("\n".join(model.session_conversation_lines)).classes("w-full whitespace-pre-wrap")
 
         with ui.card().classes("w-full"):
@@ -149,17 +156,25 @@ def render_diagnostics_section(ui: Any, model: WebConsoleViewModel) -> None:
     with ui.element("section").props(f"id={DIAGNOSTICS_PAGE.anchor}").classes("w-full"):
         ui.label(DIAGNOSTICS_PAGE.title).classes("text-2xl font-semibold")
         ui.label(DIAGNOSTICS_PAGE.description).classes("text-slate-500")
-        with ui.card().classes("w-full"):
-            rows = [
-                {
-                    "项目": check.label,
-                    "状态": check.status_text,
-                    "详情": check.detail,
-                }
-                for check in model.checks
-            ]
-            ui.table(
-                columns=[{"name": key, "label": key, "field": key} for key in ["项目", "状态", "详情"]],
-                rows=rows,
-                row_key="项目",
-            ).classes("w-full")
+        with ui.grid(columns=2).classes("w-full gap-4"):
+            with ui.card().classes("w-full"):
+                rows = [
+                    {
+                        "项目": check.label,
+                        "状态": check.status_text,
+                        "详情": check.detail,
+                    }
+                    for check in model.checks
+                ]
+                ui.label("环境检查").classes("text-lg font-semibold")
+                ui.table(
+                    columns=[{"name": key, "label": key, "field": key} for key in ["项目", "状态", "详情"]],
+                    rows=rows,
+                    row_key="项目",
+                ).classes("w-full")
+            with ui.card().classes("w-full"):
+                ui.label("运行日志").classes("text-lg font-semibold")
+                for title, content in model.log_sections:
+                    ui.label(title).classes("font-semibold text-slate-700")
+                    ui.code(content).classes("w-full whitespace-pre-wrap max-h-60 overflow-auto")
+                    ui.separator()
