@@ -13,7 +13,7 @@ from typing import Any
 
 from agent_backends import DEFAULT_BACKEND_KEY, BackendContext, build_backend_registry, supported_backend_keys
 from bridge_config import BridgeConfig
-from core.weixin_notifier import broadcast_weixin_notice_by_kind, build_ui_access_hint
+from core.weixin_notifier import broadcast_weixin_notice_by_kind, build_task_followup_hint
 from local_ipc import REQUEST_DIR, ensure_ipc_dirs, mark_processed, read_request, write_response
 from core.platform_compat import creationflags, resolve_command
 
@@ -379,7 +379,7 @@ class MultiCodexHub:
                 f"后端: {backend}\n"
                 f"状态: 成功\n"
                 f"输出摘要: {output[:600]}\n"
-                f"{build_ui_access_hint(task_id=task_id, session_name=session_name)}"
+                f"{build_task_followup_hint(task_id=task_id, session_name=session_name)}"
             )
             broadcast_weixin_notice_by_kind("task", "任务执行完成", detail)
             return
@@ -391,7 +391,7 @@ class MultiCodexHub:
             f"后端: {backend}\n"
             f"状态: 失败\n"
             f"错误: {error_text[:600]}\n"
-            f"{build_ui_access_hint(task_id=task_id, session_name=session_name)}"
+            f"{build_task_followup_hint(task_id=task_id, session_name=session_name)}"
         )
         broadcast_weixin_notice_by_kind("task", "任务执行失败", detail)
 

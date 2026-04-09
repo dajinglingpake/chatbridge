@@ -248,6 +248,8 @@ class WeixinBridge:
                 self._t("bridge.help.new"),
                 self._t("bridge.help.list"),
                 self._t("bridge.help.use"),
+                self._t("bridge.help.task"),
+                self._t("bridge.help.last"),
                 self._t("bridge.help.agent.current"),
                 self._t("bridge.help.agent.switch"),
                 self._t("bridge.help.notify.current"),
@@ -277,6 +279,24 @@ class WeixinBridge:
                 backend = normalize_backend(str((sessions.get(name) or {}).get("backend") or self.config.default_backend))
                 lines.append(self._t("bridge.list.item", marker=marker, name=name, backend=backend))
             return "\n".join(lines), True
+
+        if command == "/task":
+            if len(parts) < 2:
+                return self._t("bridge.task.lookup.usage"), True
+            task_id = parts[1].strip()
+            if not task_id:
+                return self._t("bridge.task.lookup.usage"), True
+            lookup = self._ipc_request("get_task", {"task_id": task_id}, timeout_seconds=5)
+            if not lookup.get("ok"):
+                return self._t("bridge.task.lookup.not_found", task_id=task_id), True
+            task = lookup.get("task") or {}
+            return self._render_task_summary(task), True
+
+        if command == "/last":
+            latest_task = self._find_latest_sender_task(sender_id)
+            if latest_task is None:
+                return self._t("bridge.task.lookup.none"), True
+            return self._render_task_summary(latest_task), True
 
         if command == "/use":
             if len(parts) < 2:
@@ -374,6 +394,35 @@ class WeixinBridge:
             return self._t("bridge.session.reset", session=reset.get("current_session"), backend=backend), True
 
         return self._t("bridge.command.unknown"), True
+
+    def _find_latest_sender_task(self, sender_id: str) -> dict[str, Any] | None:
+        state = self._ipc_request("state", {}, timeout_seconds=5)
+        if not state.get("ok"):
+            return None
+        tasks = state.get("tasks") or []
+        for task in tasks:
+            if str(task.get("sender_id") or "").strip() == sender_id:
+                return task
+        return None
+
+    def _render_task_summary(self, task: dict[str, Any]) -> str:
+        task_id = str(task.get("id") or "")
+        session_name = str(task.get("session_name") or "default")
+        status = str(task.get("status") or "")
+        agent_name = str(task.get("agent_name") or task.get("agent_id") or "")
+        backend = str(task.get("backend") or self.config.default_backend)
+        prompt = str(task.get("prompt") or "").strip()[:400] or "(empty)"
+        result = str(task.get("output") or task.get("error") or "").strip()[:800] or "(empty)"
+        return self._t(
+            "bridge.task.lookup.summary",
+            task_id=task_id,
+            session=session_name,
+            status=status,
+            agent=agent_name,
+            backend=backend,
+            prompt=prompt,
+            result=result,
+        )
 
     @staticmethod
     def _normalize_command_text(text: str) -> str:

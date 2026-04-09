@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import random
 import time
 import urllib.error
@@ -75,13 +74,13 @@ def _build_notice_text(title: str, detail: str) -> str:
     return f"[ChatBridge 系统通知]\n操作: {title}\n结果: {body}"
 
 
-def build_ui_access_hint(task_id: str = "", session_name: str = "") -> str:
-    base_url = (os.environ.get("CHATBRIDGE_UI_URL") or "http://127.0.0.1:8765").strip().rstrip("/")
-    lines = [f"查看详情: {base_url}/#sessions"]
-    if session_name:
-        lines.append(f"建议会话筛选: {session_name}")
+def build_task_followup_hint(task_id: str = "", session_name: str = "") -> str:
+    lines = ["可继续发送命令查看详情:"]
     if task_id:
-        lines.append(f"建议任务筛选: {task_id}")
+        lines.append(f"/task {task_id}")
+    lines.append("/last")
+    if session_name:
+        lines.append(f"当前会话: {session_name}")
     return "\n".join(lines)
 
 
