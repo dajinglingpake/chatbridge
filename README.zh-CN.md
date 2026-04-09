@@ -212,7 +212,7 @@ Web 模式启动后，浏览器打开 `http://127.0.0.1:8765`，即可完成：
 - `runtime_stack.py`：主线运行时与进程控制入口
 - `env_tools.py`：主线环境检查与安装辅助入口
 - `agent_hub.py`：主线会话后端入口，支持 `codex` / `claude` / `opencode`
-- `agent_backends/`：Agent 后端接口与独立实现目录，新后端应在这里扩展
+- `agent_backends/`：Agent 后端接口与独立实现目录，新后端放入这里会被 registry 自动发现
 - `weixin_hub_bridge.py`：微信桥接层
 
 ## 说明

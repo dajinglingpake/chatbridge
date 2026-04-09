@@ -179,7 +179,7 @@ The repo already ignores:
 - `runtime_stack.py`: primary runtime and process control entry
 - `env_tools.py`: primary environment check and install helper entry
 - `agent_hub.py`: primary conversation backend entry with `codex` / `claude` / `opencode` support
-- `agent_backends/`: backend interface and isolated implementations for agent runtimes
+- `agent_backends/`: backend interface and isolated implementations; new `*_backend.py` files are auto-discovered
 - `weixin_hub_bridge.py`: WeChat bridge
 
 ## Notes

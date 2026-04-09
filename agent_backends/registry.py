@@ -1,20 +1,33 @@
 from __future__ import annotations
 
+import importlib
+import inspect
+import pkgutil
+
 from agent_backends.base import AgentBackend
-from agent_backends.claude_backend import ClaudeBackend
-from agent_backends.codex_backend import CodexBackend
-from agent_backends.opencode_backend import OpenCodeBackend
 
 DEFAULT_BACKEND_KEY = "codex"
 
 
 def build_backend_registry() -> dict[str, AgentBackend]:
-    backends: list[AgentBackend] = [
-        CodexBackend(),
-        ClaudeBackend(),
-        OpenCodeBackend(),
-    ]
-    return {backend.key: backend for backend in backends}
+    discovered: dict[str, AgentBackend] = {}
+    package_name = __name__.rsplit(".", 1)[0]
+    package = importlib.import_module(package_name)
+    module_infos = sorted(pkgutil.iter_modules(package.__path__), key=lambda item: item.name)
+    for module_info in module_infos:
+        if not module_info.name.endswith("_backend"):
+            continue
+        module = importlib.import_module(f"{package_name}.{module_info.name}")
+        for _, obj in sorted(inspect.getmembers(module, inspect.isclass), key=lambda item: item[0]):
+            if obj.__module__ != module.__name__:
+                continue
+            key = getattr(obj, "key", "")
+            invoke = getattr(obj, "invoke", None)
+            if not isinstance(key, str) or not key.strip() or not callable(invoke):
+                continue
+            backend = obj()
+            discovered[backend.key] = backend
+    return discovered
 
 
 def supported_backend_keys() -> tuple[str, ...]:
