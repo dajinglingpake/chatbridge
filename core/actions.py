@@ -38,8 +38,8 @@ def build_repair_commands(checks: dict[str, Any], translate=None) -> list[tuple[
             return fallback
         return translate(key)
 
-    if is_missing(checks, "pyside6") or is_missing(checks, "psutil"):
-        commands.append((label("ui.quickstart.step.desktop", "桌面依赖"), "python -m pip install PySide6 psutil"))
+    if is_missing(checks, "psutil"):
+        commands.append((label("ui.quickstart.step.desktop", "Python 依赖"), "python -m pip install -r requirements.txt"))
 
     if IS_WINDOWS and is_missing(checks, "nvm") and not is_missing(checks, "winget"):
         commands.append(("NVM for Windows", "winget install CoreyButler.NVMforWindows --accept-package-agreements --accept-source-agreements"))

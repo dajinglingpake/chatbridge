@@ -134,9 +134,10 @@ python3 ./ui_main.py --native
 统一 UI 启动后会自动：
 
 - 创建 `.runtime/`
-- 如有缺失则自动安装桌面 Python 依赖
-  - `PySide6`
+- 如有缺失则自动安装 Python 依赖
+  - `nicegui`
   - `psutil`
+  - `qrcode`
 - 检测其他运行环境
 - 在可能的情况下自动补齐 Windows 工具链
   - `winget`
@@ -237,7 +238,7 @@ Web 模式启动后，浏览器打开 `http://127.0.0.1:8765`，即可完成：
 - 当前项目已支持基础跨平台运行，桌面模式仍主要面向 Windows
 - 关闭桌面窗口不一定等于干净关闭后台，除非应用主动停止整套服务
 - 桌面应用负责展示当前状态以及推荐的下一步操作
-- Linux Web 模式不会依赖 `PySide6`
+- 当前统一 UI 主线不再依赖 `PySide6`
 - 推荐的 Node 安装路径在 Windows 上是 `nvm for Windows` + `Node.js 24.14.1`
 - Hub 与 Bridge 通过本地运行时 IPC 通信
 

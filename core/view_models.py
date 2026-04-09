@@ -265,7 +265,7 @@ def build_account_management_view_model(t: Translator) -> AccountManagementViewM
 
 
 def build_diagnostics_view_model(checks: dict[str, Any], diag_at: str, t: Translator) -> DiagnosticsViewModel:
-    ordered_keys = ["python", "winget", "nvm", "pyside6", "psutil", "node", "npm", "codex", "claude", "opencode", "weixin_account", "project_files"]
+    ordered_keys = ["python", "winget", "nvm", "psutil", "node", "npm", "codex", "claude", "opencode", "weixin_account", "project_files"]
     check_models: list[CheckViewModel] = []
     lines: list[str] = []
     for key in ordered_keys:

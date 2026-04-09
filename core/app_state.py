@@ -146,7 +146,7 @@ def decide_primary_action(snapshot: Any, checks: dict[str, Any], translator: Cal
 
     auto_fixable = [
         key
-        for key in ["pyside6", "psutil", "nvm", "node", "npm", "codex", "claude", "opencode"]
+        for key in ["psutil", "nvm", "node", "npm", "codex", "claude", "opencode"]
         if _check_missing(checks, key)
     ]
     if auto_fixable:
@@ -170,7 +170,7 @@ def build_summary_text(snapshot: Any, checks: dict[str, Any], translator: Callab
 def build_quickstart_lines(snapshot: Any, checks: dict[str, Any], accounts_dir: Path, translator: Callable[..., str] | None = None) -> tuple[list[str], str]:
     backend_choices = "|".join(supported_backend_keys())
     stage_lines = [
-        step_line(_t(translator, "ui.quickstart.step.desktop"), _check_ok(checks, "pyside6") and _check_ok(checks, "psutil"), translator),
+        step_line(_t(translator, "ui.quickstart.step.desktop"), _check_ok(checks, "psutil"), translator),
         step_line(_t(translator, "ui.quickstart.step.node"), not any(_check_missing(checks, key) for key in ["node", "npm", "codex", "claude", "opencode"]), translator),
         step_line(_t(translator, "ui.quickstart.step.accounts"), not _check_missing(checks, "weixin_account"), translator),
         step_line(_t(translator, "ui.quickstart.step.start"), snapshot.hub_running and snapshot.bridge_running, translator),
@@ -203,7 +203,7 @@ def build_quickstart_lines(snapshot: Any, checks: dict[str, Any], accounts_dir: 
 
 def build_issues(snapshot: Any, bridge_state: dict[str, Any], checks: dict[str, Any], translator: Callable[..., str] | None = None) -> list[IssueItem]:
     issues: list[IssueItem] = []
-    if any(_check_missing(checks, key) for key in ["pyside6", "psutil", "nvm", "node", "npm", "codex", "claude", "opencode"]):
+    if any(_check_missing(checks, key) for key in ["psutil", "nvm", "node", "npm", "codex", "claude", "opencode"]):
         issues.append(
             IssueItem(
                 kind="dependencies",

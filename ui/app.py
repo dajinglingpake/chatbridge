@@ -60,7 +60,7 @@ def create_ui() -> None:
         ui.run_javascript(f"window.location.hash = '{anchor}'")
 
     def refresh_view() -> None:
-        shell_view.refresh()
+        content_view.refresh()
 
     def notify_only(result_message: str) -> None:
         ui.notify(result_message, position="top")
@@ -68,31 +68,8 @@ def create_ui() -> None:
     open_qr_login = install_qr_login_dialog(ui, notify_only, refresh_view)
 
     @ui.refreshable
-    def shell_view() -> None:
+    def content_view() -> None:
         model = refresh_model()
-        with ui.header().classes("items-center justify-between bg-stone-100 text-slate-800 shadow-sm px-4 py-3"):
-            with ui.column().classes("gap-0"):
-                ui.label(APP_SHELL.app_name).classes("text-2xl font-bold")
-                ui.label(APP_SHELL.app_subtitle).classes("text-sm text-slate-600")
-            with ui.row().classes("gap-2 items-center"):
-                ui.button(AUTO_REFRESH_ON_ACTION.label if state["auto_refresh"] else AUTO_REFRESH_OFF_ACTION.label, on_click=lambda: toggle_auto_refresh()).props("outline")
-
-        with ui.row().classes("w-full gap-2 px-4 py-3 bg-stone-50 border-b border-stone-200 sticky top-[72px] z-40"):
-            for page in APP_SHELL.pages:
-                ui.link(page.title, f"#{page.anchor}").classes("rounded-full px-4 py-2 bg-white border border-stone-200 text-slate-700 no-underline")
-            ui.space()
-            for action in APP_SHELL.topbar_actions:
-                ui.button(
-                    action.label,
-                    on_click=lambda key=action.key: execute_topbar_action(
-                        key,
-                        refresh=refresh_view,
-                        jump=jump_to,
-                        notify=notify_only,
-                        open_qr_login=open_qr_login,
-                    ),
-                ).props("outline")
-
         with ui.column().classes("w-full max-w-7xl mx-auto gap-6 p-4"):
             render_home_section(
                 ui,
@@ -119,7 +96,7 @@ def create_ui() -> None:
 
     def _notify(result_message: str) -> None:
         ui.notify(result_message, position="top")
-        shell_view.refresh()
+        content_view.refresh()
 
     def _run_action(action: str) -> None:
         result = run_named_action(action)
@@ -187,20 +164,20 @@ def create_ui() -> None:
 
     def _select_session(session_name: str) -> None:
         state["selected_session_name"] = session_name
-        shell_view.refresh()
+        content_view.refresh()
 
     def _select_task(task_id: str, session_name: str = "") -> None:
         state["selected_task_id"] = task_id
         if session_name:
             state["selected_session_name"] = session_name
-        shell_view.refresh()
+        content_view.refresh()
 
     def _set_task_filters(status: str = "", agent: str = "", backend: str = "") -> None:
         state["selected_task_status"] = status
         state["selected_task_agent"] = agent
         state["selected_task_backend"] = backend
         state["selected_task_id"] = ""
-        shell_view.refresh()
+        content_view.refresh()
 
     def _find_task_by_id(task_id: str) -> None:
         cleaned_id = task_id.strip()
@@ -214,7 +191,7 @@ def create_ui() -> None:
             return
         state["selected_task_id"] = matched.task_id
         state["selected_session_name"] = matched.session_name
-        shell_view.refresh()
+        content_view.refresh()
 
     def _open_weixin_binding(session_name: str) -> None:
         cleaned_name = session_name.strip()
@@ -223,7 +200,7 @@ def create_ui() -> None:
             return
         state["selected_session_name"] = cleaned_name
         state["selected_task_id"] = ""
-        shell_view.refresh()
+        content_view.refresh()
         jump_to("sessions")
 
     def _open_weixin_binding_task(task_id: str, session_name: str) -> None:
@@ -233,7 +210,7 @@ def create_ui() -> None:
             return
         state["selected_session_name"] = session_name.strip()
         state["selected_task_id"] = cleaned_task_id
-        shell_view.refresh()
+        content_view.refresh()
         jump_to("sessions")
 
     def _switch_weixin_binding_backend(sender_id: str, backend: str) -> None:
@@ -246,10 +223,37 @@ def create_ui() -> None:
 
     def toggle_auto_refresh() -> None:
         state["auto_refresh"] = not state["auto_refresh"]
-        shell_view.refresh()
+        auto_refresh_button.text = AUTO_REFRESH_ON_ACTION.label if state["auto_refresh"] else AUTO_REFRESH_OFF_ACTION.label
+        content_view.refresh()
 
-    shell_view()
-    ui.timer(8.0, lambda: shell_view.refresh() if state["auto_refresh"] else None)
+    with ui.header().classes("items-center justify-between bg-stone-100 text-slate-800 shadow-sm px-4 py-3"):
+        with ui.column().classes("gap-0"):
+            ui.label(APP_SHELL.app_name).classes("text-2xl font-bold")
+            ui.label(APP_SHELL.app_subtitle).classes("text-sm text-slate-600")
+        with ui.row().classes("gap-2 items-center"):
+            auto_refresh_button = ui.button(
+                AUTO_REFRESH_ON_ACTION.label if state["auto_refresh"] else AUTO_REFRESH_OFF_ACTION.label,
+                on_click=lambda: toggle_auto_refresh(),
+            ).props("outline")
+
+    with ui.row().classes("w-full gap-2 px-4 py-3 bg-stone-50 border-b border-stone-200 sticky top-[72px] z-40"):
+        for page in APP_SHELL.pages:
+            ui.link(page.title, f"#{page.anchor}").classes("rounded-full px-4 py-2 bg-white border border-stone-200 text-slate-700 no-underline")
+        ui.space()
+        for action in APP_SHELL.topbar_actions:
+            ui.button(
+                action.label,
+                on_click=lambda key=action.key: execute_topbar_action(
+                    key,
+                    refresh=refresh_view,
+                    jump=jump_to,
+                    notify=notify_only,
+                    open_qr_login=open_qr_login,
+                ),
+            ).props("outline")
+
+    content_view()
+    ui.timer(8.0, lambda: content_view.refresh() if state["auto_refresh"] else None)
 
 
 def run_ui(host: str = "127.0.0.1", port: int = 8765, native: bool = False) -> None:

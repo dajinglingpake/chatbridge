@@ -124,9 +124,6 @@ def collect_checks(project_dir: Path) -> list[CheckResult]:
                 break
         results.append(CheckResult(key=key, label=label, ok=ok, detail=detail or "not found"))
 
-    pyside6_ok = importlib.util.find_spec("PySide6") is not None
-    results.append(CheckResult(key="pyside6", label="PySide6", ok=pyside6_ok, detail="installed" if pyside6_ok else "missing"))
-
     psutil_ok = importlib.util.find_spec("psutil") is not None
     results.append(CheckResult(key="psutil", label="psutil", ok=psutil_ok, detail="installed" if psutil_ok else "missing"))
 
@@ -161,7 +158,7 @@ def collect_checks(project_dir: Path) -> list[CheckResult]:
 
 
 def suggested_install_commands() -> list[tuple[str, str]]:
-    commands = [("Install Desktop deps", "python -m pip install PySide6 psutil")]
+    commands = [("Install Python deps", "python -m pip install -r requirements.txt")]
     if IS_WINDOWS:
         commands.extend(
             [
@@ -187,7 +184,7 @@ def suggested_install_commands() -> list[tuple[str, str]]:
 def suggested_upgrade_commands() -> list[tuple[str, str]]:
     commands = [
         ("Upgrade pip", "python -m pip install --upgrade pip"),
-        ("Upgrade Desktop deps", "python -m pip install --upgrade PySide6 psutil"),
+        ("Upgrade Python deps", "python -m pip install --upgrade -r requirements.txt"),
     ]
     if IS_WINDOWS:
         commands.append(("Upgrade Node via NVM", build_nvm_node_command()))

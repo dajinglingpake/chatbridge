@@ -6,13 +6,13 @@ python -c "import sys; print(sys.executable)"
 echo Python version:
 python -c "import sys; print(sys.version)"
 echo.
-echo Installing desktop dependencies: PySide6 psutil
-python -m pip install PySide6 psutil
+echo Installing Python dependencies from requirements.txt
+python -m pip install -r requirements.txt
 if errorlevel 1 (
   echo.
-  echo Failed to install desktop dependencies.
+  echo Failed to install Python dependencies.
   exit /b 1
 )
 echo.
-echo Desktop dependencies installed successfully.
+echo Python dependencies installed successfully.
 endlocal

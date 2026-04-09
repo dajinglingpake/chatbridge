@@ -40,10 +40,13 @@ def _run_command(argv: list[str]) -> None:
 
 
 def ensure_ui_dependencies() -> None:
+    venv_python = _venv_python()
+    if venv_python.exists() and not _is_running_in_project_venv():
+        os.execv(str(venv_python), [str(venv_python), str(APP_DIR / "ui_main.py"), *sys.argv[1:]])
+
     if _has_ui_dependency():
         return
 
-    venv_python = _venv_python()
     if not venv_python.exists():
         print(f"[chatbridge] Creating local virtual environment: {VENV_DIR}", file=sys.stderr)
         _run_command([sys.executable, "-m", "venv", str(VENV_DIR)])
@@ -53,8 +56,7 @@ def ensure_ui_dependencies() -> None:
     _run_command([installer_python, "-m", "pip", "install", "--upgrade", "pip"])
     _run_command([installer_python, "-m", "pip", "install", "-r", str(REQUIREMENTS_PATH)])
 
-    if not _is_running_in_project_venv():
-        os.execv(installer_python, [installer_python, str(APP_DIR / "ui_main.py"), *sys.argv[1:]])
+    os.execv(installer_python, [installer_python, str(APP_DIR / "ui_main.py"), *sys.argv[1:]])
 
 
 def run_ui_entry(host: str = "127.0.0.1", port: int = 8765, native: bool = False) -> None:
