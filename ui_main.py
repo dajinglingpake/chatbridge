@@ -75,7 +75,25 @@ def _ensure_venv_pip(python_executable: str) -> None:
         return
 
     print("[chatbridge] pip missing in local virtual environment, bootstrapping with ensurepip", file=sys.stderr)
-    _run_command([python_executable, "-m", "ensurepip", "--upgrade"])
+    _run_command([python_executable, "-m", "ensurepip", "--upgrade", "--default-pip"])
+
+
+def _ensure_local_venv() -> Path:
+    venv_python = _venv_python()
+    if venv_python.exists():
+        return venv_python
+
+    print(f"[chatbridge] Creating local virtual environment: {VENV_DIR}", file=sys.stderr)
+    try:
+        _run_command([sys.executable, "-m", "venv", str(VENV_DIR)])
+    except subprocess.CalledProcessError:
+        if not venv_python.exists():
+            raise
+        print(
+            "[chatbridge] venv creation reported an error after creating the interpreter; attempting to repair pip in-place",
+            file=sys.stderr,
+        )
+    return venv_python
 
 
 def ensure_ui_dependencies(launcher_path: Path | None = None) -> None:
@@ -87,9 +105,7 @@ def ensure_ui_dependencies(launcher_path: Path | None = None) -> None:
     if _has_ui_dependency():
         return
 
-    if not venv_python.exists():
-        print(f"[chatbridge] Creating local virtual environment: {VENV_DIR}", file=sys.stderr)
-        _run_command([sys.executable, "-m", "venv", str(VENV_DIR)])
+    venv_python = _ensure_local_venv()
 
     installer_python = str(venv_python)
     _ensure_venv_pip(installer_python)
