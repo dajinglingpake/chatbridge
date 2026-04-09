@@ -155,3 +155,16 @@ For end users, the simplified message is:
 4. Put the WeChat account `json/sync` files into `accounts/`
 
 That is the intended deployment experience.
+
+## 10. Remote WeChat Control
+
+If WeChat and the Agent/UI are not on the same machine, prefer WeChat commands for remote inspection and control:
+
+- `/status`
+- `/agent`
+- `/backend`
+- `/notify`
+- `/task <task_id>`
+- `/last`
+
+In practice, task results in WeChat should be consumed through summaries and follow-up commands rather than relying on local Web links.
