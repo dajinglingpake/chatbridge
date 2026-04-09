@@ -44,12 +44,14 @@ class CheckViewModel:
 
 @dataclass
 class TaskViewModel:
+    task_id: str
     created_at: str
     agent_name: str
     backend: str
     status: str
-    prompt: str
-    result_text: str
+    session_name: str
+    prompt_summary: str
+    result_summary: str
 
 
 @dataclass
@@ -77,8 +79,19 @@ class WebConsoleViewModel:
     tasks: list[TaskViewModel]
     session_rows: list[SessionRow]
     selected_session_name: str
+    selected_task_id: str
+    selected_task_status: str
+    selected_task_agent: str
+    selected_task_backend: str
+    task_status_options: list[str]
+    task_agent_options: list[str]
+    task_backend_options: list[str]
+    task_total_count: int
+    task_filtered_count: int
     session_detail_lines: list[str]
     session_conversation_lines: list[str]
+    task_detail_lines: list[str]
+    task_result_lines: list[str]
     account_options: list[AccountOptionViewModel]
     agent_options: list[AgentOptionViewModel]
 
@@ -112,6 +125,15 @@ class DiagnosticsViewModel:
     label_text: str
     detail_text: str
     checks: list[CheckViewModel]
+
+
+def summarize_text(value: str, limit: int = 96) -> str:
+    compact = " ".join(value.split())
+    if not compact:
+        return "(empty)"
+    if len(compact) <= limit:
+        return compact
+    return f"{compact[: limit - 3]}..."
 
 
 def build_home_view_model(
@@ -199,7 +221,7 @@ def build_account_management_view_model(t: Translator) -> AccountManagementViewM
 
 
 def build_diagnostics_view_model(checks: dict[str, Any], diag_at: str, t: Translator) -> DiagnosticsViewModel:
-    ordered_keys = ["python", "winget", "nvm", "pyside6", "psutil", "node", "npm", "codex", "opencode", "weixin_account", "project_files"]
+    ordered_keys = ["python", "winget", "nvm", "pyside6", "psutil", "node", "npm", "codex", "claude", "opencode", "weixin_account", "project_files"]
     check_models: list[CheckViewModel] = []
     lines: list[str] = []
     for key in ordered_keys:
@@ -222,9 +244,26 @@ def build_diagnostics_view_model(checks: dict[str, Any], diag_at: str, t: Transl
     )
 
 
-def build_web_console_view_model(app_dir: Path, t: Translator, selected_session_name: str = "") -> WebConsoleViewModel:
+def build_web_console_view_model(
+    app_dir: Path,
+    t: Translator,
+    selected_session_name: str = "",
+    selected_task_id: str = "",
+    selected_task_status: str = "",
+    selected_task_agent: str = "",
+    selected_task_backend: str = "",
+) -> WebConsoleViewModel:
     dashboard = load_dashboard_state(app_dir)
-    return build_web_console_view_model_from_dashboard(dashboard, app_dir, t, selected_session_name=selected_session_name)
+    return build_web_console_view_model_from_dashboard(
+        dashboard,
+        app_dir,
+        t,
+        selected_session_name=selected_session_name,
+        selected_task_id=selected_task_id,
+        selected_task_status=selected_task_status,
+        selected_task_agent=selected_task_agent,
+        selected_task_backend=selected_task_backend,
+    )
 
 
 def build_web_console_view_model_from_dashboard(
@@ -232,6 +271,10 @@ def build_web_console_view_model_from_dashboard(
     app_dir: Path,
     t: Translator,
     selected_session_name: str = "",
+    selected_task_id: str = "",
+    selected_task_status: str = "",
+    selected_task_agent: str = "",
+    selected_task_backend: str = "",
 ) -> WebConsoleViewModel:
     checks_map = dashboard.checks
     hub_state = dashboard.hub_state
@@ -254,18 +297,66 @@ def build_web_console_view_model_from_dashboard(
     if not agent_options:
         agent_options.append(AgentOptionViewModel(agent_id="main", label="默认会话 (main)"))
 
+    raw_tasks = list((hub_state.get("tasks") or [])[:12])
+    task_status_options = sorted({str(task.get("status") or "") for task in raw_tasks if str(task.get("status") or "")})
+    task_agent_options = sorted({str(task.get("agent_name") or task.get("agent_id") or "") for task in raw_tasks if str(task.get("agent_name") or task.get("agent_id") or "")})
+    task_backend_options = sorted({str(task.get("backend") or "") for task in raw_tasks if str(task.get("backend") or "")})
+
+    resolved_task_status = selected_task_status if selected_task_status in task_status_options else ""
+    resolved_task_agent = selected_task_agent if selected_task_agent in task_agent_options else ""
+    resolved_task_backend = selected_task_backend if selected_task_backend in task_backend_options else ""
+
+    total_task_count = len(raw_tasks)
+    filtered_raw_tasks = [
+        task
+        for task in raw_tasks
+        if (not resolved_session_name or str(task.get("session_name") or "default") == resolved_session_name)
+        and (not resolved_task_status or str(task.get("status") or "") == resolved_task_status)
+        and (not resolved_task_agent or str(task.get("agent_name") or task.get("agent_id") or "") == resolved_task_agent)
+        and (not resolved_task_backend or str(task.get("backend") or "") == resolved_task_backend)
+    ]
+    filtered_task_count = len(filtered_raw_tasks)
+    if not filtered_raw_tasks:
+        filtered_raw_tasks = raw_tasks
+
     tasks: list[TaskViewModel] = []
-    for task in (hub_state.get("tasks") or [])[:12]:
+    for task in filtered_raw_tasks:
         tasks.append(
             TaskViewModel(
+                task_id=str(task.get("id") or ""),
                 created_at=str(task.get("created_at") or ""),
                 agent_name=str(task.get("agent_name") or task.get("agent_id") or ""),
                 backend=str(task.get("backend") or ""),
                 status=str(task.get("status") or ""),
-                prompt=str(task.get("prompt") or ""),
-                result_text=str(task.get("output") or task.get("error") or ""),
+                session_name=str(task.get("session_name") or "default"),
+                prompt_summary=summarize_text(str(task.get("prompt") or "")),
+                result_summary=summarize_text(str(task.get("output") or task.get("error") or "")),
             )
         )
+    available_task_ids = {task.task_id for task in tasks if task.task_id}
+    resolved_task_id = selected_task_id if selected_task_id in available_task_ids else ""
+    if not resolved_task_id and tasks:
+        resolved_task_id = tasks[0].task_id
+    selected_task = next((task for task in filtered_raw_tasks if str(task.get("id") or "") == resolved_task_id), None)
+    if selected_task is None:
+        task_detail_lines = ["先在上方选中一个任务。"]
+        task_result_lines = ["这里会显示该任务的完整输出或错误。"]
+    else:
+        task_detail_lines = [
+            f"任务 ID: {selected_task.get('id') or ''}",
+            f"创建时间: {selected_task.get('created_at') or ''}",
+            f"完成时间: {selected_task.get('finished_at') or '-'}",
+            f"Agent: {selected_task.get('agent_name') or selected_task.get('agent_id') or ''}",
+            f"后端: {selected_task.get('backend') or ''}",
+            f"状态: {selected_task.get('status') or ''}",
+            f"会话: {selected_task.get('session_name') or 'default'}",
+            f"来源: {selected_task.get('source') or '-'}",
+            "",
+            "输入:",
+            str(selected_task.get("prompt") or "(empty)"),
+        ]
+        task_result = str(selected_task.get("output") or selected_task.get("error") or "(empty)")
+        task_result_lines = [task_result]
 
     checks: list[CheckViewModel] = []
     for check in checks_map.values():
@@ -308,8 +399,19 @@ def build_web_console_view_model_from_dashboard(
         tasks=tasks,
         session_rows=session_rows,
         selected_session_name=resolved_session_name,
+        selected_task_id=resolved_task_id,
+        selected_task_status=resolved_task_status,
+        selected_task_agent=resolved_task_agent,
+        selected_task_backend=resolved_task_backend,
+        task_status_options=task_status_options,
+        task_agent_options=task_agent_options,
+        task_backend_options=task_backend_options,
+        task_total_count=total_task_count,
+        task_filtered_count=filtered_task_count,
         session_detail_lines=session_detail.detail_text.splitlines(),
         session_conversation_lines=session_detail.conversation_text.splitlines(),
+        task_detail_lines=task_detail_lines,
+        task_result_lines=task_result_lines,
         account_options=account_management.options,
         agent_options=agent_options,
     )

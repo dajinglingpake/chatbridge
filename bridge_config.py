@@ -8,7 +8,7 @@ from pathlib import Path
 APP_DIR = Path(__file__).resolve().parent
 WEIXIN_ACCOUNTS_DIR = APP_DIR / "accounts"
 CONFIG_PATH = APP_DIR / "weixin_hub_bridge_config.json"
-SUPPORTED_BACKENDS = {"codex", "opencode"}
+SUPPORTED_BACKENDS = {"codex", "claude", "opencode"}
 
 
 def _to_abs_path(value: str, default: Path) -> str:

@@ -113,6 +113,7 @@ def collect_checks(project_dir: Path) -> list[CheckResult]:
         ("node", "Node.js", "node"),
         ("npm", "npm", "npm"),
         ("codex", "Codex CLI", "codex"),
+        ("claude", "Claude Code", "claude"),
         ("opencode", "OpenCode CLI", "opencode"),
     ]:
         ok = False
@@ -167,6 +168,7 @@ def suggested_install_commands() -> list[tuple[str, str]]:
                 ("Install NVM for Windows", "winget install CoreyButler.NVMforWindows --accept-package-agreements --accept-source-agreements"),
                 ("Install Node via NVM", build_nvm_node_command()),
                 ("Install Codex CLI", f"{resolve_command('npm')} install -g codex"),
+                ("Install Claude Code", f"{resolve_command('npm')} install -g @anthropic-ai/claude-code"),
                 ("Install OpenCode CLI", f"{resolve_command('npm')} install -g opencode-ai"),
             ]
         )
@@ -175,6 +177,7 @@ def suggested_install_commands() -> list[tuple[str, str]]:
             [
                 ("Install Node.js", "Use your Linux package manager to install nodejs and npm"),
                 ("Install Codex CLI", f"{resolve_command('npm')} install -g codex"),
+                ("Install Claude Code", f"{resolve_command('npm')} install -g @anthropic-ai/claude-code"),
                 ("Install OpenCode CLI", f"{resolve_command('npm')} install -g opencode-ai"),
             ]
         )
@@ -191,6 +194,7 @@ def suggested_upgrade_commands() -> list[tuple[str, str]]:
     commands.extend(
         [
             ("Upgrade Codex CLI", f"{resolve_command('npm')} install -g codex@latest"),
+            ("Upgrade Claude Code", f"{resolve_command('npm')} install -g @anthropic-ai/claude-code@latest"),
             ("Upgrade OpenCode CLI", f"{resolve_command('npm')} install -g opencode-ai@latest"),
         ]
     )

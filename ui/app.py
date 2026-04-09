@@ -26,15 +26,30 @@ def _load_nicegui():
 def create_ui() -> None:
     ui = _load_nicegui()
     localizer = Localizer()
-    state = {"auto_refresh": True, "selected_session_name": ""}
+    state = {
+        "auto_refresh": True,
+        "selected_session_name": "",
+        "selected_task_id": "",
+        "selected_task_status": "",
+        "selected_task_agent": "",
+        "selected_task_backend": "",
+    }
 
     def refresh_model():
         model = build_web_console_view_model(
             APP_DIR,
             localizer.translate,
             selected_session_name=state["selected_session_name"],
+            selected_task_id=state["selected_task_id"],
+            selected_task_status=state["selected_task_status"],
+            selected_task_agent=state["selected_task_agent"],
+            selected_task_backend=state["selected_task_backend"],
         )
         state["selected_session_name"] = model.selected_session_name
+        state["selected_task_id"] = model.selected_task_id
+        state["selected_task_status"] = model.selected_task_status
+        state["selected_task_agent"] = model.selected_task_agent
+        state["selected_task_backend"] = model.selected_task_backend
         return model
 
     def jump_to(anchor: str) -> None:
@@ -77,7 +92,7 @@ def create_ui() -> None:
         with ui.column().classes("w-full max-w-7xl mx-auto gap-6 p-4"):
             render_home_section(ui, model, _run_action, _submit_task, _switch_account, _run_primary_action, open_qr_login)
             render_issues_section(ui, model, _run_repair_command)
-            render_sessions_section(ui, model, _select_session)
+            render_sessions_section(ui, model, _select_session, _select_task, _set_task_filters)
             render_diagnostics_section(ui, model)
 
     def _notify(result_message: str) -> None:
@@ -111,6 +126,19 @@ def create_ui() -> None:
 
     def _select_session(session_name: str) -> None:
         state["selected_session_name"] = session_name
+        shell_view.refresh()
+
+    def _select_task(task_id: str, session_name: str = "") -> None:
+        state["selected_task_id"] = task_id
+        if session_name:
+            state["selected_session_name"] = session_name
+        shell_view.refresh()
+
+    def _set_task_filters(status: str = "", agent: str = "", backend: str = "") -> None:
+        state["selected_task_status"] = status
+        state["selected_task_agent"] = agent
+        state["selected_task_backend"] = backend
+        state["selected_task_id"] = ""
         shell_view.refresh()
 
     def toggle_auto_refresh() -> None:

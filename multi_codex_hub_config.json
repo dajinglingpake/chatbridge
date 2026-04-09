@@ -1,5 +1,6 @@
 {
   "codex_command": "codex",
+  "claude_command": "claude",
   "opencode_command": "opencode",
   "agents": [
     {

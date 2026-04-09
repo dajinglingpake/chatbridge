@@ -6,7 +6,7 @@ ChatBridge 最初是一个桌面控制应用，现在也支持在无图形界面
 
 - 微信消息传输
 - 多个 AI 会话管理
-- Hub / Bridge / Codex / OpenCode 子进程生命周期控制
+- Hub / Bridge / 多种 Agent CLI 子进程生命周期控制
 
 ## 仓库状态
 
@@ -83,7 +83,7 @@ python3 -m pip install psutil
 桌面模式优先使用：
 
 ```bat
-start-codex-wechat-desktop.cmd
+start-chatbridge-desktop.cmd
 ```
 
 也可以直接运行：
@@ -128,6 +128,7 @@ python3 ./ui_main.py --native
   - `nvm for Windows`
   - `Node.js 24.14.1`
   - `Codex CLI`
+  - `Claude Code`
   - `OpenCode CLI`
 
 Web 模式启动后，浏览器打开 `http://127.0.0.1:8765`，即可完成：
@@ -150,9 +151,14 @@ Web 模式启动后，浏览器打开 `http://127.0.0.1:8765`，即可完成：
 
 当前推荐入口：
 
+- Windows 桌面快捷启动：`start-chatbridge-desktop.cmd`
 - Windows / Linux 统一 UI 场景：`ui_main.py`
-- 旧桌面兼容入口：`main.py`
-- 旧 Web 兼容入口：`web_main.py`
+- Web 快捷启动：`start-chatbridge-web.sh`
+
+兼容入口：
+
+- `main.py`
+- `web_main.py`
 
 ## 运行时文件
 
@@ -200,13 +206,18 @@ Web 模式启动后，浏览器打开 `http://127.0.0.1:8765`，即可完成：
 ## 主要文件
 
 - `ui_main.py`：统一 UI 主入口
+- `start-chatbridge-desktop.cmd`：主线桌面启动脚本
 - `main.py`：旧桌面兼容入口
 - `web_main.py`：旧 Web 兼容入口
-- `codex_wechat_runtime.py`：Python 运行时与进程控制
-- `codex_wechat_bootstrap.py`：环境检查与安装辅助
-- `multi_codex_hub.py`：支持 `codex` / `opencode` 的会话后端
+- `runtime_stack.py`：主线运行时与进程控制入口
+- `env_tools.py`：主线环境检查与安装辅助入口
+- `agent_hub.py`：主线会话后端入口，支持 `codex` / `claude` / `opencode`
+- `codex_wechat_runtime.py`：旧运行时兼容实现
+- `codex_wechat_bootstrap.py`：旧环境工具兼容实现
+- `multi_codex_hub.py`：旧 Hub 兼容实现
 - `weixin_hub_bridge.py`：微信桥接层
-- `start-codex-wechat-desktop.cmd`：桌面启动脚本
+- `start-chatbridge-desktop.cmd`：主线桌面启动脚本
+- `start-codex-wechat-desktop.cmd`：旧桌面兼容启动脚本
 
 ## 说明
 
@@ -227,6 +238,6 @@ Web 模式启动后，浏览器打开 `http://127.0.0.1:8765`，即可完成：
 - `/list`
 - `/use <name>`
 - `/backend`
-- `/backend <codex|opencode>`
+- `/backend <codex|claude|opencode>`
 - `/close`
 - `/reset`

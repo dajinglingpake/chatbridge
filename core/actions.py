@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from codex_wechat_bootstrap import build_nvm_node_command
+from env_tools import build_nvm_node_command
 from core.platform_compat import IS_WINDOWS, resolve_command
 
 
@@ -53,6 +53,8 @@ def build_repair_commands(checks: dict[str, Any], translate=None) -> list[tuple[
 
     if is_missing(checks, "codex") and will_have_node:
         commands.append(("Codex CLI", f"{npm_command} install -g codex"))
+    if is_missing(checks, "claude") and will_have_node:
+        commands.append(("Claude Code", f"{npm_command} install -g @anthropic-ai/claude-code"))
     if is_missing(checks, "opencode") and will_have_node:
         commands.append(("OpenCode CLI", f"{npm_command} install -g opencode-ai"))
 

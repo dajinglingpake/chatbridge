@@ -20,12 +20,16 @@ def default_command(name: str) -> str:
         return "npm.cmd" if IS_WINDOWS else "npm"
     if normalized in {"codex", "codex.cmd"}:
         return "codex.cmd" if IS_WINDOWS else "codex"
+    if normalized in {"claude", "claude.cmd"}:
+        return "claude.cmd" if IS_WINDOWS else "claude"
     if normalized in {"opencode", "opencode.cmd"}:
         return "opencode.cmd" if IS_WINDOWS else "opencode"
     if name == "npm":
         return "npm.cmd" if IS_WINDOWS else "npm"
     if name == "codex":
         return "codex.cmd" if IS_WINDOWS else "codex"
+    if name == "claude":
+        return "claude.cmd" if IS_WINDOWS else "claude"
     if name == "opencode":
         return "opencode.cmd" if IS_WINDOWS else "opencode"
     return name

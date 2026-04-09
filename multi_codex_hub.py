@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from codex_wechat_ipc import REQUEST_DIR, ensure_ipc_dirs, mark_processed, read_request, write_response
+from local_ipc import REQUEST_DIR, ensure_ipc_dirs, mark_processed, read_request, write_response
 from core.platform_compat import creationflags, resolve_command
 
 
@@ -24,7 +24,7 @@ SESSION_DIR = RUNTIME_DIR / "sessions"
 WORKSPACE_DIR = APP_DIR / "workspace"
 CONFIG_PATH = APP_DIR / "multi_codex_hub_config.json"
 STATE_PATH = STATE_DIR / "multi_codex_hub_state.json"
-SUPPORTED_BACKENDS = {"codex", "opencode"}
+SUPPORTED_BACKENDS = {"codex", "claude", "opencode"}
 
 
 def now_iso() -> str:
@@ -69,7 +69,7 @@ def discover_agent_processes() -> list[dict[str, Any]]:
         cmdline = " ".join(proc.info.get("cmdline") or [])
         name = proc.info.get("name") or ""
         lowered = f"{name} {cmdline}".lower()
-        if "codex" not in lowered and "opencode" not in lowered:
+        if "codex" not in lowered and "claude" not in lowered and "opencode" not in lowered:
             continue
         result.append(
             {
@@ -96,6 +96,7 @@ class AgentConfig:
 @dataclass
 class HubConfig:
     codex_command: str = field(default_factory=lambda: resolve_command("codex"))
+    claude_command: str = field(default_factory=lambda: resolve_command("claude"))
     opencode_command: str = field(default_factory=lambda: resolve_command("opencode"))
     agents: list[AgentConfig] = field(default_factory=list)
 
@@ -117,6 +118,7 @@ class HubConfig:
         raw.pop("port", None)
         raw.pop("auto_open_browser", None)
         raw["codex_command"] = resolve_command(str(raw.get("codex_command") or "codex"))
+        raw["claude_command"] = resolve_command(str(raw.get("claude_command") or "claude"))
         raw["opencode_command"] = resolve_command(str(raw.get("opencode_command") or "opencode"))
         for agent in raw["agents"]:
             agent.name = (agent.name or "默认会话").strip()
@@ -321,8 +323,11 @@ class MultiCodexHub:
                 self._save_state()
 
     def _invoke_backend(self, agent: AgentConfig, prompt: str, session_name: str = "", backend: str = "") -> dict[str, str]:
-        if normalize_backend(backend or agent.backend) == "opencode":
+        normalized_backend = normalize_backend(backend or agent.backend)
+        if normalized_backend == "opencode":
             return self._invoke_opencode(agent, prompt, session_name)
+        if normalized_backend == "claude":
+            return self._invoke_claude(agent, prompt, session_name)
         return self._invoke_codex(agent, prompt, session_name)
 
     def _invoke_codex(self, agent: AgentConfig, prompt: str, session_name: str = "") -> dict[str, str]:
@@ -417,6 +422,72 @@ class MultiCodexHub:
         if session_id:
             session_file.write_text(session_id, encoding="utf-8")
         return {"output": output, "session_id": session_id}
+
+    def _invoke_claude(self, agent: AgentConfig, prompt: str, session_name: str = "") -> dict[str, str]:
+        workdir = Path(agent.workdir)
+        workdir.mkdir(parents=True, exist_ok=True)
+        session_file = self._resolve_session_file(agent, session_name)
+        session_file.parent.mkdir(parents=True, exist_ok=True)
+        existing_session = session_file.read_text(encoding="utf-8").strip() if session_file.exists() else ""
+        final_prompt = prompt if not agent.prompt_prefix else f"{agent.prompt_prefix}\n\n{prompt}"
+
+        argv = [self.config.claude_command, "-p", final_prompt, "--output-format", "json"]
+        if agent.model:
+            argv.extend(["--model", agent.model])
+        if existing_session:
+            argv.extend(["--resume", existing_session])
+
+        completed = subprocess.run(
+            argv,
+            cwd=str(workdir),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=creationflags(),
+            check=False,
+            shell=False,
+        )
+
+        output, session_id, error_message = self._parse_claude_stdout(completed.stdout)
+        if not session_id:
+            session_id = existing_session
+        if completed.returncode != 0:
+            raise RuntimeError(error_message or completed.stderr.strip() or f"Claude exited with code {completed.returncode}")
+        if not output:
+            raise RuntimeError("Claude returned an empty result")
+        if session_id:
+            session_file.write_text(session_id, encoding="utf-8")
+        return {"output": output, "session_id": session_id}
+
+    def _parse_claude_stdout(self, stdout: str) -> tuple[str, str, str]:
+        payload_text = stdout.strip()
+        if not payload_text:
+            return "", "", ""
+
+        session_id = ""
+        error_message = ""
+        fragments: list[str] = []
+        for line in payload_text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            session_id = session_id or self._extract_session_id(payload)
+            error_message = error_message or self._extract_error_text(payload)
+            if isinstance(payload.get("result"), str) and payload.get("result", "").strip():
+                fragments.append(str(payload["result"]).strip())
+            fragments.extend(self._collect_text_fragments(payload))
+
+        unique_fragments: list[str] = []
+        for fragment in fragments:
+            text = fragment.strip()
+            if text and text not in unique_fragments:
+                unique_fragments.append(text)
+        return "\n".join(unique_fragments).strip(), session_id, error_message
 
     def _parse_opencode_stdout(self, stdout: str) -> tuple[str, str, str]:
         fragments: list[str] = []
@@ -550,6 +621,7 @@ class MultiCodexHub:
                     "generated_at": now_iso(),
                     "config": {
                         "codex_command": self.config.codex_command,
+                        "claude_command": self.config.claude_command,
                         "opencode_command": self.config.opencode_command,
                     },
                     "agents": self.list_agents(),
@@ -606,6 +678,7 @@ class MultiCodexHub:
                 "generated_at": now_iso(),
                 "config": {
                     "codex_command": self.config.codex_command,
+                    "claude_command": self.config.claude_command,
                     "opencode_command": self.config.opencode_command,
                 },
                 "agents": self.list_agents(),

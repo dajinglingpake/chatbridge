@@ -6,7 +6,7 @@ ChatBridge is moving to a unified UI entry that can run both as a web app and as
 
 - WeChat transport
 - multiple AI conversations
-- lifecycle control for Hub / Bridge / Codex / OpenCode child processes
+- lifecycle control for Hub / Bridge / multiple agent CLI child processes
 
 ## Repository Status
 
@@ -77,7 +77,7 @@ The project now supports a file-based bilingual path for bridge responses.
 Preferred launcher:
 
 ```bat
-start-codex-wechat-desktop.cmd
+start-chatbridge-desktop.cmd
 ```
 
 Unified UI entry:
@@ -102,6 +102,7 @@ On startup, the unified UI will:
   - `nvm for Windows`
   - `Node.js 24.14.1`
   - `Codex CLI`
+  - `Claude Code`
   - `OpenCode CLI`
 
 ## User Expectation
@@ -117,9 +118,14 @@ For a new user, the intended flow is:
 
 Recommended entrypoints:
 
+- `start-chatbridge-desktop.cmd`: desktop shortcut launcher
 - `ui_main.py`: unified primary entry
-- `main.py`: legacy desktop compatibility wrapper
-- `web_main.py`: legacy web compatibility wrapper
+- `start-chatbridge-web.sh`: web shortcut launcher
+
+Compatibility wrappers:
+
+- `main.py`
+- `web_main.py`
 
 ## Runtime Files
 
@@ -167,13 +173,18 @@ The repo already ignores:
 ## Main Files
 
 - `ui_main.py`: unified UI primary entry
+- `start-chatbridge-desktop.cmd`: primary desktop launcher
 - `main.py`: legacy desktop compatibility entry
 - `web_main.py`: legacy web compatibility entry
-- `codex_wechat_runtime.py`: Python runtime and process control
-- `codex_wechat_bootstrap.py`: environment checks and install helpers
-- `multi_codex_hub.py`: conversation backend with `codex` / `opencode` support
+- `runtime_stack.py`: primary runtime and process control entry
+- `env_tools.py`: primary environment check and install helper entry
+- `agent_hub.py`: primary conversation backend entry with `codex` / `claude` / `opencode` support
+- `codex_wechat_runtime.py`: legacy runtime compatibility implementation
+- `codex_wechat_bootstrap.py`: legacy environment compatibility implementation
+- `multi_codex_hub.py`: legacy hub compatibility implementation
 - `weixin_hub_bridge.py`: WeChat bridge
-- `start-codex-wechat-desktop.cmd`: desktop launcher
+- `start-chatbridge-desktop.cmd`: primary desktop launcher
+- `start-codex-wechat-desktop.cmd`: legacy desktop compatibility launcher
 
 ## Notes
 
@@ -192,6 +203,6 @@ The bridge supports per-session backend switching:
 - `/list`
 - `/use <name>`
 - `/backend`
-- `/backend <codex|opencode>`
+- `/backend <codex|claude|opencode>`
 - `/close`
 - `/reset`

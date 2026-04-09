@@ -45,7 +45,11 @@ def render_home_section(
                     value=model.agent_options[0].agent_id if model.agent_options else "main",
                     label="Agent",
                 )
-                backend = ui.select({"": "跟随 Agent 默认配置", "codex": "codex", "opencode": "opencode"}, value="", label="后端")
+                backend = ui.select(
+                    {"": "跟随 Agent 默认配置", "codex": "codex", "claude": "claude", "opencode": "opencode"},
+                    value="",
+                    label="后端",
+                )
                 session_name = ui.input(label="会话名", placeholder="default")
                 prompt = ui.textarea(label="Prompt", placeholder="输入要发给 Agent 的内容")
                 ui.button(
@@ -96,7 +100,7 @@ def render_issues_section(ui: Any, model: WebConsoleViewModel, on_run_repair_com
                             ui.label("当前平台下这条修复建议需要手动执行。").classes("text-sm text-slate-500")
 
 
-def render_sessions_section(ui: Any, model: WebConsoleViewModel, on_select_session) -> None:
+def render_sessions_section(ui: Any, model: WebConsoleViewModel, on_select_session, on_select_task, on_set_task_filters) -> None:
     with ui.element("section").props(f"id={SESSIONS_PAGE.anchor}").classes("w-full"):
         ui.label(SESSIONS_PAGE.title).classes("text-2xl font-semibold")
         ui.label(SESSIONS_PAGE.description).classes("text-slate-500")
@@ -110,6 +114,19 @@ def render_sessions_section(ui: Any, model: WebConsoleViewModel, on_select_sessi
                     label="选择会话",
                     on_change=lambda event: on_select_session(event.value or ""),
                 ).classes("w-full")
+                with ui.row().classes("w-full gap-2"):
+                    ui.button(
+                        "全部会话",
+                        on_click=lambda: on_select_session(""),
+                    ).props("flat" if not model.selected_session_name else "outline").classes("text-xs")
+                    for row in model.session_rows:
+                        props = "outline"
+                        if row.name == model.selected_session_name:
+                            props = "color=primary"
+                        ui.button(
+                            row.name,
+                            on_click=lambda session_name=row.name: on_select_session(session_name),
+                        ).props(props).classes("text-xs")
                 rows = [
                     {
                         "会话": row.name,
@@ -134,14 +151,57 @@ def render_sessions_section(ui: Any, model: WebConsoleViewModel, on_select_sessi
 
         with ui.card().classes("w-full"):
             ui.label("最近任务").classes("text-lg font-semibold")
+            if model.selected_session_name:
+                ui.label(f"当前按会话过滤: {model.selected_session_name}").classes("text-sm text-slate-500")
+            if model.task_filtered_count != model.task_total_count:
+                ui.label(f"当前显示 {model.task_filtered_count} / {model.task_total_count} 条任务").classes("text-sm text-slate-500")
+            with ui.row().classes("w-full gap-2"):
+                status_filter = ui.select(
+                    {"": "全部状态", **{item: item for item in model.task_status_options}},
+                    value=model.selected_task_status,
+                    label="状态",
+                ).classes("min-w-[12rem]")
+                agent_filter = ui.select(
+                    {"": "全部 Agent", **{item: item for item in model.task_agent_options}},
+                    value=model.selected_task_agent,
+                    label="Agent",
+                ).classes("min-w-[14rem]")
+                backend_filter = ui.select(
+                    {"": "全部后端", **{item: item for item in model.task_backend_options}},
+                    value=model.selected_task_backend,
+                    label="后端",
+                ).classes("min-w-[12rem]")
+                ui.button(
+                    "应用筛选",
+                    on_click=lambda: on_set_task_filters(
+                        status_filter.value or "",
+                        agent_filter.value or "",
+                        backend_filter.value or "",
+                    ),
+                ).props("outline")
+                ui.button("清空筛选", on_click=lambda: on_set_task_filters("", "", "")).props("flat")
+            task_options = {
+                task.task_id: f"{task.created_at} | {task.agent_name} | {task.status} | {task.session_name}"
+                for task in model.tasks
+                if task.task_id
+            }
+            ui.select(
+                task_options,
+                value=model.selected_task_id or None,
+                label="选择任务",
+                on_change=lambda event: on_select_task(
+                    event.value or "",
+                    next((task.session_name for task in model.tasks if task.task_id == (event.value or "")), ""),
+                ),
+            ).classes("w-full")
             task_rows = [
                 {
                     "时间": task.created_at,
                     "Agent": task.agent_name,
                     "后端": task.backend,
                     "状态": task.status,
-                    "输入": task.prompt,
-                    "输出/错误": task.result_text,
+                    "输入": task.prompt_summary,
+                    "输出/错误": task.result_summary,
                 }
                 for task in model.tasks
             ]
@@ -150,6 +210,14 @@ def render_sessions_section(ui: Any, model: WebConsoleViewModel, on_select_sessi
                 rows=task_rows,
                 row_key="时间",
             ).classes("w-full")
+            if not task_rows:
+                ui.label("当前筛选条件下没有任务。").classes("text-sm text-slate-500")
+            ui.separator()
+            ui.label(f"任务详情: {model.selected_task_id or '(未选择)'}").classes("text-lg font-semibold")
+            ui.code("\n".join(model.task_detail_lines)).classes("w-full whitespace-pre-wrap")
+            ui.separator()
+            ui.label("完整输出 / 错误").classes("text-lg font-semibold")
+            ui.code("\n".join(model.task_result_lines)).classes("w-full whitespace-pre-wrap max-h-80 overflow-auto")
 
 
 def render_diagnostics_section(ui: Any, model: WebConsoleViewModel) -> None:

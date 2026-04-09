@@ -3,9 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from codex_wechat_bootstrap import run_shell_command
-from codex_wechat_ipc import create_request, wait_for_response
-from codex_wechat_runtime import emergency_stop, get_runtime_snapshot, restart_all, start_all, stop_all
+from env_tools import run_shell_command
+from local_ipc import create_request, wait_for_response
+from runtime_stack import emergency_stop, get_runtime_snapshot, restart_all, start_all, stop_all
 
 from core.accounts import activate_account
 from bridge_config import APP_DIR

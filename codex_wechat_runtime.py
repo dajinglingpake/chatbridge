@@ -24,7 +24,7 @@ LOG_DIR = RUNTIME_DIR / "logs"
 SESSION_DIR = RUNTIME_DIR / "sessions"
 WORKSPACE_DIR = APP_DIR / "workspace"
 
-HUB_SCRIPT = APP_DIR / "multi_codex_hub.py"
+HUB_SCRIPT = APP_DIR / "agent_hub.py"
 BRIDGE_SCRIPT = APP_DIR / "weixin_hub_bridge.py"
 HUB_PID_FILE = RUNTIME_DIR / "multi_codex_hub.pid"
 BRIDGE_PID_FILE = RUNTIME_DIR / "weixin_hub_bridge.pid"
@@ -248,7 +248,14 @@ def emergency_stop() -> list[str]:
             cmdline = " ".join(proc.info.get("cmdline") or [])
             name = (proc.info.get("name") or "").lower()
             lowered = cmdline.lower()
-            if "codex" in lowered or "opencode" in lowered or name.startswith("codex") or name.startswith("opencode"):
+            if (
+                "codex" in lowered
+                or "claude" in lowered
+                or "opencode" in lowered
+                or name.startswith("codex")
+                or name.startswith("claude")
+                or name.startswith("opencode")
+            ):
                 targets.append(proc.info["pid"])
         for pid in sorted(set(targets)):
             _taskkill(pid)
@@ -270,7 +277,14 @@ def list_codex_processes() -> list[str]:
         cmdline = " ".join(proc.info.get("cmdline") or [])
         name = (proc.info.get("name") or "").lower()
         lowered = cmdline.lower()
-        if "codex" not in lowered and "opencode" not in lowered and not name.startswith("codex") and not name.startswith("opencode"):
+        if (
+            "codex" not in lowered
+            and "claude" not in lowered
+            and "opencode" not in lowered
+            and not name.startswith("codex")
+            and not name.startswith("claude")
+            and not name.startswith("opencode")
+        ):
             continue
         rendered.append(f"PID {pid} :: {cmdline or name}")
     return sorted(rendered)
