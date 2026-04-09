@@ -58,11 +58,17 @@ If Python is missing, install it first.
 
 ## Install Python Dependencies
 
-Install Python dependencies before launch:
+If you want to prepare the environment manually:
 
 ```powershell
 python -m pip install -r requirements.txt
 ```
+
+The unified UI entry `ui_main.py` now bootstraps the local environment automatically on first run:
+
+- create `.venv/`
+- install `requirements.txt`
+- relaunch itself from that virtualenv
 
 ## Validation
 
@@ -96,6 +102,12 @@ python .\ui_main.py --native
 ```
 
 Linux / headless web mode:
+
+```bash
+./start-chatbridge-web.sh
+```
+
+Or run the UI entry directly:
 
 ```bash
 python3 ./ui_main.py --host 127.0.0.1 --port 8765

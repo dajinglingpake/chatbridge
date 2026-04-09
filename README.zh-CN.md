@@ -58,16 +58,22 @@ python --version
 
 ## 安装 Python 依赖
 
-如果你需要桌面模式，可以先手动执行：
+如果你需要手动准备环境，可以先执行：
 
 ```powershell
 python -m pip install -r requirements.txt
 ```
 
-如果你只需要 Linux Web 模式，最小依赖通常只需要：
+统一 UI 主入口 `ui_main.py` 会在首次运行时自动：
+
+- 创建项目内 `.venv/`
+- 安装 `requirements.txt`
+- 用该虚拟环境重新启动自身
+
+所以 Linux 上无论是直接运行还是走快捷脚本，都会触发同一套自举逻辑：
 
 ```bash
-python3 -m pip install psutil
+./start-chatbridge-web.sh
 ```
 
 ## 验证
@@ -104,13 +110,13 @@ python .\ui_main.py --native
 Linux / 无桌面环境可以使用 Web 模式：
 
 ```bash
-python3 ./ui_main.py --host 127.0.0.1 --port 8765
+./start-chatbridge-web.sh
 ```
 
 或者：
 
 ```bash
-./start-chatbridge-web.sh
+python3 ./ui_main.py --host 127.0.0.1 --port 8765
 ```
 
 如果你要开始切统一的 Web/Desktop 双模 UI，可以使用新的 NiceGUI 入口：
@@ -125,7 +131,7 @@ python3 ./ui_main.py --host 127.0.0.1 --port 8765
 python3 ./ui_main.py --native
 ```
 
-桌面应用启动后会自动：
+统一 UI 启动后会自动：
 
 - 创建 `.runtime/`
 - 如有缺失则自动安装桌面 Python 依赖

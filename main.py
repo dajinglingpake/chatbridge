@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from ui.app import run_ui
+from ui_main import run_ui_entry
 
 
 def parse_args() -> argparse.Namespace:
@@ -17,7 +17,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     print("Legacy desktop wrapper detected. Redirecting to ui_main.py --native", file=sys.stderr)
-    run_ui(host=args.host, port=args.port, native=True)
+    run_ui_entry(host=args.host, port=args.port, native=True)
     return 0
 
 

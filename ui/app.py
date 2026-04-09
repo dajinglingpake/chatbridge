@@ -19,7 +19,11 @@ def _load_nicegui():
     try:
         from nicegui import ui
     except ImportError as exc:  # pragma: no cover - runtime dependency
-        raise SystemExit("Missing dependency: nicegui. Run `python3 -m pip install nicegui` first.") from exc
+        raise SystemExit(
+            "Missing dependency: nicegui. "
+            "Linux 请优先运行 `./start-chatbridge-web.sh` 自动安装依赖，"
+            "或手动执行 `python3 -m pip install -r requirements.txt`。"
+        ) from exc
     return ui
 
 
