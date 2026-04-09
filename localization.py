@@ -20,7 +20,7 @@ class Localizer:
 
     def translate(self, key: str, **kwargs: Any) -> str:
         template = self.messages.get(key) or key
-        return template.format(**kwargs)
+        return template.format(**kwargs).replace("\\n", "\n")
 
 
 def resolve_language(preferred: str = "") -> str:
