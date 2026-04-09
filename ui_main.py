@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.util
 import os
 import socket
@@ -79,29 +80,53 @@ def _python_module_cmd(python_executable: str, module: str, *args: str) -> list[
     return [python_executable, "-I", "-m", module, *args]
 
 
+@contextlib.contextmanager
+def _without_debugger_subprocess_patch():
+    patched_module = None
+    original_create_process = None
+    patched_create_process = None
+    if _is_debugger_attached() and os.name == "nt":
+        try:
+            import _winapi as patched_module
+        except ImportError:  # pragma: no cover - CPython on Windows should provide _winapi
+            patched_module = None
+        if patched_module is not None:
+            original_create_process = getattr(patched_module, "original_CreateProcess", None)
+            patched_create_process = getattr(patched_module, "CreateProcess", None)
+            if original_create_process is not None:
+                patched_module.CreateProcess = original_create_process
+    try:
+        yield
+    finally:
+        if patched_module is not None and patched_create_process is not None:
+            patched_module.CreateProcess = patched_create_process
+
+
 def _venv_has_ui_dependency(python_executable: str) -> bool:
-    completed = subprocess.run(
-        [python_executable, "-I", "-c", "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('nicegui') else 1)"],
-        cwd=str(APP_DIR),
-        capture_output=True,
-        text=True,
-        env=_clean_subprocess_env(),
-        check=False,
-    )
+    with _without_debugger_subprocess_patch():
+        completed = subprocess.run(
+            [python_executable, "-I", "-c", "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('nicegui') else 1)"],
+            cwd=str(APP_DIR),
+            capture_output=True,
+            text=True,
+            env=_clean_subprocess_env(),
+            check=False,
+        )
     return completed.returncode == 0
 
 
 def _run_command(argv: list[str]) -> None:
-    completed = subprocess.run(
-        argv,
-        cwd=str(APP_DIR),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=_clean_subprocess_env(),
-        check=False,
-    )
+    with _without_debugger_subprocess_patch():
+        completed = subprocess.run(
+            argv,
+            cwd=str(APP_DIR),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=_clean_subprocess_env(),
+            check=False,
+        )
     if completed.stdout:
         print(completed.stdout, end="")
     if completed.stderr:
@@ -116,14 +141,15 @@ def _run_command(argv: list[str]) -> None:
 
 
 def _ensure_venv_pip(python_executable: str) -> None:
-    pip_check = subprocess.run(
-        _python_module_cmd(python_executable, "pip", "--version"),
-        cwd=str(APP_DIR),
-        capture_output=True,
-        text=True,
-        env=_clean_subprocess_env(),
-        check=False,
-    )
+    with _without_debugger_subprocess_patch():
+        pip_check = subprocess.run(
+            _python_module_cmd(python_executable, "pip", "--version"),
+            cwd=str(APP_DIR),
+            capture_output=True,
+            text=True,
+            env=_clean_subprocess_env(),
+            check=False,
+        )
     if pip_check.returncode == 0:
         return
 
