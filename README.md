@@ -110,7 +110,7 @@ Linux / headless web mode:
 Or run the UI entry directly:
 
 ```bash
-python3 ./ui_main.py --host 127.0.0.1 --port 8765
+python3 ./ui_main.py --host 0.0.0.0 --port 8765
 ```
 
 On startup, the unified UI will:

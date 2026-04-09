@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import os
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -15,7 +16,7 @@ REQUIREMENTS_PATH = APP_DIR / "requirements.txt"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="ChatBridge 统一 UI 模式")
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--native", action="store_true", help="以本地壳模式启动 NiceGUI")
     return parser.parse_args()
@@ -28,7 +29,11 @@ def _venv_python() -> Path:
 
 
 def _is_running_in_project_venv() -> bool:
-    return Path(sys.executable).resolve() == _venv_python().resolve()
+    expected = VENV_DIR.resolve()
+    virtual_env = os.environ.get("VIRTUAL_ENV")
+    if virtual_env and Path(virtual_env).resolve() == expected:
+        return True
+    return Path(sys.prefix).resolve() == expected
 
 
 def _has_ui_dependency() -> bool:
@@ -59,10 +64,40 @@ def ensure_ui_dependencies() -> None:
     os.execv(installer_python, [installer_python, str(APP_DIR / "ui_main.py"), *sys.argv[1:]])
 
 
-def run_ui_entry(host: str = "127.0.0.1", port: int = 8765, native: bool = False) -> None:
+def _detect_local_ip() -> str:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("8.8.8.8", 80))
+        return str(sock.getsockname()[0])
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        sock.close()
+
+
+def _print_access_urls(host: str, port: int, native: bool) -> None:
+    if native:
+        print(f"[chatbridge] Native UI mode | port={port}", file=sys.stderr)
+        return
+
+    local_url = f"http://127.0.0.1:{port}"
+    if host in {"0.0.0.0", "::"}:
+        lan_url = f"http://{_detect_local_ip()}:{port}"
+        print(f"[chatbridge] Local URL:   {local_url}", file=sys.stderr)
+        print(f"[chatbridge] Remote URL:  {lan_url}", file=sys.stderr)
+        return
+
+    bind_url = f"http://{host}:{port}"
+    print(f"[chatbridge] Access URL:  {bind_url}", file=sys.stderr)
+    if host not in {"127.0.0.1", "localhost"}:
+        print(f"[chatbridge] Local URL:   {local_url}", file=sys.stderr)
+
+
+def run_ui_entry(host: str = "0.0.0.0", port: int = 8765, native: bool = False) -> None:
     ensure_ui_dependencies()
     from ui.app import run_ui
 
+    _print_access_urls(host, port, native)
     run_ui(host=host, port=port, native=native)
 
 

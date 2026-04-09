@@ -116,13 +116,13 @@ Linux / 无桌面环境可以使用 Web 模式：
 或者：
 
 ```bash
-python3 ./ui_main.py --host 127.0.0.1 --port 8765
+python3 ./ui_main.py --host 0.0.0.0 --port 8765
 ```
 
 如果你要开始切统一的 Web/Desktop 双模 UI，可以使用新的 NiceGUI 入口：
 
 ```bash
-python3 ./ui_main.py --host 127.0.0.1 --port 8765
+python3 ./ui_main.py --host 0.0.0.0 --port 8765
 ```
 
 本地壳模式：
@@ -147,7 +147,7 @@ python3 ./ui_main.py --native
   - `Claude Code`
   - `OpenCode CLI`
 
-Web 模式启动后，浏览器打开 `http://127.0.0.1:8765`，即可完成：
+Web 模式启动后，终端会打印本地地址和局域网地址，例如 `http://127.0.0.1:8765` 与 `http://192.168.x.x:8765`，即可快速访问：
 
 - 查看运行状态
 - 启动 / 停止 / 重启 Hub 与 Bridge

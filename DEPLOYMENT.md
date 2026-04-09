@@ -62,7 +62,7 @@ python .\ui_main.py --native
 Web launch:
 
 ```bash
-python3 ./ui_main.py --host 127.0.0.1 --port 8765
+python3 ./ui_main.py --host 0.0.0.0 --port 8765
 ```
 
 ## 4. What Happens On First Run

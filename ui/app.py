@@ -256,7 +256,7 @@ def create_ui() -> None:
     ui.timer(8.0, lambda: content_view.refresh() if state["auto_refresh"] else None)
 
 
-def run_ui(host: str = "127.0.0.1", port: int = 8765, native: bool = False) -> None:
+def run_ui(host: str = "0.0.0.0", port: int = 8765, native: bool = False) -> None:
     ui = _load_nicegui()
     create_ui()
     ui.run(
