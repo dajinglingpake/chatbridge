@@ -179,12 +179,8 @@ The repo already ignores:
 - `runtime_stack.py`: primary runtime and process control entry
 - `env_tools.py`: primary environment check and install helper entry
 - `agent_hub.py`: primary conversation backend entry with `codex` / `claude` / `opencode` support
-- `codex_wechat_runtime.py`: legacy runtime compatibility implementation
-- `codex_wechat_bootstrap.py`: legacy environment compatibility implementation
-- `multi_codex_hub.py`: legacy hub compatibility implementation
+- `agent_backends/`: backend interface and isolated implementations for agent runtimes
 - `weixin_hub_bridge.py`: WeChat bridge
-- `start-chatbridge-desktop.cmd`: primary desktop launcher
-- `start-codex-wechat-desktop.cmd`: legacy desktop compatibility launcher
 
 ## Notes
 

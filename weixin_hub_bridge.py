@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from agent_backends import supported_backend_keys
 from bridge_config import APP_DIR, CONFIG_PATH, WEIXIN_ACCOUNTS_DIR, BridgeConfig, normalize_backend
 from local_ipc import create_request, wait_for_response
 from localization import Localizer
@@ -24,7 +25,7 @@ CONVERSATION_PATH = STATE_DIR / "weixin_conversations.json"
 DEFAULT_WEIXIN_BASE_URL = "https://ilinkai.weixin.qq.com"
 ILINK_APP_ID = "bot"
 ILINK_APP_CLIENT_VERSION = (2 << 16) | (1 << 8) | 1
-SUPPORTED_BACKENDS = {"codex", "claude", "opencode"}
+SUPPORTED_BACKENDS = set(supported_backend_keys())
 
 
 def now_iso() -> str:

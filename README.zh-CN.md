@@ -212,12 +212,8 @@ Web 模式启动后，浏览器打开 `http://127.0.0.1:8765`，即可完成：
 - `runtime_stack.py`：主线运行时与进程控制入口
 - `env_tools.py`：主线环境检查与安装辅助入口
 - `agent_hub.py`：主线会话后端入口，支持 `codex` / `claude` / `opencode`
-- `codex_wechat_runtime.py`：旧运行时兼容实现
-- `codex_wechat_bootstrap.py`：旧环境工具兼容实现
-- `multi_codex_hub.py`：旧 Hub 兼容实现
+- `agent_backends/`：Agent 后端接口与独立实现目录，新后端应在这里扩展
 - `weixin_hub_bridge.py`：微信桥接层
-- `start-chatbridge-desktop.cmd`：主线桌面启动脚本
-- `start-codex-wechat-desktop.cmd`：旧桌面兼容启动脚本
 
 ## 说明
 

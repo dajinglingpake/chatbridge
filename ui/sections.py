@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from agent_backends import supported_backend_options
 from core.navigation import DIAGNOSTICS_PAGE, HOME_PAGE, ISSUES_PAGE, SESSIONS_PAGE
 from core.view_models import WebConsoleViewModel
 
@@ -45,11 +46,7 @@ def render_home_section(
                     value=model.agent_options[0].agent_id if model.agent_options else "main",
                     label="Agent",
                 )
-                backend = ui.select(
-                    {"": "跟随 Agent 默认配置", "codex": "codex", "claude": "claude", "opencode": "opencode"},
-                    value="",
-                    label="后端",
-                )
+                backend = ui.select(supported_backend_options(include_default=True), value="", label="后端")
                 session_name = ui.input(label="会话名", placeholder="default")
                 prompt = ui.textarea(label="Prompt", placeholder="输入要发给 Agent 的内容")
                 ui.button(

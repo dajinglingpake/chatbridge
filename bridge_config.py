@@ -4,11 +4,12 @@ import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from agent_backends import DEFAULT_BACKEND_KEY, supported_backend_keys
 
 APP_DIR = Path(__file__).resolve().parent
 WEIXIN_ACCOUNTS_DIR = APP_DIR / "accounts"
 CONFIG_PATH = APP_DIR / "weixin_hub_bridge_config.json"
-SUPPORTED_BACKENDS = {"codex", "claude", "opencode"}
+SUPPORTED_BACKENDS = set(supported_backend_keys())
 
 
 def _to_abs_path(value: str, default: Path) -> str:
@@ -30,8 +31,8 @@ def _to_rel_path(value: str) -> str:
 
 
 def normalize_backend(value: str) -> str:
-    backend = (value or "codex").strip().lower()
-    return backend if backend in SUPPORTED_BACKENDS else "codex"
+    backend = (value or DEFAULT_BACKEND_KEY).strip().lower()
+    return backend if backend in SUPPORTED_BACKENDS else DEFAULT_BACKEND_KEY
 
 
 @dataclass
@@ -145,7 +146,7 @@ class BridgeConfig:
     account_file: str = "accounts/wechat-bot.json"
     sync_file: str = "accounts/wechat-bot.sync.json"
     backend_id: str = "main"
-    default_backend: str = "codex"
+    default_backend: str = DEFAULT_BACKEND_KEY
     language: str = "auto"
     poll_timeout_ms: int = 35000
     hub_task_timeout_seconds: int = 600
@@ -166,7 +167,7 @@ class BridgeConfig:
         accounts, active_account_id = build_account_profiles(raw)
         raw["accounts"] = accounts
         raw["active_account_id"] = active_account_id
-        raw["default_backend"] = normalize_backend(str(raw.get("default_backend") or "codex"))
+        raw["default_backend"] = normalize_backend(str(raw.get("default_backend") or DEFAULT_BACKEND_KEY))
         raw["language"] = str(raw.get("language") or "auto")
         cfg = cls(**raw)
         cfg._sync_active_account_fields()
@@ -219,6 +220,6 @@ class BridgeConfig:
         data["account_id"] = self.account_id
         data["account_file"] = _to_rel_path(self.account_file)
         data["sync_file"] = _to_rel_path(self.sync_file)
-        data["default_backend"] = normalize_backend(str(data.get("default_backend") or "codex"))
+        data["default_backend"] = normalize_backend(str(data.get("default_backend") or DEFAULT_BACKEND_KEY))
         data["language"] = str(data.get("language") or "auto")
         CONFIG_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")

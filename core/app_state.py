@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from agent_backends import supported_backend_keys
 
 Translator = Callable[[str], str]
 
@@ -167,6 +168,7 @@ def build_summary_text(snapshot: Any, checks: dict[str, Any], translator: Callab
 
 
 def build_quickstart_lines(snapshot: Any, checks: dict[str, Any], accounts_dir: Path, translator: Callable[..., str] | None = None) -> tuple[list[str], str]:
+    backend_choices = "|".join(supported_backend_keys())
     stage_lines = [
         step_line(_t(translator, "ui.quickstart.step.desktop"), _check_ok(checks, "pyside6") and _check_ok(checks, "psutil"), translator),
         step_line(_t(translator, "ui.quickstart.step.node"), not any(_check_missing(checks, key) for key in ["node", "npm", "codex", "claude", "opencode"]), translator),
@@ -182,7 +184,7 @@ def build_quickstart_lines(snapshot: Any, checks: dict[str, Any], accounts_dir: 
         "/list",
         "/use <name>",
         "/backend",
-        "/backend <codex|claude|opencode>",
+        f"/backend <{backend_choices}>",
         "/close",
         "/reset",
         "",
