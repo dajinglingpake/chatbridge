@@ -116,8 +116,8 @@ The unified UI checks this directory automatically.
 
 The main config files are:
 
-- `multi_codex_hub_config.json`
-- `weixin_hub_bridge_config.json`
+- `agent_hub_config.json`
+- `weixin_bridge_config.json`
 
 Typical fields that may need adjustment on a new machine:
 

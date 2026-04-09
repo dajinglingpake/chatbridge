@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from core.action_defs import AUTO_REFRESH_OFF_ACTION, AUTO_REFRESH_ON_ACTION
-from core.app_service import run_named_action, run_repair_command, submit_hub_task, switch_active_account
+from core.app_service import delete_agent, reset_weixin_conversation, run_named_action, run_repair_command, save_agent, set_weixin_notice_enabled, submit_hub_task, switch_active_account, switch_bridge_agent, switch_weixin_session_backend
 from core.shell_schema import APP_SHELL
 from core.view_models import build_web_console_view_model
 from localization import Localizer
@@ -90,9 +90,25 @@ def create_ui() -> None:
                 ).props("outline")
 
         with ui.column().classes("w-full max-w-7xl mx-auto gap-6 p-4"):
-            render_home_section(ui, model, _run_action, _submit_task, _switch_account, _run_primary_action, open_qr_login)
+            render_home_section(
+                ui,
+                model,
+                _run_action,
+                _submit_task,
+                _switch_account,
+                _switch_bridge_agent,
+                _set_weixin_notice_enabled,
+                _open_weixin_binding,
+                _open_weixin_binding_task,
+                _switch_weixin_binding_backend,
+                _reset_weixin_binding,
+                _run_primary_action,
+                open_qr_login,
+                _save_agent,
+                _delete_agent,
+            )
             render_issues_section(ui, model, _run_repair_command)
-            render_sessions_section(ui, model, _select_session, _select_task, _set_task_filters)
+            render_sessions_section(ui, model, _select_session, _select_task, _set_task_filters, _find_task_by_id)
             render_diagnostics_section(ui, model)
 
     def _notify(result_message: str) -> None:
@@ -107,12 +123,39 @@ def create_ui() -> None:
         result = switch_active_account(account_id)
         _notify(result.message)
 
+    def _switch_bridge_agent(agent_id: str) -> None:
+        result = switch_bridge_agent(agent_id)
+        _notify(result.message)
+
+    def _set_weixin_notice_enabled(service_enabled: bool, config_enabled: bool, task_enabled: bool) -> None:
+        result = set_weixin_notice_enabled(service_enabled, config_enabled, task_enabled)
+        _notify(result.message)
+
     def _submit_task(agent_id: str, prompt: str, session_name: str, backend: str) -> None:
         result = submit_hub_task(agent_id=agent_id, prompt=prompt, session_name=session_name, backend=backend)
         _notify(result.message)
 
     def _run_repair_command(command: str, label: str) -> None:
         result = run_repair_command(command, label)
+        _notify(result.message)
+
+    def _save_agent(
+        agent_id: str,
+        name: str,
+        workdir: str,
+        session_file: str,
+        backend: str,
+        model_name: str,
+        prompt_prefix: str,
+        enabled: bool,
+    ) -> None:
+        result = save_agent(agent_id, name, workdir, session_file, backend, model_name, prompt_prefix, enabled)
+        _notify(result.message)
+
+    def _delete_agent(agent_id: str) -> None:
+        result = delete_agent(agent_id)
+        if state["selected_task_agent"] == agent_id:
+            state["selected_task_agent"] = ""
         _notify(result.message)
 
     def _run_primary_action(action_key: str) -> None:
@@ -140,6 +183,48 @@ def create_ui() -> None:
         state["selected_task_backend"] = backend
         state["selected_task_id"] = ""
         shell_view.refresh()
+
+    def _find_task_by_id(task_id: str) -> None:
+        cleaned_id = task_id.strip()
+        if not cleaned_id:
+            _notify("请输入 task_id")
+            return
+        model = refresh_model()
+        matched = next((task for task in model.tasks if task.task_id == cleaned_id), None)
+        if matched is None:
+            _notify(f"最近任务中未找到：{cleaned_id}")
+            return
+        state["selected_task_id"] = matched.task_id
+        state["selected_session_name"] = matched.session_name
+        shell_view.refresh()
+
+    def _open_weixin_binding(session_name: str) -> None:
+        cleaned_name = session_name.strip()
+        if not cleaned_name:
+            _notify("当前微信会话没有可定位的会话名")
+            return
+        state["selected_session_name"] = cleaned_name
+        state["selected_task_id"] = ""
+        shell_view.refresh()
+        jump_to("sessions")
+
+    def _open_weixin_binding_task(task_id: str, session_name: str) -> None:
+        cleaned_task_id = task_id.strip()
+        if not cleaned_task_id:
+            _notify("该发送方还没有最近任务")
+            return
+        state["selected_session_name"] = session_name.strip()
+        state["selected_task_id"] = cleaned_task_id
+        shell_view.refresh()
+        jump_to("sessions")
+
+    def _switch_weixin_binding_backend(sender_id: str, backend: str) -> None:
+        result = switch_weixin_session_backend(sender_id, backend)
+        _notify(result.message)
+
+    def _reset_weixin_binding(sender_id: str) -> None:
+        result = reset_weixin_conversation(sender_id)
+        _notify(result.message)
 
     def toggle_auto_refresh() -> None:
         state["auto_refresh"] = not state["auto_refresh"]

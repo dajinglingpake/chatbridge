@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_backends import supported_backend_keys
+from agent_hub import HubConfig
 from bridge_config import APP_DIR, CONFIG_PATH, WEIXIN_ACCOUNTS_DIR, BridgeConfig, normalize_backend
 from local_ipc import create_request, wait_for_response
 from localization import Localizer
@@ -247,6 +248,10 @@ class WeixinBridge:
                 self._t("bridge.help.new"),
                 self._t("bridge.help.list"),
                 self._t("bridge.help.use"),
+                self._t("bridge.help.agent.current"),
+                self._t("bridge.help.agent.switch"),
+                self._t("bridge.help.notify.current"),
+                self._t("bridge.help.notify.switch"),
                 self._t("bridge.help.backend.current"),
                 self._t("bridge.help.backend.switch"),
                 self._t("bridge.help.close"),
@@ -297,6 +302,56 @@ class WeixinBridge:
             self._save_conversations()
             return self._t("bridge.backend.switched", backend=requested_backend, session=current_session), True
 
+        if command == "/agent":
+            if len(parts) < 2:
+                return self._t("bridge.agent.current", agent=self.config.backend_id), True
+            requested_agent = parts[1].strip()
+            known_agents = {agent.id for agent in HubConfig.load().agents}
+            if known_agents and requested_agent not in known_agents:
+                return self._t("bridge.agent.not_found", agent=requested_agent), True
+            self.config.set_backend_agent(requested_agent)
+            self.config.save()
+            return self._t("bridge.agent.switched", agent=requested_agent), True
+
+        if command == "/notify":
+            if len(parts) < 2:
+                return self._t(
+                    "bridge.notify.current",
+                    service=self._t("bridge.notify.on") if self.config.service_notice_enabled else self._t("bridge.notify.off"),
+                    config=self._t("bridge.notify.on") if self.config.config_notice_enabled else self._t("bridge.notify.off"),
+                    task=self._t("bridge.notify.on") if self.config.task_notice_enabled else self._t("bridge.notify.off"),
+                ), True
+            desired = parts[1].strip().lower()
+            if desired not in {"on", "off", "service-on", "service-off", "config-on", "config-off", "task-on", "task-off"}:
+                return self._t("bridge.notify.usage"), True
+            if desired == "on":
+                self.config.service_notice_enabled = True
+                self.config.config_notice_enabled = True
+                self.config.task_notice_enabled = True
+            elif desired == "off":
+                self.config.service_notice_enabled = False
+                self.config.config_notice_enabled = False
+                self.config.task_notice_enabled = False
+            elif desired == "service-on":
+                self.config.service_notice_enabled = True
+            elif desired == "service-off":
+                self.config.service_notice_enabled = False
+            elif desired == "config-on":
+                self.config.config_notice_enabled = True
+            elif desired == "config-off":
+                self.config.config_notice_enabled = False
+            elif desired == "task-on":
+                self.config.task_notice_enabled = True
+            elif desired == "task-off":
+                self.config.task_notice_enabled = False
+            self.config.save()
+            return self._t(
+                "bridge.notify.switched",
+                service=self._t("bridge.notify.on") if self.config.service_notice_enabled else self._t("bridge.notify.off"),
+                config=self._t("bridge.notify.on") if self.config.config_notice_enabled else self._t("bridge.notify.off"),
+                task=self._t("bridge.notify.on") if self.config.task_notice_enabled else self._t("bridge.notify.off"),
+            ), True
+
         if command in {"/close", "/end"}:
             if current_session == "default":
                 return self._t("bridge.session.default_close_blocked"), True
@@ -308,7 +363,7 @@ class WeixinBridge:
 
         if command == "/status":
             backend = normalize_backend(str(current_meta.get("backend") or self.config.default_backend))
-            return self._t("bridge.status", session=binding.get("current_session"), backend=backend, count=len(sessions)), True
+            return self._t("bridge.status", agent=self.config.backend_id, session=binding.get("current_session"), backend=backend, count=len(sessions)), True
 
         if command == "/reset":
             self.conversations.pop(sender_id, None)

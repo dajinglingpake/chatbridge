@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from agent_backends import DEFAULT_BACKEND_KEY, BackendContext, build_backend_registry, supported_backend_keys
+from bridge_config import BridgeConfig
+from core.weixin_notifier import broadcast_weixin_notice_by_kind, build_ui_access_hint
 from local_ipc import REQUEST_DIR, ensure_ipc_dirs, mark_processed, read_request, write_response
 from core.platform_compat import creationflags, resolve_command
 
@@ -21,7 +23,8 @@ RUNTIME_DIR = APP_DIR / ".runtime"
 STATE_DIR = RUNTIME_DIR / "state"
 SESSION_DIR = RUNTIME_DIR / "sessions"
 WORKSPACE_DIR = APP_DIR / "workspace"
-CONFIG_PATH = APP_DIR / "multi_codex_hub_config.json"
+CONFIG_PATH = APP_DIR / "agent_hub_config.json"
+LEGACY_CONFIG_PATH = APP_DIR / "multi_codex_hub_config.json"
 STATE_PATH = STATE_DIR / "multi_codex_hub_state.json"
 SUPPORTED_BACKENDS = set(supported_backend_keys())
 
@@ -102,7 +105,8 @@ class HubConfig:
     @classmethod
     def load(cls) -> "HubConfig":
         WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
-        if not CONFIG_PATH.exists():
+        config_path = CONFIG_PATH if CONFIG_PATH.exists() else LEGACY_CONFIG_PATH
+        if not config_path.exists():
             SESSION_DIR.mkdir(parents=True, exist_ok=True)
             cfg = cls(
                 agents=[
@@ -111,7 +115,7 @@ class HubConfig:
             )
             cfg.save()
             return cfg
-        raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
         raw["agents"] = [AgentConfig(**a) for a in raw.get("agents", [])]
         raw.pop("host", None)
         raw.pop("port", None)
@@ -221,10 +225,45 @@ class MultiCodexHub:
             agent.backend = normalize_backend(str(payload.get("backend") or agent.backend))
             agent.model = (payload.get("model") or "").strip()
             agent.prompt_prefix = (payload.get("prompt_prefix") or "").strip()
+            agent.enabled = bool(payload.get("enabled", agent.enabled))
+            if not agent.name:
+                raise ValueError("agent name is required")
+            if not agent.workdir:
+                raise ValueError("agent workdir is required")
+            if not agent.session_file:
+                raise ValueError("agent session_file is required")
+            if not agent.enabled and not any(item.id != agent.id and item.enabled for item in self.config.agents):
+                raise ValueError("at least one enabled agent is required")
+            Path(agent.workdir).mkdir(parents=True, exist_ok=True)
+            Path(agent.session_file).parent.mkdir(parents=True, exist_ok=True)
             self._ensure_agent(agent)
             self.config.save()
             self._save_state()
             return agent
+
+    def delete_agent(self, agent_id: str) -> None:
+        with self.lock:
+            cleaned_id = agent_id.strip()
+            if not cleaned_id:
+                raise ValueError("agent_id is required")
+            agent = next((item for item in self.config.agents if item.id == cleaned_id), None)
+            if agent is None:
+                raise ValueError(f"agent not found: {cleaned_id}")
+            if len(self.config.agents) <= 1:
+                raise ValueError("cannot delete the last agent")
+            bridge_agent_id = BridgeConfig.load().backend_id.strip()
+            if bridge_agent_id and bridge_agent_id == cleaned_id:
+                raise ValueError(f"agent is in use by weixin bridge: {cleaned_id}")
+            runtime = self.runtimes.get(cleaned_id) or {}
+            if str(runtime.get("status") or "") == "running" or int(runtime.get("queue_size") or 0) > 0:
+                raise ValueError(f"agent still has active work: {cleaned_id}")
+            self.config.agents = [item for item in self.config.agents if item.id != cleaned_id]
+            self.queues.pop(cleaned_id, None)
+            self.runtimes.pop(cleaned_id, None)
+            self.started_workers.discard(cleaned_id)
+            self.tasks = [task for task in self.tasks if str(task.get('agent_id') or '') != cleaned_id]
+            self.config.save()
+            self._save_state()
 
     def submit_task(
         self,
@@ -312,6 +351,7 @@ class MultiCodexHub:
                 self.runtimes[agent_id]["last_output"] = result["output"][:1800]
                 self.runtimes[agent_id]["last_error"] = ""
                 self._save_state()
+            self._notify_task_result(task, succeeded=True)
         except Exception as exc:  # noqa: BLE001
             with self.lock:
                 task["status"] = "failed"
@@ -321,6 +361,39 @@ class MultiCodexHub:
                 self.runtimes[agent_id]["failure_count"] += 1
                 self.runtimes[agent_id]["last_error"] = str(exc)
                 self._save_state()
+            self._notify_task_result(task, succeeded=False)
+
+    def _notify_task_result(self, task: dict[str, Any], succeeded: bool) -> None:
+        if str(task.get("source") or "").strip().lower() == "wechat":
+            return
+        task_id = str(task.get("id") or "")
+        agent_name = str(task.get("agent_name") or task.get("agent_id") or "")
+        session_name = str(task.get("session_name") or "default")
+        backend = str(task.get("backend") or DEFAULT_BACKEND_KEY)
+        if succeeded:
+            output = str(task.get("output") or "").strip() or "(empty)"
+            detail = (
+                f"任务 ID: {task_id}\n"
+                f"Agent: {agent_name}\n"
+                f"会话: {session_name}\n"
+                f"后端: {backend}\n"
+                f"状态: 成功\n"
+                f"输出摘要: {output[:600]}\n"
+                f"{build_ui_access_hint(task_id=task_id, session_name=session_name)}"
+            )
+            broadcast_weixin_notice_by_kind("task", "任务执行完成", detail)
+            return
+        error_text = str(task.get("error") or "unknown error").strip()
+        detail = (
+            f"任务 ID: {task_id}\n"
+            f"Agent: {agent_name}\n"
+            f"会话: {session_name}\n"
+            f"后端: {backend}\n"
+            f"状态: 失败\n"
+            f"错误: {error_text[:600]}\n"
+            f"{build_ui_access_hint(task_id=task_id, session_name=session_name)}"
+        )
+        broadcast_weixin_notice_by_kind("task", "任务执行失败", detail)
 
     def _invoke_backend(self, agent: AgentConfig, prompt: str, session_name: str = "", backend: str = "") -> dict[str, str]:
         normalized_backend = normalize_backend(backend or agent.backend)
@@ -400,6 +473,9 @@ class MultiCodexHub:
             return {"ok": True, "task": self.handle_wechat_message(payload)}
         if action == "save_agent":
             return {"ok": True, "agent": asdict(self.create_or_update_agent(payload))}
+        if action == "delete_agent":
+            self.delete_agent(str(payload.get("agent_id") or ""))
+            return {"ok": True}
         if action == "state":
             return {
                 "ok": True,

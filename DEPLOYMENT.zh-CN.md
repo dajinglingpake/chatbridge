@@ -116,8 +116,8 @@ accounts/
 
 主要配置文件有：
 
-- `multi_codex_hub_config.json`
-- `weixin_hub_bridge_config.json`
+- `agent_hub_config.json`
+- `weixin_bridge_config.json`
 
 在新机器上通常需要确认的字段：
 

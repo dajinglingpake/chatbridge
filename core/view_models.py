@@ -68,10 +68,41 @@ class AgentOptionViewModel:
 
 
 @dataclass
+class AgentManagementViewModel:
+    agent_id: str
+    name: str
+    workdir: str
+    session_file: str
+    backend: str
+    model: str
+    prompt_prefix: str
+    enabled: bool
+    runtime_status: str
+    queue_size: int
+
+
+@dataclass
+class WeixinConversationBindingViewModel:
+    sender_id: str
+    agent_id: str
+    current_session: str
+    current_backend: str
+    session_count: int
+    updated_at: str
+    latest_task_id: str
+    latest_task_status: str
+    latest_task_session: str
+
+
+@dataclass
 class WebConsoleViewModel:
     home: HomeViewModel
     log_dir: str
     active_account_id: str
+    bridge_agent_id: str
+    service_notice_enabled: bool
+    config_notice_enabled: bool
+    task_notice_enabled: bool
     issues: list[IssueViewModel]
     repair_commands: list[RepairCommand]
     checks: list[CheckViewModel]
@@ -92,6 +123,8 @@ class WebConsoleViewModel:
     session_conversation_lines: list[str]
     task_detail_lines: list[str]
     task_result_lines: list[str]
+    agent_management: list[AgentManagementViewModel]
+    weixin_conversations: list[WeixinConversationBindingViewModel]
     account_options: list[AccountOptionViewModel]
     agent_options: list[AgentOptionViewModel]
 
@@ -279,6 +312,7 @@ def build_web_console_view_model_from_dashboard(
     checks_map = dashboard.checks
     hub_state = dashboard.hub_state
     bridge_state = dashboard.bridge_state
+    bridge_conversations = dashboard.bridge_conversations
     session_dir = app_dir / ".runtime" / "sessions"
     session_rows = build_session_rows(hub_state, session_dir)
     available_session_names = {row.name for row in session_rows}
@@ -287,17 +321,65 @@ def build_web_console_view_model_from_dashboard(
         resolved_session_name = session_rows[0].name
     session_detail = build_session_detail_view_model(hub_state, session_dir, resolved_session_name)
     account_management = build_account_management_view_model(t)
+    bridge_config = BridgeConfig.load()
 
     agent_options: list[AgentOptionViewModel] = []
+    agent_management: list[AgentManagementViewModel] = []
     for agent in hub_state.get("agents") or []:
         agent_id = str(agent.get("id") or "")
         name = str(agent.get("name") or agent_id)
+        runtime = agent.get("runtime") or {}
         if agent_id:
             agent_options.append(AgentOptionViewModel(agent_id=agent_id, label=f"{name} ({agent_id})"))
+            agent_management.append(
+                AgentManagementViewModel(
+                    agent_id=agent_id,
+                    name=name,
+                    workdir=str(agent.get("workdir") or ""),
+                    session_file=str(agent.get("session_file") or ""),
+                    backend=str(agent.get("backend") or ""),
+                    model=str(agent.get("model") or ""),
+                    prompt_prefix=str(agent.get("prompt_prefix") or ""),
+                    enabled=bool(agent.get("enabled", True)),
+                    runtime_status=str(runtime.get("status") or "idle"),
+                    queue_size=int(runtime.get("queue_size") or 0),
+                )
+            )
     if not agent_options:
         agent_options.append(AgentOptionViewModel(agent_id="main", label="默认会话 (main)"))
 
-    raw_tasks = list((hub_state.get("tasks") or [])[:12])
+    weixin_conversations: list[WeixinConversationBindingViewModel] = []
+    for sender_id, binding in sorted((bridge_conversations or {}).items()):
+        if not isinstance(binding, dict):
+            continue
+        current_session = str(binding.get("current_session") or "default")
+        sessions = binding.get("sessions") or {}
+        if not isinstance(sessions, dict):
+            sessions = {}
+        current_meta = sessions.get(current_session) or {}
+        latest_task = next(
+            (
+                task
+                for task in (hub_state.get("tasks") or [])
+                if str(task.get("sender_id") or "").strip() == str(sender_id)
+            ),
+            {},
+        )
+        weixin_conversations.append(
+            WeixinConversationBindingViewModel(
+                sender_id=str(sender_id),
+                agent_id=str(bridge_config.backend_id or "main"),
+                current_session=current_session,
+                current_backend=str(current_meta.get("backend") or bridge_config.default_backend),
+                session_count=len(sessions),
+                updated_at=str(current_meta.get("updated_at") or current_meta.get("created_at") or "-"),
+                latest_task_id=str(latest_task.get("id") or ""),
+                latest_task_status=str(latest_task.get("status") or ""),
+                latest_task_session=str(latest_task.get("session_name") or current_session),
+            )
+        )
+
+    raw_tasks = list(hub_state.get("tasks") or [])
     task_status_options = sorted({str(task.get("status") or "") for task in raw_tasks if str(task.get("status") or "")})
     task_agent_options = sorted({str(task.get("agent_name") or task.get("agent_id") or "") for task in raw_tasks if str(task.get("agent_name") or task.get("agent_id") or "")})
     task_backend_options = sorted({str(task.get("backend") or "") for task in raw_tasks if str(task.get("backend") or "")})
@@ -392,6 +474,10 @@ def build_web_console_view_model_from_dashboard(
         ),
         log_dir=dashboard.snapshot.log_dir,
         active_account_id=account_management.active_account_id,
+        bridge_agent_id=bridge_config.backend_id,
+        service_notice_enabled=bridge_config.service_notice_enabled,
+        config_notice_enabled=bridge_config.config_notice_enabled,
+        task_notice_enabled=bridge_config.task_notice_enabled,
         issues=issues,
         repair_commands=repair_commands,
         checks=checks,
@@ -412,6 +498,8 @@ def build_web_console_view_model_from_dashboard(
         session_conversation_lines=session_detail.conversation_text.splitlines(),
         task_detail_lines=task_detail_lines,
         task_result_lines=task_result_lines,
+        agent_management=agent_management,
+        weixin_conversations=weixin_conversations,
         account_options=account_management.options,
         agent_options=agent_options,
     )

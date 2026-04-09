@@ -1,0 +1,23 @@
+{
+  "active_account_id": "wechat-bot",
+  "accounts": [
+    {
+      "account_id": "wechat-bot",
+      "account_file": "accounts/wechat-bot.json",
+      "sync_file": "accounts/wechat-bot.sync.json"
+    }
+  ],
+  "account_id": "wechat-bot",
+  "account_file": "accounts/wechat-bot.json",
+  "sync_file": "accounts/wechat-bot.sync.json",
+  "backend_id": "main",
+  "default_backend": "codex",
+  "language": "auto",
+  "poll_timeout_ms": 35000,
+  "hub_task_timeout_seconds": 600,
+  "bridge_name": "weixin-bridge",
+  "auto_reply_prefix": "",
+  "ignore_prefixes": [
+    "/ignore"
+  ]
+}

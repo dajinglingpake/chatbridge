@@ -34,6 +34,7 @@ BRIDGE_OUT_LOG = LOG_DIR / "weixin_hub_bridge.out.log"
 BRIDGE_ERR_LOG = LOG_DIR / "weixin_hub_bridge.err.log"
 HUB_STATE_PATH = STATE_DIR / "multi_codex_hub_state.json"
 BRIDGE_STATE_PATH = STATE_DIR / "weixin_hub_bridge_state.json"
+BRIDGE_CONVERSATIONS_PATH = STATE_DIR / "weixin_conversations.json"
 
 @dataclass
 class ManagedStatus:
@@ -226,6 +227,18 @@ def start_all() -> list[str]:
     time.sleep(1.5)
     messages.append(start_managed("Bridge", BRIDGE_SCRIPT, BRIDGE_PID_FILE, BRIDGE_OUT_LOG, BRIDGE_ERR_LOG))
     return messages
+
+
+def start_bridge() -> str:
+    return start_managed("Bridge", BRIDGE_SCRIPT, BRIDGE_PID_FILE, BRIDGE_OUT_LOG, BRIDGE_ERR_LOG)
+
+
+def stop_bridge() -> str:
+    return stop_managed("Bridge", BRIDGE_SCRIPT, BRIDGE_PID_FILE)
+
+
+def restart_bridge() -> list[str]:
+    return [stop_bridge(), start_bridge()]
 
 
 def stop_all() -> list[str]:
