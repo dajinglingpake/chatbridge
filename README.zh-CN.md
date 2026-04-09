@@ -70,6 +70,15 @@ python -m pip install -r requirements.txt
 python3 -m pip install psutil
 ```
 
+## 验证
+
+建议在本地至少执行这两条回归检查：
+
+```powershell
+python -m unittest discover -s tests -p "test_*.py" -v
+python tools/smoke_weixin_bridge.py
+```
+
 ## 语言
 
 当前项目已经支持基于文件的中英文桥接响应国际化。
