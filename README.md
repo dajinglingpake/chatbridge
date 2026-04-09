@@ -166,8 +166,11 @@ This includes:
 - logs
 - pid files
 - state snapshots
-- session files
 - Python bytecode cache
+
+Persistent session files belong under:
+
+- `sessions/`
 
 These should not be committed.
 
@@ -176,6 +179,7 @@ These should not be committed.
 The repository keeps placeholder directories for:
 
 - `accounts/`
+- `sessions/`
 - `workspace/`
 
 Do not commit account JSON files or temporary workspace content.
@@ -185,6 +189,7 @@ Do not commit account JSON files or temporary workspace content.
 The repo already ignores:
 
 - `.runtime/`
+- `sessions/*`
 - `__pycache__/`
 - `*.pyc`
 - `*.pyo`

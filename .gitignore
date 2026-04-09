@@ -13,6 +13,9 @@ __pycache__/
 workspace/*
 !workspace/.gitkeep
 
+sessions/*
+!sessions/.gitkeep
+
 accounts/*
 !accounts/.gitkeep
 !accounts/README.md

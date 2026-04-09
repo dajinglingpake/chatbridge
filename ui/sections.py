@@ -135,7 +135,7 @@ def render_home_section(
                 agent_id = ui.input(label="Agent ID", placeholder="assistant-1")
                 agent_name = ui.input(label="名称", placeholder="客服助手")
                 workdir = ui.input(label="工作目录", placeholder="workspace")
-                session_file = ui.input(label="会话文件", placeholder=".runtime/sessions/assistant-1.txt")
+                session_file = ui.input(label="会话文件", placeholder="sessions/assistant-1.txt")
                 backend = ui.select(supported_backend_options(), value="codex", label="后端").classes("w-full")
                 model_input = ui.input(label="模型", placeholder="可选")
                 prompt_prefix = ui.textarea(label="Prompt Prefix", placeholder="可选")
@@ -147,7 +147,7 @@ def render_home_section(
                         agent_id.value = ""
                         agent_name.value = ""
                         workdir.value = "workspace"
-                        session_file.value = ".runtime/sessions/main.txt"
+                        session_file.value = "sessions/main.txt"
                         backend.value = "codex"
                         model_input.value = ""
                         prompt_prefix.value = ""

@@ -22,7 +22,7 @@ APP_DIR = Path(__file__).resolve().parent
 RUNTIME_DIR = APP_DIR / ".runtime"
 STATE_DIR = RUNTIME_DIR / "state"
 LOG_DIR = RUNTIME_DIR / "logs"
-SESSION_DIR = RUNTIME_DIR / "sessions"
+SESSION_DIR = APP_DIR / "sessions"
 WORKSPACE_DIR = APP_DIR / "workspace"
 
 HUB_SCRIPT = APP_DIR / "agent_hub.py"

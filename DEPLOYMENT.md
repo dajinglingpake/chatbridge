@@ -140,8 +140,13 @@ This includes:
 - logs
 - pid files
 - state files
-- session files
 - Python bytecode cache
+
+Persistent session files should stay under:
+
+```text
+sessions/
+```
 
 These are disposable runtime artifacts and should not be committed.
 

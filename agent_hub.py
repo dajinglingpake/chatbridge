@@ -21,7 +21,7 @@ from runtime_stack import discover_external_agent_processes
 APP_DIR = Path(__file__).resolve().parent
 RUNTIME_DIR = APP_DIR / ".runtime"
 STATE_DIR = RUNTIME_DIR / "state"
-SESSION_DIR = RUNTIME_DIR / "sessions"
+SESSION_DIR = APP_DIR / "sessions"
 WORKSPACE_DIR = APP_DIR / "workspace"
 CONFIG_PATH = APP_DIR / "config" / "agent_hub.json"
 STATE_PATH = STATE_DIR / "agent_hub_state.json"
@@ -107,6 +107,7 @@ class HubConfig:
             agent["workdir"] = _to_rel_path(str(agent.get("workdir") or WORKSPACE_DIR))
             agent["session_file"] = _to_rel_path(str(agent.get("session_file") or (SESSION_DIR / "main.txt")))
             agent["backend"] = normalize_backend(str(agent.get("backend") or DEFAULT_BACKEND_KEY))
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         CONFIG_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 

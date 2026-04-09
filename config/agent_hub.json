@@ -7,7 +7,7 @@
       "id": "main",
       "name": "默认会话",
       "workdir": "workspace",
-      "session_file": ".runtime/sessions/main.txt",
+      "session_file": "sessions/main.txt",
       "backend": "codex",
       "model": "",
       "prompt_prefix": "",

@@ -324,7 +324,7 @@ def build_web_console_view_model_from_dashboard(
     hub_state = dashboard.hub_state
     bridge_state = dashboard.bridge_state
     bridge_conversations = dashboard.bridge_conversations
-    session_dir = app_dir / ".runtime" / "sessions"
+    session_dir = app_dir / "sessions"
     session_rows = build_session_rows(hub_state, session_dir)
     available_session_names = {row.name for row in session_rows}
     resolved_session_name = selected_session_name if selected_session_name in available_session_names else ""
