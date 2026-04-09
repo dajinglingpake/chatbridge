@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from codex_wechat_bootstrap import build_nvm_node_command
@@ -9,6 +10,22 @@ from core.platform_compat import IS_WINDOWS, resolve_command
 def is_missing(checks: dict[str, Any], key: str) -> bool:
     item = checks.get(key)
     return bool(item and not getattr(item, "ok", False))
+
+
+@dataclass
+class RepairCommand:
+    label: str
+    command: str
+    runnable: bool
+
+
+def is_runnable_command(command: str) -> bool:
+    stripped = command.strip()
+    if not stripped:
+        return False
+    if stripped.startswith("请先") or stripped.lower().startswith("use your "):
+        return False
+    return True
 
 
 def build_repair_commands(checks: dict[str, Any], translate=None) -> list[tuple[str, str]]:
@@ -40,3 +57,10 @@ def build_repair_commands(checks: dict[str, Any], translate=None) -> list[tuple[
         commands.append(("OpenCode CLI", f"{npm_command} install -g opencode-ai"))
 
     return commands
+
+
+def build_repair_command_models(checks: dict[str, Any], translate=None) -> list[RepairCommand]:
+    return [
+        RepairCommand(label=label, command=command, runnable=is_runnable_command(command))
+        for label, command in build_repair_commands(checks, translate)
+    ]

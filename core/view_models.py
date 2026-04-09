@@ -6,7 +6,7 @@ from typing import Any, Callable
 
 from bridge_config import BridgeConfig
 from core.accounts import build_account_options
-from core.actions import build_repair_commands
+from core.actions import RepairCommand, build_repair_command_models
 from core.app_state import build_badge, build_issues, build_overview_lines, build_quickstart_lines, build_summary_text, decide_primary_action
 from core.dashboard import DashboardState, load_dashboard_state
 from core.sessions import SessionRow, build_session_detail, build_session_rows
@@ -71,7 +71,7 @@ class WebConsoleViewModel:
     log_dir: str
     active_account_id: str
     issues: list[IssueViewModel]
-    repair_lines: list[str]
+    repair_commands: list[RepairCommand]
     checks: list[CheckViewModel]
     tasks: list[TaskViewModel]
     session_rows: list[SessionRow]
@@ -276,7 +276,7 @@ def build_web_console_view_model_from_dashboard(
         IssueViewModel(title=item.title, detail=item.detail)
         for item in build_issues(dashboard.snapshot, bridge_state, checks_map, t)
     ]
-    repair_lines = [f"{label}: {command}" for label, command in build_repair_commands(checks_map, t)]
+    repair_commands = build_repair_command_models(checks_map, t)
 
     return WebConsoleViewModel(
         home=build_home_view_model(
@@ -290,7 +290,7 @@ def build_web_console_view_model_from_dashboard(
         log_dir=dashboard.snapshot.log_dir,
         active_account_id=account_management.active_account_id,
         issues=issues,
-        repair_lines=repair_lines,
+        repair_commands=repair_commands,
         checks=checks,
         tasks=tasks,
         session_rows=session_rows,
