@@ -8,8 +8,7 @@ from agent_backends import DEFAULT_BACKEND_KEY, supported_backend_keys
 
 APP_DIR = Path(__file__).resolve().parent
 WEIXIN_ACCOUNTS_DIR = APP_DIR / "accounts"
-CONFIG_PATH = APP_DIR / "weixin_bridge_config.json"
-LEGACY_CONFIG_PATH = APP_DIR / "weixin_hub_bridge_config.json"
+CONFIG_PATH = APP_DIR / "config" / "weixin_bridge.json"
 SUPPORTED_BACKENDS = set(supported_backend_keys())
 
 
@@ -160,24 +159,19 @@ class BridgeConfig:
 
     @classmethod
     def load(cls) -> "BridgeConfig":
-        config_path = CONFIG_PATH if CONFIG_PATH.exists() else LEGACY_CONFIG_PATH
-        if not config_path.exists():
+        if not CONFIG_PATH.exists():
             cfg = cls()
             cfg._sync_active_account_fields()
             cfg.save()
             return cfg
-        raw = json.loads(config_path.read_text(encoding="utf-8"))
-        if "default_agent_id" in raw and "backend_id" not in raw:
-            raw["backend_id"] = raw.pop("default_agent_id")
+        raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         accounts, active_account_id = build_account_profiles(raw)
         raw["accounts"] = accounts
         raw["active_account_id"] = active_account_id
         raw["default_backend"] = normalize_backend(str(raw.get("default_backend") or DEFAULT_BACKEND_KEY))
-        legacy_system_notice = bool(raw.get("system_notice_enabled", True))
-        raw["service_notice_enabled"] = bool(raw.get("service_notice_enabled", legacy_system_notice))
-        raw["config_notice_enabled"] = bool(raw.get("config_notice_enabled", legacy_system_notice))
+        raw["service_notice_enabled"] = bool(raw.get("service_notice_enabled", True))
+        raw["config_notice_enabled"] = bool(raw.get("config_notice_enabled", True))
         raw["task_notice_enabled"] = bool(raw.get("task_notice_enabled", False))
-        raw.pop("system_notice_enabled", None)
         raw["language"] = str(raw.get("language") or "auto")
         cfg = cls(**raw)
         cfg._sync_active_account_fields()
@@ -238,4 +232,5 @@ class BridgeConfig:
         data["sync_file"] = _to_rel_path(self.sync_file)
         data["default_backend"] = normalize_backend(str(data.get("default_backend") or DEFAULT_BACKEND_KEY))
         data["language"] = str(data.get("language") or "auto")
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         CONFIG_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")

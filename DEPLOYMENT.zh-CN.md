@@ -50,19 +50,19 @@ D:/projects/chatbridge
 推荐桌面 / 本地壳方式：
 
 ```bat
-start-codex-wechat-desktop.cmd
+start-chatbridge-desktop.cmd
 ```
 
 备选本地壳方式：
 
 ```powershell
-python .\ui_main.py --native
+python .\main.py --native
 ```
 
 Web 方式：
 
 ```bash
-python3 ./ui_main.py --host 0.0.0.0 --port 8765
+python3 ./main.py --host 0.0.0.0 --port 8765
 ```
 
 ## 4. 首次运行时会发生什么
@@ -116,8 +116,8 @@ accounts/
 
 主要配置文件有：
 
-- `agent_hub_config.json`
-- `weixin_bridge_config.json`
+- `config/agent_hub.json`
+- `config/weixin_bridge.json`
 
 在新机器上通常需要确认的字段：
 

@@ -41,13 +41,48 @@ def _has_ui_dependency() -> bool:
 
 
 def _run_command(argv: list[str]) -> None:
-    subprocess.run(argv, cwd=str(APP_DIR), check=True)
+    completed = subprocess.run(
+        argv,
+        cwd=str(APP_DIR),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if completed.stdout:
+        print(completed.stdout, end="")
+    if completed.stderr:
+        print(completed.stderr, end="", file=sys.stderr)
+    if completed.returncode != 0:
+        raise subprocess.CalledProcessError(
+            completed.returncode,
+            argv,
+            output=completed.stdout,
+            stderr=completed.stderr,
+        )
 
 
-def ensure_ui_dependencies() -> None:
+def _ensure_venv_pip(python_executable: str) -> None:
+    pip_check = subprocess.run(
+        [python_executable, "-m", "pip", "--version"],
+        cwd=str(APP_DIR),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if pip_check.returncode == 0:
+        return
+
+    print("[chatbridge] pip missing in local virtual environment, bootstrapping with ensurepip", file=sys.stderr)
+    _run_command([python_executable, "-m", "ensurepip", "--upgrade"])
+
+
+def ensure_ui_dependencies(launcher_path: Path | None = None) -> None:
+    entry_script = str((launcher_path or APP_DIR / "ui_main.py").resolve())
     venv_python = _venv_python()
     if venv_python.exists() and not _is_running_in_project_venv():
-        os.execv(str(venv_python), [str(venv_python), str(APP_DIR / "ui_main.py"), *sys.argv[1:]])
+        os.execv(str(venv_python), [str(venv_python), entry_script, *sys.argv[1:]])
 
     if _has_ui_dependency():
         return
@@ -57,11 +92,12 @@ def ensure_ui_dependencies() -> None:
         _run_command([sys.executable, "-m", "venv", str(VENV_DIR)])
 
     installer_python = str(venv_python)
+    _ensure_venv_pip(installer_python)
     print(f"[chatbridge] Installing Python dependencies from {REQUIREMENTS_PATH.name}", file=sys.stderr)
     _run_command([installer_python, "-m", "pip", "install", "--upgrade", "pip"])
     _run_command([installer_python, "-m", "pip", "install", "-r", str(REQUIREMENTS_PATH)])
 
-    os.execv(installer_python, [installer_python, str(APP_DIR / "ui_main.py"), *sys.argv[1:]])
+    os.execv(installer_python, [installer_python, entry_script, *sys.argv[1:]])
 
 
 def _detect_local_ip() -> str:
@@ -93,8 +129,13 @@ def _print_access_urls(host: str, port: int, native: bool) -> None:
         print(f"[chatbridge] Local URL:   {local_url}", file=sys.stderr)
 
 
-def run_ui_entry(host: str = "0.0.0.0", port: int = 8765, native: bool = False) -> None:
-    ensure_ui_dependencies()
+def run_ui_entry(
+    host: str = "0.0.0.0",
+    port: int = 8765,
+    native: bool = False,
+    launcher_path: Path | None = None,
+) -> None:
+    ensure_ui_dependencies(launcher_path=launcher_path)
     from ui.app import run_ui
 
     _print_access_urls(host, port, native)

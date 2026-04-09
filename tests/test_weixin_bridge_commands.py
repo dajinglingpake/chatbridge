@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import unittest
 
 from bridge_config import BridgeConfig
@@ -44,6 +45,8 @@ class FakeBridge(WeixinBridge):
 
 class WeixinBridgeCommandTests(unittest.TestCase):
     def setUp(self) -> None:
+        self._original_lang = os.environ.get("CHATBRIDGE_LANG")
+        os.environ["CHATBRIDGE_LANG"] = "en-US"
         BRIDGE_CONVERSATIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
         BRIDGE_CONVERSATIONS_PATH.write_text(
             json.dumps(
@@ -59,6 +62,12 @@ class WeixinBridgeCommandTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.bridge = FakeBridge(BridgeConfig.load())
+
+    def tearDown(self) -> None:
+        if self._original_lang is None:
+            os.environ.pop("CHATBRIDGE_LANG", None)
+        else:
+            os.environ["CHATBRIDGE_LANG"] = self._original_lang
 
     def test_notify_command_renders_multiline_status(self) -> None:
         reply, handled = self.bridge._handle_control_command("sender-test", "/notify")

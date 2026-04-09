@@ -2,7 +2,7 @@
 
 [中文部署说明](DEPLOYMENT.zh-CN.md)
 
-This document describes the intended deployment model for ChatBridge with the unified UI entry.
+This document describes the intended deployment model for ChatBridge with a single public entrypoint backed by a shared UI module.
 
 ## Deployment Policy
 
@@ -13,7 +13,7 @@ Current policy:
 - keep the project as normal Python source
 - allow direct debugging on the target machine
 - require Python to be installed in advance
-- use the unified UI as the main user-facing control surface
+- use the unified entry as the main user-facing control surface
 
 Minimum prerequisite:
 
@@ -50,19 +50,19 @@ Any path is fine, as long as the config files use the correct local paths.
 Preferred desktop/native shell:
 
 ```bat
-start-codex-wechat-desktop.cmd
+start-chatbridge-desktop.cmd
 ```
 
 Alternative native launch:
 
 ```powershell
-python .\ui_main.py --native
+python .\main.py --native
 ```
 
 Web launch:
 
 ```bash
-python3 ./ui_main.py --host 0.0.0.0 --port 8765
+python3 ./main.py --host 0.0.0.0 --port 8765
 ```
 
 ## 4. What Happens On First Run
@@ -77,7 +77,7 @@ On first run, the app will automatically:
   - `Codex CLI`
   - `OpenCode CLI`
 
-After that, the unified UI will tell the user what the next step is.
+After that, the shared UI layer will tell the user what the next step is.
 
 ## 5. Remaining Dependencies
 
@@ -93,7 +93,7 @@ The preferred installation path is:
 - `nvm for Windows`
 - `Node.js 24.14.1`
 
-The unified UI detects these items and should auto-repair them when the machine supports it.
+The shared UI layer detects these items and should auto-repair them when the machine supports it.
 
 ## 6. WeChat Account Files
 
@@ -110,14 +110,14 @@ Expected files:
 - `<account-id>.json`
 - `<account-id>.sync.json`
 
-The unified UI checks this directory automatically.
+The shared UI layer checks this directory automatically.
 
 ## 7. Config Files
 
 The main config files are:
 
-- `agent_hub_config.json`
-- `weixin_bridge_config.json`
+- `config/agent_hub.json`
+- `config/weixin_bridge.json`
 
 Typical fields that may need adjustment on a new machine:
 
@@ -150,7 +150,7 @@ These are disposable runtime artifacts and should not be committed.
 For end users, the simplified message is:
 
 1. Install Python first
-2. Start the unified UI
+2. Start the unified entry with the desired mode
 3. Let the app auto-install missing dependencies
 4. Put the WeChat account `json/sync` files into `accounts/`
 

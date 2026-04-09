@@ -64,7 +64,7 @@ python --version
 python -m pip install -r requirements.txt
 ```
 
-统一 UI 主入口 `ui_main.py` 会在首次运行时自动：
+统一入口 `main.py` 会通过共享 UI 模块在首次运行时自动：
 
 - 创建项目内 `.venv/`
 - 安装 `requirements.txt`
@@ -104,7 +104,7 @@ start-chatbridge-desktop.cmd
 也可以直接运行：
 
 ```powershell
-python .\ui_main.py --native
+python .\main.py --native
 ```
 
 Linux / 无桌面环境可以使用 Web 模式：
@@ -116,19 +116,19 @@ Linux / 无桌面环境可以使用 Web 模式：
 或者：
 
 ```bash
-python3 ./ui_main.py --host 0.0.0.0 --port 8765
+python3 ./main.py --host 0.0.0.0 --port 8765
 ```
 
 如果你要开始切统一的 Web/Desktop 双模 UI，可以使用新的 NiceGUI 入口：
 
 ```bash
-python3 ./ui_main.py --host 0.0.0.0 --port 8765
+python3 ./main.py --host 0.0.0.0 --port 8765
 ```
 
 本地壳模式：
 
 ```bash
-python3 ./ui_main.py --native
+python3 ./main.py --native
 ```
 
 统一 UI 启动后会自动：
@@ -168,13 +168,12 @@ Web 模式启动后，终端会打印本地地址和局域网地址，例如 `ht
 当前推荐入口：
 
 - Windows 桌面快捷启动：`start-chatbridge-desktop.cmd`
-- Windows / Linux 统一 UI 场景：`ui_main.py`
+- 统一主入口：`main.py`
 - Web 快捷启动：`start-chatbridge-web.sh`
 
-兼容入口：
+共享启动模块：
 
-- `main.py`
-- `web_main.py`
+- `ui_main.py`
 
 ## 运行时文件
 
@@ -221,15 +220,14 @@ Web 模式启动后，终端会打印本地地址和局域网地址，例如 `ht
 
 ## 主要文件
 
-- `ui_main.py`：统一 UI 主入口
+- `main.py`：统一主入口
+- `ui_main.py`：共享 UI 启动模块
 - `start-chatbridge-desktop.cmd`：主线桌面启动脚本
-- `main.py`：旧桌面兼容入口
-- `web_main.py`：旧 Web 兼容入口
 - `runtime_stack.py`：主线运行时与进程控制入口
 - `env_tools.py`：主线环境检查与安装辅助入口
 - `agent_hub.py`：主线会话后端入口，支持 `codex` / `claude` / `opencode`
-- `agent_hub_config.json`：主线 Agent Hub 配置文件
-- `weixin_bridge_config.json`：主线微信桥配置文件
+- `config/agent_hub.json`：主线 Agent Hub 配置文件
+- `config/weixin_bridge.json`：主线微信桥配置文件
 - `agent_backends/`：Agent 后端接口与独立实现目录，新后端放入这里会被 registry 自动发现
 - `weixin_hub_bridge.py`：微信桥接层
 

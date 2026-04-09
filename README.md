@@ -2,7 +2,7 @@
 
 [中文说明](README.zh-CN.md)
 
-ChatBridge is moving to a unified UI entry that can run both as a web app and as a local native shell for:
+ChatBridge provides a single public entrypoint with parameter-controlled web mode and local native shell mode for:
 
 - WeChat transport
 - multiple AI conversations
@@ -64,7 +64,7 @@ If you want to prepare the environment manually:
 python -m pip install -r requirements.txt
 ```
 
-The unified UI entry `ui_main.py` now bootstraps the local environment automatically on first run:
+The unified entry `main.py` now bootstraps the local environment automatically on first run through the shared UI module:
 
 - create `.venv/`
 - install `requirements.txt`
@@ -95,10 +95,10 @@ Preferred launcher:
 start-chatbridge-desktop.cmd
 ```
 
-Unified UI entry:
+Desktop mode:
 
 ```powershell
-python .\ui_main.py --native
+python .\main.py --native
 ```
 
 Linux / headless web mode:
@@ -107,10 +107,10 @@ Linux / headless web mode:
 ./start-chatbridge-web.sh
 ```
 
-Or run the UI entry directly:
+Or run web mode directly:
 
 ```bash
-python3 ./ui_main.py --host 0.0.0.0 --port 8765
+python3 ./main.py --host 0.0.0.0 --port 8765
 ```
 
 On startup, the unified UI will:
@@ -131,7 +131,7 @@ On startup, the unified UI will:
 For a new user, the intended flow is:
 
 1. Install Python
-2. Launch the unified UI
+2. Launch the unified entry with the desired mode
 3. Let the app auto-detect and auto-repair missing dependencies
 4. Complete WeChat login when prompted
    Put the WeChat account `json/sync` files into `accounts/`
@@ -140,13 +140,12 @@ For a new user, the intended flow is:
 Recommended entrypoints:
 
 - `start-chatbridge-desktop.cmd`: desktop shortcut launcher
-- `ui_main.py`: unified primary entry
+- `main.py`: unified primary entry
 - `start-chatbridge-web.sh`: web shortcut launcher
 
-Compatibility wrappers:
+Shared bootstrap module:
 
-- `main.py`
-- `web_main.py`
+- `ui_main.py`
 
 ## Runtime Files
 
@@ -193,22 +192,21 @@ The repo already ignores:
 
 ## Main Files
 
-- `ui_main.py`: unified UI primary entry
+- `main.py`: unified primary entry
+- `ui_main.py`: shared UI bootstrap module
 - `start-chatbridge-desktop.cmd`: primary desktop launcher
-- `main.py`: legacy desktop compatibility entry
-- `web_main.py`: legacy web compatibility entry
 - `runtime_stack.py`: primary runtime and process control entry
 - `env_tools.py`: primary environment check and install helper entry
 - `agent_hub.py`: primary conversation backend entry with `codex` / `claude` / `opencode` support
-- `agent_hub_config.json`: primary Agent Hub config
-- `weixin_bridge_config.json`: primary WeChat bridge config
+- `config/agent_hub.json`: primary Agent Hub config
+- `config/weixin_bridge.json`: primary WeChat bridge config
 - `agent_backends/`: backend interface and isolated implementations; new `*_backend.py` files are auto-discovered
 - `weixin_hub_bridge.py`: WeChat bridge
 
 ## Notes
 
-- The project now has a unified UI direction for Windows, Linux, and headless mode
-- `main.py` and `web_main.py` are compatibility wrappers around the unified UI
+- The project now has a shared UI direction for Windows, Linux, and headless mode
+- `main.py` is the public entrypoint, and `ui_main.py` is the shared bootstrap module
 - The preferred Node path is `nvm for Windows` with `Node.js 24.14.1`
 - Hub and bridge communicate through local runtime IPC
 

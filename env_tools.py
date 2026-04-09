@@ -141,8 +141,8 @@ def collect_checks(project_dir: Path) -> list[CheckResult]:
     )
 
     config_files = [
-        project_dir / "agent_hub_config.json",
-        project_dir / "weixin_bridge_config.json",
+        project_dir / "config" / "agent_hub.json",
+        project_dir / "config" / "weixin_bridge.json",
         project_dir / "main.py",
     ]
     results.append(

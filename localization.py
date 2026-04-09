@@ -24,10 +24,14 @@ class Localizer:
 
 
 def resolve_language(preferred: str = "") -> str:
+    try:
+        system_locale = locale.getlocale()[0] or ""
+    except ValueError:
+        system_locale = ""
     candidates = [
         normalize_language(preferred),
         normalize_language(os.environ.get("CHATBRIDGE_LANG") or ""),
-        normalize_language(locale.getdefaultlocale()[0] or ""),
+        normalize_language(system_locale),
     ]
     for candidate in candidates:
         if candidate:

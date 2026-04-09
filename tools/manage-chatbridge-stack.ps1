@@ -6,20 +6,20 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $RuntimeDir = Join-Path $Root ".runtime"
 $LogDir = Join-Path $RuntimeDir "logs"
 New-Item -ItemType Directory -Force -Path $RuntimeDir | Out-Null
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
-$HubScript = Join-Path $Root "multi_codex_hub.py"
+$HubScript = Join-Path $Root "agent_hub.py"
 $BridgeScript = Join-Path $Root "weixin_hub_bridge.py"
 
-$HubPidFile = Join-Path $RuntimeDir "multi_codex_hub.pid"
+$HubPidFile = Join-Path $RuntimeDir "agent_hub.pid"
 $BridgePidFile = Join-Path $RuntimeDir "weixin_hub_bridge.pid"
 
-$HubOutLog = Join-Path $LogDir "multi_codex_hub.out.log"
-$HubErrLog = Join-Path $LogDir "multi_codex_hub.err.log"
+$HubOutLog = Join-Path $LogDir "agent_hub.out.log"
+$HubErrLog = Join-Path $LogDir "agent_hub.err.log"
 $BridgeOutLog = Join-Path $LogDir "weixin_hub_bridge.out.log"
 $BridgeErrLog = Join-Path $LogDir "weixin_hub_bridge.err.log"
 

@@ -23,9 +23,8 @@ RUNTIME_DIR = APP_DIR / ".runtime"
 STATE_DIR = RUNTIME_DIR / "state"
 SESSION_DIR = RUNTIME_DIR / "sessions"
 WORKSPACE_DIR = APP_DIR / "workspace"
-CONFIG_PATH = APP_DIR / "agent_hub_config.json"
-LEGACY_CONFIG_PATH = APP_DIR / "multi_codex_hub_config.json"
-STATE_PATH = STATE_DIR / "multi_codex_hub_state.json"
+CONFIG_PATH = APP_DIR / "config" / "agent_hub.json"
+STATE_PATH = STATE_DIR / "agent_hub_state.json"
 SUPPORTED_BACKENDS = set(supported_backend_keys())
 
 
@@ -77,8 +76,7 @@ class HubConfig:
     @classmethod
     def load(cls) -> "HubConfig":
         WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
-        config_path = CONFIG_PATH if CONFIG_PATH.exists() else LEGACY_CONFIG_PATH
-        if not config_path.exists():
+        if not CONFIG_PATH.exists():
             SESSION_DIR.mkdir(parents=True, exist_ok=True)
             cfg = cls(
                 agents=[
@@ -87,7 +85,7 @@ class HubConfig:
             )
             cfg.save()
             return cfg
-        raw = json.loads(config_path.read_text(encoding="utf-8"))
+        raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         raw["agents"] = [AgentConfig(**a) for a in raw.get("agents", [])]
         raw.pop("host", None)
         raw.pop("port", None)
