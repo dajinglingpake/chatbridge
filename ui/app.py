@@ -223,37 +223,43 @@ def create_ui() -> None:
 
     def toggle_auto_refresh() -> None:
         state["auto_refresh"] = not state["auto_refresh"]
-        auto_refresh_button.text = AUTO_REFRESH_ON_ACTION.label if state["auto_refresh"] else AUTO_REFRESH_OFF_ACTION.label
+        if auto_refresh_button is not None:
+            auto_refresh_button.text = AUTO_REFRESH_ON_ACTION.label if state["auto_refresh"] else AUTO_REFRESH_OFF_ACTION.label
         content_view.refresh()
 
-    with ui.header().classes("items-center justify-between bg-stone-100 text-slate-800 shadow-sm px-4 py-3"):
-        with ui.column().classes("gap-0"):
-            ui.label(APP_SHELL.app_name).classes("text-2xl font-bold")
-            ui.label(APP_SHELL.app_subtitle).classes("text-sm text-slate-600")
-        with ui.row().classes("gap-2 items-center"):
-            auto_refresh_button = ui.button(
-                AUTO_REFRESH_ON_ACTION.label if state["auto_refresh"] else AUTO_REFRESH_OFF_ACTION.label,
-                on_click=lambda: toggle_auto_refresh(),
-            ).props("outline")
+    @ui.page("/")
+    def index_page() -> None:
+        nonlocal auto_refresh_button
+        with ui.header().classes("items-center justify-between bg-stone-100 text-slate-800 shadow-sm px-4 py-3"):
+            with ui.column().classes("gap-0"):
+                ui.label(APP_SHELL.app_name).classes("text-2xl font-bold")
+                ui.label(APP_SHELL.app_subtitle).classes("text-sm text-slate-600")
+            with ui.row().classes("gap-2 items-center"):
+                auto_refresh_button = ui.button(
+                    AUTO_REFRESH_ON_ACTION.label if state["auto_refresh"] else AUTO_REFRESH_OFF_ACTION.label,
+                    on_click=lambda: toggle_auto_refresh(),
+                ).props("outline")
 
-    with ui.row().classes("w-full gap-2 px-4 py-3 bg-stone-50 border-b border-stone-200 sticky top-[72px] z-40"):
-        for page in APP_SHELL.pages:
-            ui.link(page.title, f"#{page.anchor}").classes("rounded-full px-4 py-2 bg-white border border-stone-200 text-slate-700 no-underline")
-        ui.space()
-        for action in APP_SHELL.topbar_actions:
-            ui.button(
-                action.label,
-                on_click=lambda key=action.key: execute_topbar_action(
-                    key,
-                    refresh=refresh_view,
-                    jump=jump_to,
-                    notify=notify_only,
-                    open_qr_login=open_qr_login,
-                ),
-            ).props("outline")
+        with ui.row().classes("w-full gap-2 px-4 py-3 bg-stone-50 border-b border-stone-200 sticky top-[72px] z-40"):
+            for page in APP_SHELL.pages:
+                ui.link(page.title, f"#{page.anchor}").classes("rounded-full px-4 py-2 bg-white border border-stone-200 text-slate-700 no-underline")
+            ui.space()
+            for action in APP_SHELL.topbar_actions:
+                ui.button(
+                    action.label,
+                    on_click=lambda key=action.key: execute_topbar_action(
+                        key,
+                        refresh=refresh_view,
+                        jump=jump_to,
+                        notify=notify_only,
+                        open_qr_login=open_qr_login,
+                    ),
+                ).props("outline")
 
-    content_view()
-    ui.timer(8.0, lambda: content_view.refresh() if state["auto_refresh"] else None)
+        content_view()
+        ui.timer(8.0, lambda: content_view.refresh() if state["auto_refresh"] else None)
+
+    auto_refresh_button = None
 
 
 def run_ui(host: str = "0.0.0.0", port: int = 8765, native: bool = False) -> None:
