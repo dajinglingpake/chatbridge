@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -55,6 +56,30 @@ class RuntimeSnapshot:
     log_dir: str
 
 
+def _normalize_process_text(name: str, cmdline: str) -> str:
+    return f"{name} {cmdline}".lower()
+
+
+def infer_agent_backend(name: str, cmdline: str) -> str:
+    lowered = _normalize_process_text(name, cmdline)
+    if "claude" in lowered:
+        return "claude"
+    if "opencode" in lowered:
+        return "opencode"
+    return "codex"
+
+
+def extract_agent_session_hint(cmdline: str) -> str:
+    try:
+        parts = shlex.split(cmdline)
+    except ValueError:
+        parts = cmdline.split()
+    for index, part in enumerate(parts):
+        if part in {"resume", "--resume", "--session"} and index + 1 < len(parts):
+            return parts[index + 1]
+    return ""
+
+
 def ensure_runtime_dirs() -> None:
     for path in [RUNTIME_DIR, STATE_DIR, LOG_DIR, SESSION_DIR, WORKSPACE_DIR]:
         path.mkdir(parents=True, exist_ok=True)
@@ -102,6 +127,88 @@ def _find_process_by_script(script_path: Path):
         if target in cmdline or target in " ".join(cmdline):
             return proc
     return None
+
+
+def _managed_root_pids() -> set[int]:
+    managed: set[int] = set()
+    for status in [
+        get_managed_status("Hub", HUB_SCRIPT, HUB_PID_FILE),
+        get_managed_status("Bridge", BRIDGE_SCRIPT, BRIDGE_PID_FILE),
+    ]:
+        if status.running and status.pid:
+            managed.add(status.pid)
+    return managed
+
+
+def _has_managed_ancestor(proc, managed_root_pids: set[int]) -> bool:
+    if psutil is None or not managed_root_pids:
+        return False
+    try:
+        for parent in proc.parents():
+            if parent.pid in managed_root_pids:
+                return True
+    except psutil.Error:
+        return False
+    return False
+
+
+def discover_external_agent_processes() -> list[dict[str, str | int]]:
+    if psutil is None:
+        return []
+
+    current_pid = os.getpid()
+    managed_root_pids = _managed_root_pids()
+    rendered: list[dict[str, str | int]] = []
+    parent_map: dict[int, int | None] = {}
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        pid = proc.info.get("pid")
+        if pid in {None, current_pid}:
+            continue
+        if pid in managed_root_pids:
+            continue
+        if _has_managed_ancestor(proc, managed_root_pids):
+            continue
+        cmdline = " ".join(proc.info.get("cmdline") or [])
+        name = str(proc.info.get("name") or "")
+        lowered = _normalize_process_text(name, cmdline)
+        if "codex" not in lowered and "claude" not in lowered and "opencode" not in lowered:
+            continue
+        try:
+            parent_map[int(pid)] = proc.ppid()
+        except psutil.Error:
+            parent_map[int(pid)] = None
+        rendered.append(
+            {
+                "pid": int(pid),
+                "name": name,
+                "backend": infer_agent_backend(name, cmdline),
+                "session_hint": extract_agent_session_hint(cmdline),
+                "command_line": cmdline,
+            }
+        )
+    candidate_pids = {int(item["pid"]) for item in rendered}
+    parent_candidates = {parent_pid for parent_pid in parent_map.values() if parent_pid in candidate_pids}
+    filtered: list[dict[str, str | int]] = []
+    for item in rendered:
+        pid = int(item["pid"])
+        if pid in parent_candidates:
+            continue
+        filtered.append(item)
+    return sorted(filtered, key=lambda item: int(item["pid"]))
+
+
+def stop_external_agent_process(pid: int) -> str:
+    if pid <= 0:
+        return "结束失败：PID 无效"
+    known_pids = {int(item["pid"]) for item in discover_external_agent_processes()}
+    if pid not in known_pids:
+        return f"结束失败：PID {pid} 不是可控的外部 Agent 进程"
+    _taskkill(pid)
+    if psutil is not None:
+        proc = _get_process(pid)
+        if proc is not None:
+            return f"结束失败：PID {pid} 仍在运行"
+    return f"已结束外部 Agent 进程 PID {pid}"
 
 
 def get_managed_status(name: str, script_path: Path, pid_file: Path) -> ManagedStatus:

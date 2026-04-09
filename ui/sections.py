@@ -23,6 +23,8 @@ def render_home_section(
     on_open_qr_login,
     on_save_agent,
     on_delete_agent,
+    on_terminate_external_agent,
+    on_copy_external_session_hint,
 ) -> None:
     with ui.element("section").props(f"id={HOME_PAGE.anchor}").classes("w-full"):
         ui.label(HOME_PAGE.title).classes("text-2xl font-semibold")
@@ -197,6 +199,42 @@ def render_home_section(
                         color="negative",
                         on_click=lambda: delete_dialog.open() if selected_agent.value else None,
                     ).props("outline")
+
+            with ui.card().classes("w-full col-span-2"):
+                ui.label("外部终端 Agent 进程").classes("text-lg font-semibold")
+                ui.label("这里只显示未被 ChatBridge 接管、但当前机器上正在运行的 Codex / Claude / OpenCode 进程。").classes("text-sm text-slate-500")
+                ui.label("当前支持明确区分和结束进程，不会把它们伪装成可接管会话。").classes("text-sm text-slate-500")
+                if model.external_agent_processes:
+                    for item in model.external_agent_processes:
+                        with ui.card().classes("w-full bg-amber-50"):
+                            with ui.dialog() as terminate_dialog, ui.card().classes("min-w-[28rem]"):
+                                ui.label("确认结束外部 Agent 进程").classes("text-lg font-semibold")
+                                ui.label(f"PID {item.pid} 将被直接结束。这个操作只影响外部终端里手动启动的 Agent 进程。").classes("text-sm text-slate-600")
+                                ui.code(item.command_line).classes("w-full whitespace-pre-wrap")
+                                with ui.row().classes("justify-end gap-2 w-full"):
+                                    ui.button("取消", on_click=terminate_dialog.close).props("flat")
+                                    ui.button(
+                                        "确认结束",
+                                        color="negative",
+                                        on_click=lambda pid=item.pid: (
+                                            on_terminate_external_agent(pid),
+                                            terminate_dialog.close(),
+                                        ),
+                                    )
+                            ui.label(f"PID {item.pid} | {item.backend} | {item.managed_label}").classes("font-semibold")
+                            ui.label(f"进程名: {item.name}").classes("text-sm text-slate-700")
+                            if item.session_hint:
+                                ui.label(f"会话标识: {item.session_hint}").classes("text-sm text-slate-700")
+                            ui.code(item.command_line).classes("w-full whitespace-pre-wrap max-h-36 overflow-auto")
+                            with ui.row().classes("gap-2"):
+                                if item.session_hint:
+                                    ui.button(
+                                        "复制会话标识",
+                                        on_click=lambda session_hint=item.session_hint: on_copy_external_session_hint(session_hint),
+                                    ).props("outline")
+                                ui.button("结束进程", color="negative", on_click=terminate_dialog.open).props("outline")
+                else:
+                    ui.label("当前没有发现外部终端里手动启动的 Agent 进程。").classes("text-slate-500")
 
             with ui.card().classes("w-full col-span-2"):
                 ui.label("微信会话绑定").classes("text-lg font-semibold")

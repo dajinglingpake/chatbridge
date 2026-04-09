@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from core.action_defs import AUTO_REFRESH_OFF_ACTION, AUTO_REFRESH_ON_ACTION
-from core.app_service import delete_agent, reset_weixin_conversation, run_named_action, run_repair_command, save_agent, set_weixin_notice_enabled, submit_hub_task, switch_active_account, switch_bridge_agent, switch_weixin_session_backend
+from core.app_service import delete_agent, reset_weixin_conversation, run_named_action, run_repair_command, save_agent, set_weixin_notice_enabled, submit_hub_task, switch_active_account, switch_bridge_agent, switch_weixin_session_backend, terminate_external_agent
 from core.shell_schema import APP_SHELL
 from core.view_models import build_web_console_view_model
 from localization import Localizer
@@ -106,6 +106,8 @@ def create_ui() -> None:
                 open_qr_login,
                 _save_agent,
                 _delete_agent,
+                _terminate_external_agent,
+                _copy_external_session_hint,
             )
             render_issues_section(ui, model, _run_repair_command)
             render_sessions_section(ui, model, _select_session, _select_task, _set_task_filters, _find_task_by_id)
@@ -157,6 +159,18 @@ def create_ui() -> None:
         if state["selected_task_agent"] == agent_id:
             state["selected_task_agent"] = ""
         _notify(result.message)
+
+    def _terminate_external_agent(pid: int) -> None:
+        result = terminate_external_agent(pid)
+        _notify(result.message)
+
+    def _copy_external_session_hint(session_hint: str) -> None:
+        cleaned_hint = session_hint.strip()
+        if not cleaned_hint:
+            _notify("当前外部进程没有可复制的会话标识")
+            return
+        ui.run_javascript(f"navigator.clipboard.writeText({cleaned_hint!r})")
+        ui.notify(f"已复制会话标识：{cleaned_hint}", position="top")
 
     def _run_primary_action(action_key: str) -> None:
         execute_primary_action(

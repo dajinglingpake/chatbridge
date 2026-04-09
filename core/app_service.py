@@ -8,7 +8,7 @@ from typing import Any, Callable
 from agent_backends import supported_backend_keys
 from env_tools import run_shell_command
 from local_ipc import create_request, wait_for_response
-from runtime_stack import BRIDGE_CONVERSATIONS_PATH, emergency_stop, get_runtime_snapshot, restart_all, restart_bridge, start_all, stop_all
+from runtime_stack import BRIDGE_CONVERSATIONS_PATH, emergency_stop, get_runtime_snapshot, restart_all, restart_bridge, start_all, stop_all, stop_external_agent_process
 
 from core.accounts import activate_account
 from bridge_config import APP_DIR, BridgeConfig
@@ -216,6 +216,13 @@ def set_weixin_notice_enabled(service_enabled: bool, config_enabled: bool, task_
             f"任务通知={'开' if config.task_notice_enabled else '关'}"
         ),
     )
+
+
+def terminate_external_agent(pid: int) -> ServiceResult:
+    message = stop_external_agent_process(int(pid))
+    ok = message.startswith("已结束")
+    notice = broadcast_weixin_notice_by_kind("service", "结束外部 Agent 进程", message)
+    return ServiceResult(ok=ok, message=f"{message} | {notice.summary}")
 
 
 def switch_weixin_session_backend(sender_id: str, backend: str) -> ServiceResult:

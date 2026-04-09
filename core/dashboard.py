@@ -14,6 +14,7 @@ from runtime_stack import (
     HUB_ERR_LOG,
     HUB_OUT_LOG,
     HUB_STATE_PATH,
+    discover_external_agent_processes,
     get_runtime_snapshot,
     read_json,
 )
@@ -28,6 +29,7 @@ class DashboardState:
     checks: dict[str, Any]
     active_account_id: str
     logs: dict[str, str]
+    external_agent_processes: list[dict[str, Any]]
 
 
 def tail_text(path: Path, max_lines: int = 80) -> str:
@@ -61,4 +63,5 @@ def load_dashboard_state(app_dir) -> DashboardState:
         checks=checks,
         active_account_id=active_account_id,
         logs=logs,
+        external_agent_processes=discover_external_agent_processes(),
     )

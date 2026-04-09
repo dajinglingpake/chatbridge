@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import queue
 import threading
 import time
@@ -16,6 +15,7 @@ from bridge_config import BridgeConfig
 from core.weixin_notifier import broadcast_weixin_notice_by_kind, build_task_followup_hint
 from local_ipc import REQUEST_DIR, ensure_ipc_dirs, mark_processed, read_request, write_response
 from core.platform_compat import creationflags, resolve_command
+from runtime_stack import discover_external_agent_processes
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -54,34 +54,6 @@ def _to_rel_path(value: str) -> str:
 def normalize_backend(value: str) -> str:
     backend = (value or DEFAULT_BACKEND_KEY).strip().lower()
     return backend if backend in SUPPORTED_BACKENDS else DEFAULT_BACKEND_KEY
-
-
-def discover_agent_processes() -> list[dict[str, Any]]:
-    try:
-        import psutil
-    except ImportError:
-        return []
-
-    current_pid = os.getpid()
-    result: list[dict[str, Any]] = []
-    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
-        pid = proc.info.get("pid")
-        if pid == current_pid:
-            continue
-        cmdline = " ".join(proc.info.get("cmdline") or [])
-        name = proc.info.get("name") or ""
-        lowered = f"{name} {cmdline}".lower()
-        if "codex" not in lowered and "claude" not in lowered and "opencode" not in lowered:
-            continue
-        result.append(
-            {
-                "pid": pid,
-                "name": name,
-                "command_line": cmdline,
-            }
-        )
-    return result
-
 
 @dataclass
 class AgentConfig:
@@ -427,7 +399,7 @@ class MultiCodexHub:
                     },
                     "agents": self.list_agents(),
                     "tasks": self.list_tasks(),
-                    "external_agent_processes": discover_agent_processes(),
+                    "external_agent_processes": discover_external_agent_processes(),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -487,7 +459,7 @@ class MultiCodexHub:
                 },
                 "agents": self.list_agents(),
                 "tasks": self.list_tasks(),
-                "external_agent_processes": discover_agent_processes(),
+                "external_agent_processes": discover_external_agent_processes(),
             }
         raise ValueError(f"unsupported action: {action}")
 

@@ -82,6 +82,16 @@ class AgentManagementViewModel:
 
 
 @dataclass
+class ExternalAgentProcessViewModel:
+    pid: int
+    name: str
+    backend: str
+    session_hint: str
+    command_line: str
+    managed_label: str
+
+
+@dataclass
 class WeixinConversationBindingViewModel:
     sender_id: str
     agent_id: str
@@ -124,6 +134,7 @@ class WebConsoleViewModel:
     task_detail_lines: list[str]
     task_result_lines: list[str]
     agent_management: list[AgentManagementViewModel]
+    external_agent_processes: list[ExternalAgentProcessViewModel]
     weixin_conversations: list[WeixinConversationBindingViewModel]
     account_options: list[AccountOptionViewModel]
     agent_options: list[AgentOptionViewModel]
@@ -348,6 +359,26 @@ def build_web_console_view_model_from_dashboard(
     if not agent_options:
         agent_options.append(AgentOptionViewModel(agent_id="main", label="默认会话 (main)"))
 
+    external_agent_processes: list[ExternalAgentProcessViewModel] = []
+    for process in dashboard.external_agent_processes or hub_state.get("external_agent_processes") or []:
+        pid = int(process.get("pid") or 0)
+        if pid <= 0:
+            continue
+        name = str(process.get("name") or "-")
+        backend = str(process.get("backend") or "").strip().lower() or "unknown"
+        command_line = str(process.get("command_line") or "").strip() or name
+        external_agent_processes.append(
+            ExternalAgentProcessViewModel(
+                pid=pid,
+                name=name,
+                backend=backend,
+                session_hint=str(process.get("session_hint") or ""),
+                command_line=command_line,
+                managed_label="外部 / 未接管",
+            )
+        )
+    external_agent_processes.sort(key=lambda item: (item.backend, item.session_hint or "~", item.pid))
+
     weixin_conversations: list[WeixinConversationBindingViewModel] = []
     for sender_id, binding in sorted((bridge_conversations or {}).items()):
         if not isinstance(binding, dict):
@@ -499,6 +530,7 @@ def build_web_console_view_model_from_dashboard(
         task_detail_lines=task_detail_lines,
         task_result_lines=task_result_lines,
         agent_management=agent_management,
+        external_agent_processes=external_agent_processes,
         weixin_conversations=weixin_conversations,
         account_options=account_management.options,
         agent_options=agent_options,
