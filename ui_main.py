@@ -4,6 +4,7 @@ import argparse
 import importlib.util
 import os
 import socket
+import site
 import subprocess
 import sys
 from pathlib import Path
@@ -34,6 +35,25 @@ def _is_running_in_project_venv() -> bool:
     if virtual_env and Path(virtual_env).resolve() == expected:
         return True
     return Path(sys.prefix).resolve() == expected
+
+
+def _is_debugger_attached() -> bool:
+    return sys.gettrace() is not None or os.environ.get("PYCHARM_HOSTED") == "1"
+
+
+def _venv_site_packages() -> Path:
+    if os.name == "nt":
+        return VENV_DIR / "Lib" / "site-packages"
+    return VENV_DIR / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+
+
+def _activate_venv_in_process() -> None:
+    scripts_dir = _venv_python().parent
+    site_packages = _venv_site_packages()
+    os.environ["VIRTUAL_ENV"] = str(VENV_DIR)
+    os.environ["PATH"] = str(scripts_dir) + os.pathsep + os.environ.get("PATH", "")
+    if site_packages.exists():
+        site.addsitedir(str(site_packages))
 
 
 def _has_ui_dependency() -> bool:
@@ -98,22 +118,31 @@ def _ensure_local_venv() -> Path:
 
 def ensure_ui_dependencies(launcher_path: Path | None = None) -> None:
     entry_script = str((launcher_path or APP_DIR / "ui_main.py").resolve())
-    venv_python = _venv_python()
-    if venv_python.exists() and not _is_running_in_project_venv():
-        os.execv(str(venv_python), [str(venv_python), entry_script, *sys.argv[1:]])
+    venv_python = _ensure_local_venv()
+    installer_python = str(venv_python)
 
-    if _has_ui_dependency():
+    if not _is_running_in_project_venv() and _is_debugger_attached():
+        _activate_venv_in_process()
+
+    if not _has_ui_dependency():
+        _ensure_venv_pip(installer_python)
+        print(f"[chatbridge] Installing Python dependencies from {REQUIREMENTS_PATH.name}", file=sys.stderr)
+        _run_command([installer_python, "-m", "pip", "install", "--upgrade", "pip"])
+        _run_command([installer_python, "-m", "pip", "install", "-r", str(REQUIREMENTS_PATH)])
+        if not _is_running_in_project_venv():
+            if _is_debugger_attached():
+                _activate_venv_in_process()
+            else:
+                os.execv(installer_python, [installer_python, entry_script, *sys.argv[1:]])
+        if not _has_ui_dependency():
+            raise RuntimeError("nicegui is still unavailable after installing requirements into the local virtual environment")
         return
 
-    venv_python = _ensure_local_venv()
-
-    installer_python = str(venv_python)
-    _ensure_venv_pip(installer_python)
-    print(f"[chatbridge] Installing Python dependencies from {REQUIREMENTS_PATH.name}", file=sys.stderr)
-    _run_command([installer_python, "-m", "pip", "install", "--upgrade", "pip"])
-    _run_command([installer_python, "-m", "pip", "install", "-r", str(REQUIREMENTS_PATH)])
-
-    os.execv(installer_python, [installer_python, entry_script, *sys.argv[1:]])
+    if not _is_running_in_project_venv():
+        if _is_debugger_attached():
+            _activate_venv_in_process()
+        else:
+            os.execv(installer_python, [installer_python, entry_script, *sys.argv[1:]])
 
 
 def _detect_local_ip() -> str:
