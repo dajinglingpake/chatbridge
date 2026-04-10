@@ -4,6 +4,7 @@ from pathlib import Path
 
 from core.action_defs import AUTO_REFRESH_OFF_ACTION, AUTO_REFRESH_ON_ACTION
 from core.app_service import delete_agent, reset_weixin_conversation, run_named_action, run_repair_command, save_agent, set_weixin_notice_enabled, submit_hub_task, switch_active_account, switch_bridge_agent, switch_weixin_session_backend, terminate_external_agent
+from core.navigation import PRIMARY_PAGES
 from core.shell_schema import APP_SHELL
 from core.view_models import build_web_console_view_model
 from localization import Localizer
@@ -37,12 +38,27 @@ def create_ui() -> None:
         "selected_task_status": "",
         "selected_task_agent": "",
         "selected_task_backend": "",
+        "session_page": 1,
+        "task_page": 1,
+        "agent_page": 1,
+        "checks_page": 1,
+        "load_session_detail": False,
+        "load_task_detail": False,
+        "checks_in_progress": False,
+        "active_page": "home",
     }
 
     def refresh_model():
         model = build_web_console_view_model(
             APP_DIR,
             localizer.translate,
+            page_key=state["active_page"],
+            session_page=state["session_page"],
+            task_page=state["task_page"],
+            agent_page=state["agent_page"],
+            checks_page=state["checks_page"],
+            load_session_detail=state["load_session_detail"],
+            load_task_detail=state["load_task_detail"],
             selected_session_name=state["selected_session_name"],
             selected_task_id=state["selected_task_id"],
             selected_task_status=state["selected_task_status"],
@@ -54,13 +70,27 @@ def create_ui() -> None:
         state["selected_task_status"] = model.selected_task_status
         state["selected_task_agent"] = model.selected_task_agent
         state["selected_task_backend"] = model.selected_task_backend
+        state["session_page"] = model.session_page
+        state["task_page"] = model.task_page
+        state["agent_page"] = model.agent_page
+        state["checks_page"] = model.checks_page
+        state["checks_in_progress"] = model.checks_in_progress
         return model
 
     def jump_to(anchor: str) -> None:
+        target = next((page for page in PRIMARY_PAGES if page.anchor == anchor or page.key == anchor), None)
+        if target is not None:
+            state["active_page"] = target.key
         ui.run_javascript(f"window.location.hash = '{anchor}'")
+        content_view.refresh()
 
     def refresh_view() -> None:
         content_view.refresh()
+
+    def should_auto_refresh() -> bool:
+        if state["active_page"] in {"home", "sessions"}:
+            return True
+        return bool(state["checks_in_progress"])
 
     def notify_only(result_message: str) -> None:
         ui.notify(result_message, position="top")
@@ -71,28 +101,57 @@ def create_ui() -> None:
     def content_view() -> None:
         model = refresh_model()
         with ui.column().classes("w-full max-w-7xl mx-auto gap-6 p-4"):
-            render_home_section(
-                ui,
-                model,
-                _run_action,
-                _submit_task,
-                _switch_account,
-                _switch_bridge_agent,
-                _set_weixin_notice_enabled,
-                _open_weixin_binding,
-                _open_weixin_binding_task,
-                _switch_weixin_binding_backend,
-                _reset_weixin_binding,
-                _run_primary_action,
-                open_qr_login,
-                _save_agent,
-                _delete_agent,
-                _terminate_external_agent,
-                _copy_external_session_hint,
-            )
-            render_issues_section(ui, model, _run_repair_command)
-            render_sessions_section(ui, model, _select_session, _select_task, _set_task_filters, _find_task_by_id)
-            render_diagnostics_section(ui, model)
+            if state["active_page"] == "home":
+                render_home_section(
+                    ui,
+                    model,
+                    _run_action,
+                    _submit_task,
+                    _switch_account,
+                    _switch_bridge_agent,
+                    _set_weixin_notice_enabled,
+                    _open_weixin_binding,
+                    _open_weixin_binding_task,
+                    _switch_weixin_binding_backend,
+                    _reset_weixin_binding,
+                    _run_primary_action,
+                    open_qr_login,
+                    _save_agent,
+                    _delete_agent,
+                    _terminate_external_agent,
+                    _copy_external_session_hint,
+                )
+            elif state["active_page"] == "issues":
+                render_issues_section(ui, model, _run_repair_command)
+            elif state["active_page"] == "sessions":
+                render_sessions_section(
+                    ui,
+                    model,
+                    _select_session,
+                    _set_session_page,
+                    _load_selected_session_detail,
+                    _select_task,
+                    _set_task_page,
+                    _load_selected_task_detail,
+                    _set_task_filters,
+                    _find_task_by_id,
+                    _open_weixin_binding,
+                    _open_weixin_binding_task,
+                    _switch_weixin_binding_backend,
+                    _reset_weixin_binding,
+                )
+            else:
+                render_diagnostics_section(
+                    ui,
+                    model,
+                    _set_checks_page,
+                    _switch_bridge_agent,
+                    _set_agent_page,
+                    _save_agent,
+                    _delete_agent,
+                    _terminate_external_agent,
+                    _copy_external_session_hint,
+                )
 
     def _notify(result_message: str) -> None:
         ui.notify(result_message, position="top")
@@ -164,12 +223,17 @@ def create_ui() -> None:
 
     def _select_session(session_name: str) -> None:
         state["selected_session_name"] = session_name
+        state["session_page"] = 1
+        state["task_page"] = 1
+        state["load_session_detail"] = False
+        state["load_task_detail"] = False
         content_view.refresh()
 
     def _select_task(task_id: str, session_name: str = "") -> None:
         state["selected_task_id"] = task_id
         if session_name:
             state["selected_session_name"] = session_name
+        state["load_task_detail"] = False
         content_view.refresh()
 
     def _set_task_filters(status: str = "", agent: str = "", backend: str = "") -> None:
@@ -177,6 +241,24 @@ def create_ui() -> None:
         state["selected_task_agent"] = agent
         state["selected_task_backend"] = backend
         state["selected_task_id"] = ""
+        state["task_page"] = 1
+        state["load_task_detail"] = False
+        content_view.refresh()
+
+    def _set_session_page(page: int) -> None:
+        state["session_page"] = max(1, int(page))
+        content_view.refresh()
+
+    def _set_task_page(page: int) -> None:
+        state["task_page"] = max(1, int(page))
+        content_view.refresh()
+
+    def _set_agent_page(page: int) -> None:
+        state["agent_page"] = max(1, int(page))
+        content_view.refresh()
+
+    def _set_checks_page(page: int) -> None:
+        state["checks_page"] = max(1, int(page))
         content_view.refresh()
 
     def _find_task_by_id(task_id: str) -> None:
@@ -191,6 +273,16 @@ def create_ui() -> None:
             return
         state["selected_task_id"] = matched.task_id
         state["selected_session_name"] = matched.session_name
+        state["load_session_detail"] = False
+        state["load_task_detail"] = False
+        content_view.refresh()
+
+    def _load_selected_session_detail() -> None:
+        state["load_session_detail"] = True
+        content_view.refresh()
+
+    def _load_selected_task_detail() -> None:
+        state["load_task_detail"] = True
         content_view.refresh()
 
     def _open_weixin_binding(session_name: str) -> None:
@@ -198,8 +290,11 @@ def create_ui() -> None:
         if not cleaned_name:
             _notify("当前微信会话没有可定位的会话名")
             return
+        state["active_page"] = "sessions"
         state["selected_session_name"] = cleaned_name
         state["selected_task_id"] = ""
+        state["load_session_detail"] = False
+        state["load_task_detail"] = False
         content_view.refresh()
         jump_to("sessions")
 
@@ -208,8 +303,11 @@ def create_ui() -> None:
         if not cleaned_task_id:
             _notify("该发送方还没有最近任务")
             return
+        state["active_page"] = "sessions"
         state["selected_session_name"] = session_name.strip()
         state["selected_task_id"] = cleaned_task_id
+        state["load_session_detail"] = False
+        state["load_task_detail"] = False
         content_view.refresh()
         jump_to("sessions")
 
@@ -241,8 +339,12 @@ def create_ui() -> None:
                 ).props("outline")
 
         with ui.row().classes("w-full gap-2 px-4 py-3 bg-stone-50 border-b border-stone-200 sticky top-[72px] z-40"):
-            for page in APP_SHELL.pages:
-                ui.link(page.title, f"#{page.anchor}").classes("rounded-full px-4 py-2 bg-white border border-stone-200 text-slate-700 no-underline")
+            for page in PRIMARY_PAGES:
+                props = "color=primary" if page.key == state["active_page"] else "outline"
+                ui.button(
+                    page.title,
+                    on_click=lambda anchor=page.anchor: jump_to(anchor),
+                ).props(props)
             ui.space()
             for action in APP_SHELL.topbar_actions:
                 ui.button(
@@ -257,7 +359,7 @@ def create_ui() -> None:
                 ).props("outline")
 
         content_view()
-        ui.timer(8.0, lambda: content_view.refresh() if state["auto_refresh"] else None)
+        ui.timer(2.0, lambda: content_view.refresh() if state["auto_refresh"] and should_auto_refresh() else None)
 
     auto_refresh_button = None
 

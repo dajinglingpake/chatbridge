@@ -21,6 +21,18 @@ class SessionDetail:
     conversation_lines: list[str]
 
 
+@dataclass
+class SessionAggregate:
+    last_task: dict[str, Any]
+    queue_size: int = 0
+    success_count: int = 0
+    failure_count: int = 0
+    has_running: bool = False
+
+
+_SESSION_ROWS_CACHE: dict[tuple, list[SessionRow]] = {}
+
+
 def session_name_from_file(agent_id: str, session_file: Path) -> str:
     stem = session_file.stem
     if "__" in stem:
@@ -76,28 +88,65 @@ def build_hub_signature(hub_state: dict[str, Any]) -> tuple:
     return agents, tasks
 
 
+def build_session_dir_signature(session_dir: Path) -> tuple:
+    if not session_dir.exists():
+        return ()
+    return tuple(
+        sorted(
+            (
+                session_file.name,
+                int(session_file.stat().st_mtime_ns),
+            )
+            for session_file in session_dir.glob("*.txt")
+        )
+    )
+
+
 def build_session_rows(hub_state: dict[str, Any], session_dir: Path) -> list[SessionRow]:
+    cache_key = (build_hub_signature(hub_state), build_session_dir_signature(session_dir))
+    cached_rows = _SESSION_ROWS_CACHE.get(cache_key)
+    if cached_rows is not None:
+        return cached_rows
+
     tasks = hub_state.get("tasks", [])
     session_names: set[str] = {"default"}
+    aggregates: dict[str, SessionAggregate] = {}
     for task in tasks:
-        session_names.add(normalize_task_session_name(task))
+        session_name = normalize_task_session_name(task)
+        session_names.add(session_name)
+        aggregate = aggregates.get(session_name)
+        if aggregate is None:
+            aggregate = SessionAggregate(last_task=task)
+            aggregates[session_name] = aggregate
+        status = str(task.get("status") or "")
+        if status in {"queued", "running"}:
+            aggregate.queue_size += 1
+        if status == "running":
+            aggregate.has_running = True
+        elif status == "succeeded":
+            aggregate.success_count += 1
+        elif status == "failed":
+            aggregate.failure_count += 1
     if session_dir.exists():
         for session_file in session_dir.glob("*.txt"):
             session_names.add(session_name_from_file("", session_file))
 
     rows: list[SessionRow] = []
     for session_name in sorted(session_names):
-        related_tasks = [task for task in tasks if normalize_task_session_name(task) == session_name]
-        last_task = related_tasks[0] if related_tasks else {}
-        queue_size = sum(1 for task in related_tasks if task.get("status") in {"queued", "running"})
-        success_count = sum(1 for task in related_tasks if task.get("status") == "succeeded")
-        failure_count = sum(1 for task in related_tasks if task.get("status") == "failed")
-        if queue_size:
-            status = "running" if any(task.get("status") == "running" for task in related_tasks) else "queued"
-        elif related_tasks:
-            status = str(last_task.get("status") or "idle")
-        else:
+        aggregate = aggregates.get(session_name)
+        if aggregate is None:
+            queue_size = 0
+            success_count = 0
+            failure_count = 0
             status = "idle"
+        else:
+            queue_size = aggregate.queue_size
+            success_count = aggregate.success_count
+            failure_count = aggregate.failure_count
+            if queue_size:
+                status = "running" if aggregate.has_running else "queued"
+            else:
+                status = str(aggregate.last_task.get("status") or "idle")
         rows.append(
             SessionRow(
                 name=session_name,
@@ -107,6 +156,8 @@ def build_session_rows(hub_state: dict[str, Any], session_dir: Path) -> list[Ses
                 failure_count=failure_count,
             )
         )
+    _SESSION_ROWS_CACHE.clear()
+    _SESSION_ROWS_CACHE[cache_key] = rows
     return rows
 
 
@@ -120,20 +171,34 @@ def build_session_detail(
     if not session_name:
         empty_detail = t("ui.agent.select_session") if t else "先在上方选中一个会话。"
         empty_conversation = t("ui.agent.select_preview") if t else "这里会显示该会话最近几轮对话。"
-        return SessionDetail(rows=build_session_rows(hub_state, session_dir), detail_lines=[empty_detail], conversation_lines=[empty_conversation])
+        return SessionDetail(rows=[], detail_lines=[empty_detail], conversation_lines=[empty_conversation])
 
     all_tasks = hub_state.get("tasks", [])
-    tasks = [task for task in all_tasks if normalize_task_session_name(task) == session_name][:8]
-    tasks = sorted(tasks, key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    matching_tasks: list[dict[str, Any]] = []
+    queue_size = 0
+    success_count = 0
+    failure_count = 0
+    has_running = False
+    for task in all_tasks:
+        if normalize_task_session_name(task) != session_name:
+            continue
+        matching_tasks.append(task)
+        status = str(task.get("status") or "")
+        if status in {"queued", "running"}:
+            queue_size += 1
+        if status == "running":
+            has_running = True
+        elif status == "succeeded":
+            success_count += 1
+        elif status == "failed":
+            failure_count += 1
+    tasks = sorted(matching_tasks[:8], key=lambda item: str(item.get("created_at") or ""), reverse=True)
 
     selected_session_file = session_file_for_name(session_dir, session_name)
     selected_session_id = selected_session_file.read_text(encoding="utf-8").strip() if selected_session_file.exists() else ""
 
-    queue_size = sum(1 for task in tasks if task.get("status") in {"queued", "running"})
-    success_count = sum(1 for task in all_tasks if normalize_task_session_name(task) == session_name and task.get("status") == "succeeded")
-    failure_count = sum(1 for task in all_tasks if normalize_task_session_name(task) == session_name and task.get("status") == "failed")
     if queue_size:
-        status = "running" if any(task.get("status") == "running" for task in tasks) else "queued"
+        status = "running" if has_running else "queued"
     elif tasks:
         status = str(tasks[0].get("status") or "idle")
     else:
@@ -197,8 +262,4 @@ def build_session_detail(
     else:
         conversation_lines = [t("ui.agent.preview.title") if t else "会话预览:", t("ui.agent.preview.none") if t else "当前选择下还没有任务记录。"]
 
-    return SessionDetail(
-        rows=build_session_rows(hub_state, session_dir),
-        detail_lines=detail_lines,
-        conversation_lines=conversation_lines,
-    )
+    return SessionDetail(rows=[], detail_lines=detail_lines, conversation_lines=conversation_lines)

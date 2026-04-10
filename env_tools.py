@@ -5,6 +5,7 @@ import json
 import shutil
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +23,33 @@ class CheckResult:
     label: str
     ok: bool
     detail: str
+
+
+FULL_CHECK_SEQUENCE = [
+    "python",
+    "node_runtime",
+    "agent_clis",
+    "psutil",
+    "weixin_account",
+    "project_files",
+]
+
+FULL_CHECK_STEP_LABELS = {
+    "python": "Python",
+    "node_runtime": "Node 环境",
+    "agent_clis": "Agent CLI",
+    "psutil": "Python 依赖",
+    "weixin_account": "微信账号文件",
+    "project_files": "项目文件",
+}
+
+
+def get_full_check_sequence() -> list[str]:
+    return list(FULL_CHECK_SEQUENCE)
+
+
+def get_full_check_step_label(step_key: str) -> str:
+    return FULL_CHECK_STEP_LABELS.get(step_key, step_key)
 
 
 def _run_capture(command: list[str]) -> tuple[bool, str]:
@@ -76,7 +104,78 @@ def build_nvm_node_command(version: str = DEFAULT_NODE_VERSION) -> str:
     return f"nvm install {version} && nvm use {version}"
 
 
-def collect_checks(project_dir: Path) -> list[CheckResult]:
+def _project_files_check(project_dir: Path) -> CheckResult:
+    config_files = [
+        project_dir / "config" / "agent_hub.json",
+        project_dir / "config" / "weixin_bridge.json",
+        project_dir / "main.py",
+    ]
+    return CheckResult(
+        key="project_files",
+        label="Project Files",
+        ok=all(path.exists() for path in config_files),
+        detail="; ".join(path.name for path in config_files),
+    )
+
+
+def _weixin_account_check(config: BridgeConfig) -> CheckResult:
+    active_account = config.get_active_account()
+    return CheckResult(
+        key="weixin_account",
+        label="Weixin Account Files",
+        ok=active_account.is_usable,
+        detail=f"{active_account.account_id} -> {active_account.account_path}",
+    )
+
+
+def _binary_check(key: str, label: str, binary: str) -> CheckResult:
+    ok = False
+    detail = "not found"
+    for candidate in command_candidates(binary):
+        ok, detail = _run_capture([candidate, "--version"])
+        if ok:
+            break
+    return CheckResult(key=key, label=label, ok=ok, detail=detail or "not found")
+
+
+def collect_check_step(step_key: str, project_dir: Path, config: BridgeConfig | None = None) -> list[CheckResult]:
+    bridge_config = config or BridgeConfig.load()
+    if step_key == "python":
+        py_ok = sys.version_info >= (3, 11)
+        return [CheckResult(key="python", label="Python", ok=py_ok, detail=sys.version.split()[0])]
+    if step_key == "node_runtime":
+        results: list[CheckResult] = []
+        if IS_WINDOWS:
+            winget_exe = find_winget_exe()
+            results.append(CheckResult(key="winget", label="winget", ok=winget_exe is not None, detail=winget_exe or "not found"))
+            nvm_exe = find_nvm_exe()
+            if nvm_exe:
+                ok, detail = _run_capture([nvm_exe, "version"])
+                results.append(CheckResult(key="nvm", label="NVM for Windows", ok=ok, detail=detail or nvm_exe))
+            else:
+                results.append(CheckResult(key="nvm", label="NVM for Windows", ok=False, detail="not found"))
+        results.append(_binary_check("node", "Node.js", "node"))
+        results.append(_binary_check("npm", "npm", "npm"))
+        return results
+    if step_key == "agent_clis":
+        binary_specs = [
+            ("codex", "Codex CLI", "codex"),
+            ("claude", "Claude Code", "claude"),
+            ("opencode", "OpenCode CLI", "opencode"),
+        ]
+        with ThreadPoolExecutor(max_workers=len(binary_specs)) as executor:
+            return list(executor.map(lambda spec: _binary_check(*spec), binary_specs))
+    if step_key == "psutil":
+        psutil_ok = importlib.util.find_spec("psutil") is not None
+        return [CheckResult(key="psutil", label="psutil", ok=psutil_ok, detail="installed" if psutil_ok else "missing")]
+    if step_key == "weixin_account":
+        return [_weixin_account_check(bridge_config)]
+    if step_key == "project_files":
+        return [_project_files_check(project_dir)]
+    raise ValueError(f"unknown check step: {step_key}")
+
+
+def collect_lightweight_checks(project_dir: Path, config: BridgeConfig | None = None) -> list[CheckResult]:
     results: list[CheckResult] = []
 
     py_ok = sys.version_info >= (3, 11)
@@ -89,72 +188,23 @@ def collect_checks(project_dir: Path) -> list[CheckResult]:
         )
     )
 
-    if IS_WINDOWS:
-        winget_exe = find_winget_exe()
-        results.append(
-            CheckResult(
-                key="winget",
-                label="winget",
-                ok=winget_exe is not None,
-                detail=winget_exe or "not found",
-            )
-        )
-
-        nvm_exe = find_nvm_exe()
-        if nvm_exe:
-            ok, detail = _run_capture([nvm_exe, "version"])
-            results.append(CheckResult(key="nvm", label="NVM for Windows", ok=ok, detail=detail or nvm_exe))
-        else:
-            results.append(CheckResult(key="nvm", label="NVM for Windows", ok=False, detail="not found"))
-    else:
-        results.append(CheckResult(key="node_manager", label="Node Manager", ok=True, detail="not required on this platform"))
-
-    for key, label, binary in [
-        ("node", "Node.js", "node"),
-        ("npm", "npm", "npm"),
-        ("codex", "Codex CLI", "codex"),
-        ("claude", "Claude Code", "claude"),
-        ("opencode", "OpenCode CLI", "opencode"),
-    ]:
-        ok = False
-        detail = "not found"
-        for candidate in command_candidates(binary):
-            ok, detail = _run_capture([candidate, "--version"])
-            if ok:
-                break
-        results.append(CheckResult(key=key, label=label, ok=ok, detail=detail or "not found"))
-
     psutil_ok = importlib.util.find_spec("psutil") is not None
     results.append(CheckResult(key="psutil", label="psutil", ok=psutil_ok, detail="installed" if psutil_ok else "missing"))
 
-    bridge_config = BridgeConfig.load()
-    active_account = bridge_config.get_active_account()
-    account_dir = WEIXIN_ACCOUNTS_DIR
-    account_ok = active_account.is_usable
-    results.append(
-        CheckResult(
-            key="weixin_account",
-            label="Weixin Account Files",
-            ok=account_ok,
-            detail=f"{active_account.account_id} -> {active_account.account_path}",
-        )
-    )
-
-    config_files = [
-        project_dir / "config" / "agent_hub.json",
-        project_dir / "config" / "weixin_bridge.json",
-        project_dir / "main.py",
-    ]
-    results.append(
-        CheckResult(
-            key="project_files",
-            label="Project Files",
-            ok=all(path.exists() for path in config_files),
-            detail="; ".join(path.name for path in config_files),
-        )
-    )
+    bridge_config = config or BridgeConfig.load()
+    results.append(_weixin_account_check(bridge_config))
+    results.append(_project_files_check(project_dir))
 
     return results
+
+
+def collect_checks(project_dir: Path) -> list[CheckResult]:
+    bridge_config = BridgeConfig.load()
+    sequence = get_full_check_sequence()
+    ordered_results: list[CheckResult] = []
+    for step_key in sequence:
+        ordered_results.extend(collect_check_step(step_key, project_dir, bridge_config))
+    return ordered_results
 
 
 def suggested_install_commands() -> list[tuple[str, str]]:

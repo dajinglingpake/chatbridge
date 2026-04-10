@@ -100,197 +100,14 @@ def render_home_section(
                     ),
                 )
 
-            with ui.card().classes("w-full col-span-2"):
-                ui.label("Agent 管理").classes("text-lg font-semibold")
-                ui.label(f"微信桥当前默认 Agent：{model.bridge_agent_id or 'main'}").classes("text-sm text-slate-500")
-                bridge_agent_options = {item.agent_id: item.label for item in model.agent_options}
-                bridge_agent_select = ui.select(
-                    bridge_agent_options,
-                    value=model.bridge_agent_id or (model.agent_options[0].agent_id if model.agent_options else "main"),
-                    label="微信桥默认 Agent",
-                ).classes("w-full")
-                with ui.row().classes("gap-2"):
-                    ui.button("切换微信桥默认 Agent", on_click=lambda: on_switch_bridge_agent(bridge_agent_select.value or ""))
-                    ui.label("切换后会自动重启 Bridge 生效。").classes("text-sm text-slate-500 self-center")
-                agent_rows = [
-                    {
-                        "ID": item.agent_id,
-                        "名称": item.name,
-                        "后端": item.backend,
-                        "启用": "是" if item.enabled else "否",
-                        "状态": item.runtime_status,
-                        "队列": item.queue_size,
-                    }
-                    for item in model.agent_management
-                ]
-                ui.table(
-                    columns=[{"name": key, "label": key, "field": key} for key in ["ID", "名称", "后端", "启用", "状态", "队列"]],
-                    rows=agent_rows,
-                    row_key="ID",
-                ).classes("w-full")
-
-                agent_lookup = {item.agent_id: item for item in model.agent_management}
-                agent_options = {"": "新建 Agent", **{item.agent_id: f"{item.name} ({item.agent_id})" for item in model.agent_management}}
-                selected_agent = ui.select(agent_options, value="", label="编辑 Agent").classes("w-full")
-                agent_id = ui.input(label="Agent ID", placeholder="assistant-1")
-                agent_name = ui.input(label="名称", placeholder="客服助手")
-                workdir = ui.input(label="工作目录", placeholder="workspace")
-                session_file = ui.input(label="会话文件", placeholder="sessions/assistant-1.txt")
-                backend = ui.select(supported_backend_options(), value="codex", label="后端").classes("w-full")
-                model_input = ui.input(label="模型", placeholder="可选")
-                prompt_prefix = ui.textarea(label="Prompt Prefix", placeholder="可选")
-                enabled = ui.switch("启用", value=True)
-
-                def fill_agent_form(agent_key: str) -> None:
-                    item = agent_lookup.get(agent_key)
-                    if item is None:
-                        agent_id.value = ""
-                        agent_name.value = ""
-                        workdir.value = "workspace"
-                        session_file.value = "sessions/main.txt"
-                        backend.value = "codex"
-                        model_input.value = ""
-                        prompt_prefix.value = ""
-                        enabled.value = True
-                        return
-                    agent_id.value = item.agent_id
-                    agent_name.value = item.name
-                    workdir.value = item.workdir
-                    session_file.value = item.session_file
-                    backend.value = item.backend
-                    model_input.value = item.model
-                    prompt_prefix.value = item.prompt_prefix
-                    enabled.value = item.enabled
-
-                selected_agent.on_value_change(lambda event: fill_agent_form(event.value or ""))
-                fill_agent_form("")
-
-                with ui.dialog() as delete_dialog, ui.card().classes("min-w-[28rem]"):
-                    ui.label("确认删除 Agent").classes("text-lg font-semibold")
-                    ui.label("删除后会移除该 Agent 配置和任务记录。若该 Agent 正被微信桥使用，Hub 会拒绝删除。").classes("text-sm text-slate-600")
-                    with ui.row().classes("justify-end gap-2 w-full"):
-                        ui.button("取消", on_click=delete_dialog.close).props("flat")
-                        ui.button(
-                            "确认删除",
-                            color="negative",
-                            on_click=lambda: (
-                                on_delete_agent(selected_agent.value or ""),
-                                delete_dialog.close(),
-                            ),
-                        )
-
-                with ui.row().classes("gap-2"):
-                    ui.button(
-                        "保存 Agent",
-                        on_click=lambda: on_save_agent(
-                            agent_id.value or "",
-                            agent_name.value or "",
-                            workdir.value or "",
-                            session_file.value or "",
-                            backend.value or "",
-                            model_input.value or "",
-                            prompt_prefix.value or "",
-                            bool(enabled.value),
-                        ),
-                    )
-                    ui.button("重置表单", on_click=lambda: fill_agent_form(selected_agent.value or "")).props("outline")
-                    ui.button(
-                        "删除 Agent",
-                        color="negative",
-                        on_click=lambda: delete_dialog.open() if selected_agent.value else None,
-                    ).props("outline")
-
-            with ui.card().classes("w-full col-span-2"):
-                ui.label("外部终端 Agent 进程").classes("text-lg font-semibold")
-                ui.label("这里只显示未被 ChatBridge 接管、但当前机器上正在运行的 Codex / Claude / OpenCode 进程。").classes("text-sm text-slate-500")
-                ui.label("当前支持明确区分和结束进程，不会把它们伪装成可接管会话。").classes("text-sm text-slate-500")
-                if model.external_agent_processes:
-                    for item in model.external_agent_processes:
-                        with ui.card().classes("w-full bg-amber-50"):
-                            with ui.dialog() as terminate_dialog, ui.card().classes("min-w-[28rem]"):
-                                ui.label("确认结束外部 Agent 进程").classes("text-lg font-semibold")
-                                ui.label(f"PID {item.pid} 将被直接结束。这个操作只影响外部终端里手动启动的 Agent 进程。").classes("text-sm text-slate-600")
-                                ui.code(item.command_line).classes("w-full whitespace-pre-wrap")
-                                with ui.row().classes("justify-end gap-2 w-full"):
-                                    ui.button("取消", on_click=terminate_dialog.close).props("flat")
-                                    ui.button(
-                                        "确认结束",
-                                        color="negative",
-                                        on_click=lambda pid=item.pid: (
-                                            on_terminate_external_agent(pid),
-                                            terminate_dialog.close(),
-                                        ),
-                                    )
-                            ui.label(f"PID {item.pid} | {item.backend} | {item.managed_label}").classes("font-semibold")
-                            ui.label(f"进程名: {item.name}").classes("text-sm text-slate-700")
-                            if item.session_hint:
-                                ui.label(f"会话标识: {item.session_hint}").classes("text-sm text-slate-700")
-                            ui.code(item.command_line).classes("w-full whitespace-pre-wrap max-h-36 overflow-auto")
-                            with ui.row().classes("gap-2"):
-                                if item.session_hint:
-                                    ui.button(
-                                        "复制会话标识",
-                                        on_click=lambda session_hint=item.session_hint: on_copy_external_session_hint(session_hint),
-                                    ).props("outline")
-                                ui.button("结束进程", color="negative", on_click=terminate_dialog.open).props("outline")
-                else:
-                    ui.label("当前没有发现外部终端里手动启动的 Agent 进程。").classes("text-slate-500")
-
-            with ui.card().classes("w-full col-span-2"):
-                ui.label("微信会话绑定").classes("text-lg font-semibold")
-                if model.weixin_conversations:
-                    for item in model.weixin_conversations:
-                        with ui.card().classes("w-full bg-stone-50"):
-                            with ui.dialog() as reset_dialog, ui.card().classes("min-w-[28rem]"):
-                                ui.label("确认重置微信会话").classes("text-lg font-semibold")
-                                ui.label("这会删除该发送方的会话状态，并在 Bridge 运行中时自动重启使其生效。").classes("text-sm text-slate-600")
-                                with ui.row().classes("justify-end gap-2 w-full"):
-                                    ui.button("取消", on_click=reset_dialog.close).props("flat")
-                                    ui.button(
-                                        "确认重置",
-                                        color="negative",
-                                        on_click=lambda sender_id=item.sender_id: (
-                                            on_reset_weixin_binding(sender_id),
-                                            reset_dialog.close(),
-                                        ),
-                                    )
-                            with ui.row().classes("w-full items-center justify-between gap-3"):
-                                with ui.column().classes("gap-1"):
-                                    ui.label(f"发送方: {item.sender_id}").classes("font-semibold")
-                                    ui.label(f"Agent: {item.agent_id} | 当前会话: {item.current_session} | 当前后端: {item.current_backend}").classes("text-sm text-slate-700")
-                                    ui.label(f"会话数: {item.session_count} | 最近更新: {item.updated_at}").classes("text-sm text-slate-500")
-                                    if item.latest_task_id:
-                                        ui.label(f"最近任务: {item.latest_task_id} [{item.latest_task_status}]").classes("text-sm text-slate-500")
-                                with ui.column().classes("items-end gap-2 min-w-[15rem]"):
-                                    backend_select = ui.select(
-                                        supported_backend_options(),
-                                        value=item.current_backend,
-                                        label="当前会话后端",
-                                    ).classes("w-full")
-                                    with ui.row().classes("gap-2"):
-                                        ui.button(
-                                            "打开该会话",
-                                            on_click=lambda session_name=item.current_session: on_open_weixin_binding(session_name),
-                                        ).props("outline")
-                                        ui.button(
-                                            "打开最近任务",
-                                            on_click=lambda task_id=item.latest_task_id, session_name=item.latest_task_session: on_open_weixin_binding_task(task_id, session_name),
-                                        ).props("outline")
-                                        ui.button(
-                                            "切换后端",
-                                            on_click=lambda sender_id=item.sender_id, select=backend_select: on_switch_weixin_binding_backend(sender_id, select.value or ""),
-                                        )
-                                        ui.button("重置会话", color="negative", on_click=reset_dialog.open).props("outline")
-                else:
-                    ui.label("当前还没有微信会话绑定记录。").classes("text-slate-500")
-                    ui.label("当 Bridge 收到消息后，这里会显示发送方当前使用的 Agent、会话和后端。").classes("text-sm text-slate-500")
-
 
 def render_issues_section(ui: Any, model: WebConsoleViewModel, on_run_repair_command) -> None:
     with ui.element("section").props(f"id={ISSUES_PAGE.anchor}").classes("w-full"):
         ui.label(ISSUES_PAGE.title).classes("text-2xl font-semibold")
         ui.label(ISSUES_PAGE.description).classes("text-slate-500")
         with ui.card().classes("w-full"):
+            if model.checks_in_progress:
+                ui.label(model.checks_progress_text).classes("text-sm text-amber-700")
             if model.issues:
                 for item in model.issues:
                     ui.label(item.title).classes("text-lg font-semibold")
@@ -310,7 +127,22 @@ def render_issues_section(ui: Any, model: WebConsoleViewModel, on_run_repair_com
                             ui.label("当前平台下这条修复建议需要手动执行。").classes("text-sm text-slate-500")
 
 
-def render_sessions_section(ui: Any, model: WebConsoleViewModel, on_select_session, on_select_task, on_set_task_filters, on_find_task_by_id) -> None:
+def render_sessions_section(
+    ui: Any,
+    model: WebConsoleViewModel,
+    on_select_session,
+    on_set_session_page,
+    on_load_session_detail,
+    on_select_task,
+    on_set_task_page,
+    on_load_task_detail,
+    on_set_task_filters,
+    on_find_task_by_id,
+    on_open_weixin_binding,
+    on_open_weixin_binding_task,
+    on_switch_weixin_binding_backend,
+    on_reset_weixin_binding,
+) -> None:
     with ui.element("section").props(f"id={SESSIONS_PAGE.anchor}").classes("w-full"):
         ui.label(SESSIONS_PAGE.title).classes("text-2xl font-semibold")
         ui.label(SESSIONS_PAGE.description).classes("text-slate-500")
@@ -352,8 +184,14 @@ def render_sessions_section(ui: Any, model: WebConsoleViewModel, on_select_sessi
                     rows=rows,
                     row_key="会话",
                 ).classes("w-full")
+                with ui.row().classes("w-full items-center justify-between"):
+                    ui.label(f"第 {model.session_page} / {model.session_total_pages} 页，共 {model.session_total_count} 条会话").classes("text-sm text-slate-500")
+                    with ui.row().classes("gap-2"):
+                        ui.button("上一页", on_click=lambda: on_set_session_page(model.session_page - 1)).props("outline").set_enabled(model.session_page > 1)
+                        ui.button("下一页", on_click=lambda: on_set_session_page(model.session_page + 1)).props("outline").set_enabled(model.session_page < model.session_total_pages)
             with ui.card().classes("w-full"):
                 ui.label(f"会话详情: {model.selected_session_name or '(未选择)'}").classes("text-lg font-semibold")
+                ui.button("加载会话详情", on_click=on_load_session_detail).props("outline")
                 ui.code("\n".join(model.session_detail_lines)).classes("w-full whitespace-pre-wrap")
                 ui.separator()
                 ui.label(f"会话预览: {model.selected_session_name or '(未选择)'}").classes("text-lg font-semibold")
@@ -423,20 +261,86 @@ def render_sessions_section(ui: Any, model: WebConsoleViewModel, on_select_sessi
                 rows=task_rows,
                 row_key="时间",
             ).classes("w-full")
+            with ui.row().classes("w-full items-center justify-between"):
+                ui.label(f"第 {model.task_page} / {model.task_total_pages} 页，共 {model.task_filtered_count or model.task_total_count} 条任务").classes("text-sm text-slate-500")
+                with ui.row().classes("gap-2"):
+                    ui.button("上一页", on_click=lambda: on_set_task_page(model.task_page - 1)).props("outline").set_enabled(model.task_page > 1)
+                    ui.button("下一页", on_click=lambda: on_set_task_page(model.task_page + 1)).props("outline").set_enabled(model.task_page < model.task_total_pages)
             if not task_rows:
                 ui.label("当前筛选条件下没有任务。").classes("text-sm text-slate-500")
             ui.separator()
             ui.label(f"任务详情: {model.selected_task_id or '(未选择)'}").classes("text-lg font-semibold")
+            ui.button("加载任务详情", on_click=on_load_task_detail).props("outline")
             ui.code("\n".join(model.task_detail_lines)).classes("w-full whitespace-pre-wrap")
             ui.separator()
             ui.label("完整输出 / 错误").classes("text-lg font-semibold")
             ui.code("\n".join(model.task_result_lines)).classes("w-full whitespace-pre-wrap max-h-80 overflow-auto")
+        with ui.card().classes("w-full"):
+            ui.label("微信会话绑定").classes("text-lg font-semibold")
+            if model.weixin_conversations:
+                for item in model.weixin_conversations:
+                    with ui.card().classes("w-full bg-stone-50"):
+                        with ui.dialog() as reset_dialog, ui.card().classes("min-w-[28rem]"):
+                            ui.label("确认重置微信会话").classes("text-lg font-semibold")
+                            ui.label("这会删除该发送方的会话状态，并在 Bridge 运行中时自动重启使其生效。").classes("text-sm text-slate-600")
+                            with ui.row().classes("justify-end gap-2 w-full"):
+                                ui.button("取消", on_click=reset_dialog.close).props("flat")
+                                ui.button(
+                                    "确认重置",
+                                    color="negative",
+                                    on_click=lambda sender_id=item.sender_id: (
+                                        on_reset_weixin_binding(sender_id),
+                                        reset_dialog.close(),
+                                    ),
+                                )
+                        with ui.row().classes("w-full items-center justify-between gap-3"):
+                            with ui.column().classes("gap-1"):
+                                ui.label(f"发送方: {item.sender_id}").classes("font-semibold")
+                                ui.label(f"Agent: {item.agent_id} | 当前会话: {item.current_session} | 当前后端: {item.current_backend}").classes("text-sm text-slate-700")
+                                ui.label(f"会话数: {item.session_count} | 最近更新: {item.updated_at}").classes("text-sm text-slate-500")
+                                if item.latest_task_id:
+                                    ui.label(f"最近任务: {item.latest_task_id} [{item.latest_task_status}]").classes("text-sm text-slate-500")
+                            with ui.column().classes("items-end gap-2 min-w-[15rem]"):
+                                backend_select = ui.select(
+                                    supported_backend_options(),
+                                    value=item.current_backend,
+                                    label="当前会话后端",
+                                ).classes("w-full")
+                                with ui.row().classes("gap-2"):
+                                    ui.button(
+                                        "打开该会话",
+                                        on_click=lambda session_name=item.current_session: on_open_weixin_binding(session_name),
+                                    ).props("outline")
+                                    ui.button(
+                                        "打开最近任务",
+                                        on_click=lambda task_id=item.latest_task_id, session_name=item.latest_task_session: on_open_weixin_binding_task(task_id, session_name),
+                                    ).props("outline")
+                                    ui.button(
+                                        "切换后端",
+                                        on_click=lambda sender_id=item.sender_id, select=backend_select: on_switch_weixin_binding_backend(sender_id, select.value or ""),
+                                    )
+                                    ui.button("重置会话", color="negative", on_click=reset_dialog.open).props("outline")
+            else:
+                ui.label("当前还没有微信会话绑定记录。").classes("text-slate-500")
+                ui.label("当 Bridge 收到消息后，这里会显示发送方当前使用的 Agent、会话和后端。").classes("text-sm text-slate-500")
 
 
-def render_diagnostics_section(ui: Any, model: WebConsoleViewModel) -> None:
+def render_diagnostics_section(
+    ui: Any,
+    model: WebConsoleViewModel,
+    on_set_checks_page,
+    on_switch_bridge_agent,
+    on_set_agent_page,
+    on_save_agent,
+    on_delete_agent,
+    on_terminate_external_agent,
+    on_copy_external_session_hint,
+) -> None:
     with ui.element("section").props(f"id={DIAGNOSTICS_PAGE.anchor}").classes("w-full"):
         ui.label(DIAGNOSTICS_PAGE.title).classes("text-2xl font-semibold")
         ui.label(DIAGNOSTICS_PAGE.description).classes("text-slate-500")
+        if model.checks_in_progress:
+            ui.label(model.checks_progress_text).classes("text-sm text-amber-700")
         with ui.grid(columns=2).classes("w-full gap-4"):
             with ui.card().classes("w-full"):
                 rows = [
@@ -453,9 +357,153 @@ def render_diagnostics_section(ui: Any, model: WebConsoleViewModel) -> None:
                     rows=rows,
                     row_key="项目",
                 ).classes("w-full")
+                with ui.row().classes("w-full items-center justify-between"):
+                    ui.label(f"第 {model.checks_page} / {model.checks_total_pages} 页，共 {model.checks_total_count} 项").classes("text-sm text-slate-500")
+                    with ui.row().classes("gap-2"):
+                        ui.button("上一页", on_click=lambda: on_set_checks_page(model.checks_page - 1)).props("outline").set_enabled(model.checks_page > 1)
+                        ui.button("下一页", on_click=lambda: on_set_checks_page(model.checks_page + 1)).props("outline").set_enabled(model.checks_page < model.checks_total_pages)
             with ui.card().classes("w-full"):
                 ui.label("运行日志").classes("text-lg font-semibold")
                 for title, content in model.log_sections:
                     ui.label(title).classes("font-semibold text-slate-700")
                     ui.code(content).classes("w-full whitespace-pre-wrap max-h-60 overflow-auto")
                     ui.separator()
+        with ui.card().classes("w-full"):
+            ui.label("Agent 管理").classes("text-lg font-semibold")
+            ui.label(f"微信桥当前默认 Agent：{model.bridge_agent_id or 'main'}").classes("text-sm text-slate-500")
+            bridge_agent_options = {item.agent_id: item.label for item in model.agent_options}
+            bridge_agent_select = ui.select(
+                bridge_agent_options,
+                value=model.bridge_agent_id or (model.agent_options[0].agent_id if model.agent_options else "main"),
+                label="微信桥默认 Agent",
+            ).classes("w-full")
+            with ui.row().classes("gap-2"):
+                ui.button("切换微信桥默认 Agent", on_click=lambda: on_switch_bridge_agent(bridge_agent_select.value or ""))
+                ui.label("切换后会自动重启 Bridge 生效。").classes("text-sm text-slate-500 self-center")
+            agent_rows = [
+                {
+                    "ID": item.agent_id,
+                    "名称": item.name,
+                    "后端": item.backend,
+                    "启用": "是" if item.enabled else "否",
+                    "状态": item.runtime_status,
+                    "队列": item.queue_size,
+                }
+                for item in model.agent_management
+            ]
+            ui.table(
+                columns=[{"name": key, "label": key, "field": key} for key in ["ID", "名称", "后端", "启用", "状态", "队列"]],
+                rows=agent_rows,
+                row_key="ID",
+            ).classes("w-full")
+            with ui.row().classes("w-full items-center justify-between"):
+                ui.label(f"第 {model.agent_page} / {model.agent_total_pages} 页，共 {model.agent_total_count} 个 Agent").classes("text-sm text-slate-500")
+                with ui.row().classes("gap-2"):
+                    ui.button("上一页", on_click=lambda: on_set_agent_page(model.agent_page - 1)).props("outline").set_enabled(model.agent_page > 1)
+                    ui.button("下一页", on_click=lambda: on_set_agent_page(model.agent_page + 1)).props("outline").set_enabled(model.agent_page < model.agent_total_pages)
+
+            agent_lookup = {item.agent_id: item for item in model.agent_management}
+            agent_options = {"": "新建 Agent", **{item.agent_id: f"{item.name} ({item.agent_id})" for item in model.agent_management}}
+            selected_agent = ui.select(agent_options, value="", label="编辑 Agent").classes("w-full")
+            agent_id = ui.input(label="Agent ID", placeholder="assistant-1")
+            agent_name = ui.input(label="名称", placeholder="客服助手")
+            workdir = ui.input(label="工作目录", placeholder="workspace")
+            session_file = ui.input(label="会话文件", placeholder="sessions/assistant-1.txt")
+            backend = ui.select(supported_backend_options(), value="codex", label="后端").classes("w-full")
+            model_input = ui.input(label="模型", placeholder="可选")
+            prompt_prefix = ui.textarea(label="Prompt Prefix", placeholder="可选")
+            enabled = ui.switch("启用", value=True)
+
+            def fill_agent_form(agent_key: str) -> None:
+                item = agent_lookup.get(agent_key)
+                if item is None:
+                    agent_id.value = ""
+                    agent_name.value = ""
+                    workdir.value = "workspace"
+                    session_file.value = "sessions/main.txt"
+                    backend.value = "codex"
+                    model_input.value = ""
+                    prompt_prefix.value = ""
+                    enabled.value = True
+                    return
+                agent_id.value = item.agent_id
+                agent_name.value = item.name
+                workdir.value = item.workdir
+                session_file.value = item.session_file
+                backend.value = item.backend
+                model_input.value = item.model
+                prompt_prefix.value = item.prompt_prefix
+                enabled.value = item.enabled
+
+            selected_agent.on_value_change(lambda event: fill_agent_form(event.value or ""))
+            fill_agent_form("")
+
+            with ui.dialog() as delete_dialog, ui.card().classes("min-w-[28rem]"):
+                ui.label("确认删除 Agent").classes("text-lg font-semibold")
+                ui.label("删除后会移除该 Agent 配置和任务记录。若该 Agent 正被微信桥使用，Hub 会拒绝删除。").classes("text-sm text-slate-600")
+                with ui.row().classes("justify-end gap-2 w-full"):
+                    ui.button("取消", on_click=delete_dialog.close).props("flat")
+                    ui.button(
+                        "确认删除",
+                        color="negative",
+                        on_click=lambda: (
+                            on_delete_agent(selected_agent.value or ""),
+                            delete_dialog.close(),
+                        ),
+                    )
+
+            with ui.row().classes("gap-2"):
+                ui.button(
+                    "保存 Agent",
+                    on_click=lambda: on_save_agent(
+                        agent_id.value or "",
+                        agent_name.value or "",
+                        workdir.value or "",
+                        session_file.value or "",
+                        backend.value or "",
+                        model_input.value or "",
+                        prompt_prefix.value or "",
+                        bool(enabled.value),
+                    ),
+                )
+                ui.button("重置表单", on_click=lambda: fill_agent_form(selected_agent.value or "")).props("outline")
+                ui.button(
+                    "删除 Agent",
+                    color="negative",
+                    on_click=lambda: delete_dialog.open() if selected_agent.value else None,
+                ).props("outline")
+        with ui.card().classes("w-full"):
+            ui.label("外部终端 Agent 进程").classes("text-lg font-semibold")
+            ui.label("这里只显示未被 ChatBridge 接管、但当前机器上正在运行的 Codex / Claude / OpenCode 进程。").classes("text-sm text-slate-500")
+            ui.label("当前支持明确区分和结束进程，不会把它们伪装成可接管会话。").classes("text-sm text-slate-500")
+            if model.external_agent_processes:
+                for item in model.external_agent_processes:
+                    with ui.card().classes("w-full bg-amber-50"):
+                        with ui.dialog() as terminate_dialog, ui.card().classes("min-w-[28rem]"):
+                            ui.label("确认结束外部 Agent 进程").classes("text-lg font-semibold")
+                            ui.label(f"PID {item.pid} 将被直接结束。这个操作只影响外部终端里手动启动的 Agent 进程。").classes("text-sm text-slate-600")
+                            ui.code(item.command_line).classes("w-full whitespace-pre-wrap")
+                            with ui.row().classes("justify-end gap-2 w-full"):
+                                ui.button("取消", on_click=terminate_dialog.close).props("flat")
+                                ui.button(
+                                    "确认结束",
+                                    color="negative",
+                                    on_click=lambda pid=item.pid: (
+                                        on_terminate_external_agent(pid),
+                                        terminate_dialog.close(),
+                                    ),
+                                )
+                        ui.label(f"PID {item.pid} | {item.backend} | {item.managed_label}").classes("font-semibold")
+                        ui.label(f"进程名: {item.name}").classes("text-sm text-slate-700")
+                        if item.session_hint:
+                            ui.label(f"会话标识: {item.session_hint}").classes("text-sm text-slate-700")
+                        ui.code(item.command_line).classes("w-full whitespace-pre-wrap max-h-36 overflow-auto")
+                        with ui.row().classes("gap-2"):
+                            if item.session_hint:
+                                ui.button(
+                                    "复制会话标识",
+                                    on_click=lambda session_hint=item.session_hint: on_copy_external_session_hint(session_hint),
+                                ).props("outline")
+                            ui.button("结束进程", color="negative", on_click=terminate_dialog.open).props("outline")
+            else:
+                ui.label("当前没有发现外部终端里手动启动的 Agent 进程。").classes("text-slate-500")
