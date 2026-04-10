@@ -31,6 +31,200 @@ def _load_nicegui():
 def create_ui() -> None:
     ui = _load_nicegui()
     localizer = Localizer()
+    ui.add_head_html(
+        """
+        <style>
+        :root {
+            --cb-bg: #f3efe7;
+            --cb-surface: rgba(255, 252, 246, 0.88);
+            --cb-surface-strong: #fffdf8;
+            --cb-border: rgba(113, 86, 58, 0.16);
+            --cb-ink: #201813;
+            --cb-muted: #736150;
+            --cb-accent: #b85c38;
+            --cb-accent-deep: #8e4325;
+            --cb-accent-soft: rgba(184, 92, 56, 0.12);
+            --cb-ok: #2f6a4f;
+            --cb-warn: #b06b1e;
+            --cb-shadow: 0 22px 50px rgba(58, 39, 23, 0.10);
+            --cb-radius-lg: 24px;
+            --cb-radius-md: 18px;
+        }
+        body {
+            background:
+                radial-gradient(circle at top left, rgba(211, 152, 99, 0.28), transparent 28rem),
+                radial-gradient(circle at top right, rgba(126, 158, 122, 0.18), transparent 26rem),
+                linear-gradient(180deg, #f7f2ea 0%, var(--cb-bg) 100%);
+            color: var(--cb-ink);
+        }
+        .nicegui-content {
+            background: transparent !important;
+        }
+        .cb-shell-header {
+            backdrop-filter: blur(18px);
+            background: rgba(249, 244, 235, 0.88);
+            border-bottom: 1px solid rgba(113, 86, 58, 0.14);
+        }
+        .cb-shell-nav {
+            backdrop-filter: blur(16px);
+            background: rgba(255, 250, 243, 0.84);
+            border-bottom: 1px solid rgba(113, 86, 58, 0.10);
+        }
+        .cb-nav-button {
+            min-width: 6.5rem;
+        }
+        .cb-nav-button.q-btn--outline {
+            border-color: rgba(113, 86, 58, 0.18);
+            color: var(--cb-muted);
+            background: rgba(255, 255, 255, 0.45);
+        }
+        .cb-nav-button.cb-nav-active {
+            background: linear-gradient(135deg, var(--cb-accent) 0%, #cf7c50 100%) !important;
+            color: #fff8f2 !important;
+            box-shadow: 0 10px 24px rgba(184, 92, 56, 0.22);
+        }
+        .cb-card, .cb-soft-card, .cb-code {
+            border-radius: var(--cb-radius-lg);
+            border: 1px solid var(--cb-border);
+            box-shadow: var(--cb-shadow);
+        }
+        .cb-card {
+            background: var(--cb-surface);
+            backdrop-filter: blur(12px);
+        }
+        .cb-soft-card {
+            background: linear-gradient(180deg, rgba(255,255,255,0.84), rgba(251,245,236,0.92));
+        }
+        .cb-hero {
+            background:
+                linear-gradient(135deg, rgba(184, 92, 56, 0.10), rgba(132, 150, 112, 0.14)),
+                rgba(255, 251, 245, 0.92);
+        }
+        .cb-code {
+            background: #1d1a17;
+            color: #efe5d8;
+            padding: 1rem 1.1rem;
+            white-space: pre-wrap;
+            font-size: 0.86rem;
+            line-height: 1.5;
+        }
+        .cb-section-title {
+            font-size: 1.35rem;
+            font-weight: 700;
+            letter-spacing: -0.01em;
+            color: var(--cb-ink);
+        }
+        .cb-kicker {
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+            font-size: 0.72rem;
+            font-weight: 700;
+            color: var(--cb-accent);
+        }
+        .cb-muted {
+            color: var(--cb-muted);
+        }
+        .cb-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            padding: 0.35rem 0.7rem;
+            border-radius: 999px;
+            background: var(--cb-accent-soft);
+            color: var(--cb-accent-deep);
+            font-size: 0.82rem;
+            font-weight: 600;
+        }
+        .cb-chip-ok {
+            background: rgba(47, 106, 79, 0.14);
+            color: var(--cb-ok);
+        }
+        .cb-chip-warn {
+            background: rgba(176, 107, 30, 0.14);
+            color: var(--cb-warn);
+        }
+        .cb-chip-danger {
+            background: rgba(154, 46, 59, 0.12);
+            color: #9a2e3b;
+        }
+        .cb-table {
+            overflow: auto;
+        }
+        .cb-status-panel {
+            border-radius: 22px;
+            padding: 1rem 1.1rem;
+            border: 1px solid transparent;
+        }
+        .cb-status-running {
+            background: linear-gradient(180deg, rgba(217, 243, 228, 0.95), rgba(238, 249, 241, 0.92));
+            border-color: rgba(47, 106, 79, 0.16);
+        }
+        .cb-status-partial {
+            background: linear-gradient(180deg, rgba(255, 242, 204, 0.95), rgba(255, 248, 230, 0.92));
+            border-color: rgba(176, 107, 30, 0.18);
+        }
+        .cb-status-stopped {
+            background: linear-gradient(180deg, rgba(248, 215, 218, 0.95), rgba(253, 239, 240, 0.92));
+            border-color: rgba(154, 46, 59, 0.16);
+        }
+        .cb-stat-value {
+            font-size: 1.85rem;
+            font-weight: 800;
+            line-height: 1;
+            color: var(--cb-ink);
+        }
+        .cb-stat-label {
+            font-size: 0.82rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--cb-muted);
+        }
+        .q-card {
+            border-radius: var(--cb-radius-lg);
+        }
+        .q-btn {
+            border-radius: 14px;
+            text-transform: none;
+            font-weight: 700;
+            letter-spacing: 0;
+        }
+        .q-btn.bg-primary,
+        .q-btn.text-white {
+            background: linear-gradient(135deg, var(--cb-accent) 0%, #cf7c50 100%) !important;
+        }
+        .q-field__control,
+        .q-field--outlined .q-field__control {
+            border-radius: 14px !important;
+            background: rgba(255, 252, 246, 0.82);
+        }
+        .q-table {
+            border-radius: 18px;
+            overflow: hidden;
+        }
+        .q-table thead tr {
+            background: rgba(184, 92, 56, 0.08);
+        }
+        .q-table tbody tr:nth-child(even) {
+            background: rgba(255, 252, 246, 0.56);
+        }
+        @media (max-width: 1023px) {
+            .cb-shell-nav {
+                top: 0;
+                position: static;
+            }
+        }
+        @media (max-width: 767px) {
+            .cb-shell-header {
+                padding-left: 1rem;
+                padding-right: 1rem;
+            }
+            .cb-card {
+                border-radius: 20px;
+            }
+        }
+        </style>
+        """
+    )
     state = {
         "auto_refresh": True,
         "selected_session_name": "",
@@ -328,23 +522,29 @@ def create_ui() -> None:
     @ui.page("/")
     def index_page() -> None:
         nonlocal auto_refresh_button
-        with ui.header().classes("items-center justify-between bg-stone-100 text-slate-800 shadow-sm px-4 py-3"):
+        with ui.header().classes("cb-shell-header items-center justify-between text-slate-800 shadow-none px-5 py-4"):
             with ui.column().classes("gap-0"):
-                ui.label(APP_SHELL.app_name).classes("text-2xl font-bold")
-                ui.label(APP_SHELL.app_subtitle).classes("text-sm text-slate-600")
+                ui.label(APP_SHELL.app_name).classes("text-3xl font-black tracking-tight")
+                ui.label(APP_SHELL.app_subtitle).classes("text-sm cb-muted")
             with ui.row().classes("gap-2 items-center"):
                 auto_refresh_button = ui.button(
                     AUTO_REFRESH_ON_ACTION.label if state["auto_refresh"] else AUTO_REFRESH_OFF_ACTION.label,
                     on_click=lambda: toggle_auto_refresh(),
                 ).props("outline")
 
-        with ui.row().classes("w-full gap-2 px-4 py-3 bg-stone-50 border-b border-stone-200 sticky top-[72px] z-40"):
+        with ui.row().classes("cb-shell-nav w-full gap-2 px-5 py-3 sticky top-[84px] z-40 flex-wrap"):
             for page in PRIMARY_PAGES:
-                props = "color=primary" if page.key == state["active_page"] else "outline"
+                props = "color=primary unelevated" if page.key == state["active_page"] else "outline"
+                icon = {
+                    "home": "⌂",
+                    "issues": "!",
+                    "sessions": "#",
+                    "diagnostics": "≈",
+                }.get(page.key, "•")
                 ui.button(
-                    page.title,
+                    f"{icon} {page.title}",
                     on_click=lambda anchor=page.anchor: jump_to(anchor),
-                ).props(props)
+                ).props(props).classes(f"cb-nav-button {'cb-nav-active' if page.key == state['active_page'] else ''}")
             ui.space()
             for action in APP_SHELL.topbar_actions:
                 ui.button(

@@ -82,12 +82,15 @@ def _build_qr_data_uri(content: Any) -> str:
 def install_qr_login_dialog(ui, notify, refresh_view) -> callable:
     def open_qr_login_dialog() -> None:
         dialog = ui.dialog()
-        with dialog, ui.card().classes("w-[28rem] max-w-full"):
-            ui.label("扫码登录微信").classes("text-xl font-semibold")
-            status = ui.label("正在获取二维码...").classes("text-slate-600")
-            qr_image = ui.image("").classes("w-72 h-72 self-center")
-            hint = ui.label("请使用微信扫码并在手机上确认授权。").classes("text-sm text-slate-500")
-            close_button = ui.button("关闭").props("flat")
+        with dialog, ui.card().classes("cb-card cb-hero w-[30rem] max-w-full p-6"):
+            with ui.column().classes("w-full gap-3"):
+                ui.label("WeChat Login").classes("cb-kicker")
+                ui.label("扫码登录微信").classes("text-2xl font-black tracking-tight text-slate-900")
+                status = ui.label("正在获取二维码...").classes("cb-chip cb-chip-warn w-fit")
+                with ui.card().classes("cb-soft-card w-full p-4 shadow-none"):
+                    qr_image = ui.image("").classes("w-72 h-72 self-center")
+                hint = ui.label("请使用微信扫码并在手机上确认授权。").classes("text-sm cb-muted")
+                close_button = ui.button("关闭").props("outline")
 
         event_queue: queue.SimpleQueue[tuple[str, Any]] = queue.SimpleQueue()
         stop_event = threading.Event()
@@ -104,16 +107,19 @@ def install_qr_login_dialog(ui, notify, refresh_view) -> callable:
                 qr_source = _build_qr_data_uri(event.payload.get("qrcode_img_content"))
                 if not qr_source:
                     status.text = "二维码登录失败"
+                    status.classes(replace="cb-chip cb-chip-danger w-fit")
                     hint.text = "二维码图片内容为空或格式不受支持。"
                     notify("二维码登录失败：二维码图片内容为空或格式不受支持。")
                     return
                 status.text = "请使用微信扫码"
+                status.classes(replace="cb-chip cb-chip-warn w-fit")
                 qr_image.set_source(qr_source)
                 hint.text = "扫码后请在手机上确认授权。"
                 return
 
             if event.type == "scanned":
                 status.text = "已扫码，等待手机确认"
+                status.classes(replace="cb-chip cb-chip-warn w-fit")
                 hint.text = "请在手机上完成确认。"
                 return
 
@@ -123,6 +129,7 @@ def install_qr_login_dialog(ui, notify, refresh_view) -> callable:
 
             if event.type == "expired":
                 status.text = "二维码已过期"
+                status.classes(replace="cb-chip cb-chip-danger w-fit")
                 hint.text = "请关闭后重新打开扫码登录。"
                 notify("二维码已过期，请重新打开扫码登录。")
                 close_dialog()
@@ -132,10 +139,12 @@ def install_qr_login_dialog(ui, notify, refresh_view) -> callable:
                 saved = save_account_from_qr_payload(event.payload, resolve_ilink_base_url())
                 if saved is None:
                     status.text = "账号保存失败"
+                    status.classes(replace="cb-chip cb-chip-danger w-fit")
                     hint.text = "返回 payload 缺少必要字段。"
                     notify("扫码成功，但账号保存失败。")
                     return
                 status.text = "扫码成功"
+                status.classes(replace="cb-chip cb-chip-ok w-fit")
                 hint.text = f"已保存账号：{saved.account_id}"
                 notify(f"已保存账号：{saved.account_id}")
                 refresh_view()
@@ -144,6 +153,7 @@ def install_qr_login_dialog(ui, notify, refresh_view) -> callable:
 
             if event.type == "error":
                 status.text = "二维码登录失败"
+                status.classes(replace="cb-chip cb-chip-danger w-fit")
                 hint.text = str(event.payload.get("message") or "未知错误")
                 notify(f"二维码登录失败：{hint.text}")
 
@@ -159,6 +169,7 @@ def install_qr_login_dialog(ui, notify, refresh_view) -> callable:
                     continue
 
                 status.text = "二维码登录失败"
+                status.classes(replace="cb-chip cb-chip-danger w-fit")
                 hint.text = str(payload)
                 notify(f"二维码登录失败：{payload}")
                 close_dialog()
