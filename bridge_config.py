@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from agent_backends import DEFAULT_BACKEND_KEY, supported_backend_keys
@@ -9,6 +9,7 @@ from agent_backends import DEFAULT_BACKEND_KEY, supported_backend_keys
 APP_DIR = Path(__file__).resolve().parent
 WEIXIN_ACCOUNTS_DIR = APP_DIR / "accounts"
 CONFIG_PATH = APP_DIR / "config" / "weixin_bridge.json"
+ACCOUNT_STATE_PATH = WEIXIN_ACCOUNTS_DIR / "bridge-account-state.local.json"
 SUPPORTED_BACKENDS = set(supported_backend_keys())
 
 
@@ -119,6 +120,7 @@ def select_active_account_id(accounts: list[WeixinAccountProfile], preferred: st
 
 
 def build_account_profiles(raw: dict[str, object]) -> tuple[list[WeixinAccountProfile], str]:
+    runtime_state = load_account_runtime_state()
     configured = [_normalize_profile(item) for item in raw.get("accounts", []) or []]
     configured_profiles = [profile for profile in configured if profile is not None]
     legacy_account_id = str(raw.get("account_id") or "").strip() or "wechat-bot"
@@ -133,9 +135,19 @@ def build_account_profiles(raw: dict[str, object]) -> tuple[list[WeixinAccountPr
     accounts = merge_account_profiles(configured_profiles, [legacy_profile] if legacy_profile else [], discovered_profiles)
     if not accounts:
         accounts = [default_account_profile()]
-    preferred = str(raw.get("active_account_id") or raw.get("account_id") or "").strip()
+    preferred = str(runtime_state.get("active_account_id") or raw.get("active_account_id") or raw.get("account_id") or "").strip()
     active_account_id = select_active_account_id(accounts, preferred)
     return accounts, active_account_id
+
+
+def load_account_runtime_state() -> dict[str, object]:
+    if not ACCOUNT_STATE_PATH.exists():
+        return {}
+    try:
+        raw = json.loads(ACCOUNT_STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
 
 
 @dataclass
@@ -217,20 +229,32 @@ class BridgeConfig:
 
     def save(self) -> None:
         self._sync_active_account_fields()
-        data = asdict(self)
-        data["accounts"] = [
-            {
-                "account_id": profile.account_id,
-                "account_file": _to_rel_path(profile.account_file),
-                "sync_file": _to_rel_path(profile.sync_file),
-            }
-            for profile in self.accounts
-        ]
-        data["active_account_id"] = self.active_account_id
-        data["account_id"] = self.account_id
-        data["account_file"] = _to_rel_path(self.account_file)
-        data["sync_file"] = _to_rel_path(self.sync_file)
-        data["default_backend"] = normalize_backend(str(data.get("default_backend") or DEFAULT_BACKEND_KEY))
-        data["language"] = str(data.get("language") or "auto")
+        data = {
+            "backend_id": self.backend_id,
+            "default_backend": normalize_backend(self.default_backend),
+            "service_notice_enabled": bool(self.service_notice_enabled),
+            "config_notice_enabled": bool(self.config_notice_enabled),
+            "task_notice_enabled": bool(self.task_notice_enabled),
+            "language": str(self.language or "auto"),
+            "poll_timeout_ms": int(self.poll_timeout_ms),
+            "hub_task_timeout_seconds": int(self.hub_task_timeout_seconds),
+            "bridge_name": self.bridge_name,
+            "auto_reply_prefix": self.auto_reply_prefix,
+            "ignore_prefixes": list(self.ignore_prefixes),
+        }
         CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         CONFIG_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._save_account_runtime_state()
+
+    def _save_account_runtime_state(self) -> None:
+        ACCOUNT_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ACCOUNT_STATE_PATH.write_text(
+            json.dumps(
+                {
+                    "active_account_id": self.active_account_id,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )

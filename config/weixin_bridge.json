@@ -1,17 +1,9 @@
 {
-  "active_account_id": "wechat-bot",
-  "accounts": [
-    {
-      "account_id": "wechat-bot",
-      "account_file": "accounts/wechat-bot.json",
-      "sync_file": "accounts/wechat-bot.sync.json"
-    }
-  ],
-  "account_id": "wechat-bot",
-  "account_file": "accounts/wechat-bot.json",
-  "sync_file": "accounts/wechat-bot.sync.json",
   "backend_id": "main",
   "default_backend": "codex",
+  "service_notice_enabled": true,
+  "config_notice_enabled": true,
+  "task_notice_enabled": false,
   "language": "auto",
   "poll_timeout_ms": 35000,
   "hub_task_timeout_seconds": 600,
