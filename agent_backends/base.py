@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 
 class AgentLike(Protocol):
@@ -22,6 +22,8 @@ class BackendContext:
     opencode_command: str
     session_dir: Path
     creationflags: int
+    start_new_session: bool = False
+    on_process_started: Callable[[int], None] | None = None
 
 
 class AgentBackend(Protocol):

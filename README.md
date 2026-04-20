@@ -223,18 +223,60 @@ The bridge supports the following WeChat commands:
   Show help
 - `/status`
   Show the current bridge agent, current session, current backend, and session count
+- `/context`
+  Show how Agent / Session / Backend / Model / Project relate to each other and which values are currently effective
 - `/new <name>`
   Create and switch to a new session
 - `/list`
-  List all sessions for the current sender
+  List session summaries for the current sender
+- `/sessions [page]`
+  View paged session summaries
+- `/sessions search <keyword>`
+  Filter sessions by name or recent summary
+- `/sessions delete <a,b,c>`
+  Delete multiple target sessions
+- `/sessions clear-empty`
+  Remove empty sessions that have no task history
+- `/preview [name]`
+  Show recent rounds for the current or target session
+- `/history [name]`
+  Show the history summary for the current or target session
+- `/export [name]`
+  Export the current or target session history to a local Markdown file
 - `/use <name>`
   Switch to the target session
+- `/rename <new>` / `/rename <old> <new>`
+  Rename the current or target session
+- `/delete <name>`
+  Delete a specific session
+- `/cancel [task_id]`
+  Cancel the latest queued or running task for the current sender, or a specific task
+- `/retry [task_id]`
+  Retry the latest task for the current sender, or a specific task
+- `/model`
+  Show the model bound to the current session
+- `/model <name>`
+  Switch the model for the current session
+- `/model reset`
+  Revert to the current agent default model
+- `/project`
+  Show the project directory bound to the current session
+- `/project list`
+  List available project directories
+- `/project <name|path>`
+  Switch the project directory for the current session
+- `/project reset`
+  Revert to the current agent default project directory
 - `/backend`
   Show the current session backend
 - `/backend <codex|claude|opencode>`
   Switch the current session backend
 - `/agent`
-  Show the current default bridge agent
+  Show details of the current default bridge agent
+- `/agent list`
+  List all agents with backend, model, and workdir summaries
+- `/agent help`
+  Show how to query commands supported by the current agent
 - `/agent <name>`
   Switch the default bridge agent
 - `/notify`
@@ -243,6 +285,59 @@ The bridge supports the following WeChat commands:
   Toggle all notices at once
 - `/notify service-on|service-off`
   Toggle service lifecycle notices
+
+## MCP Management Assistant
+
+The project now also ships an MCP stdio server for external agents:
+
+- Launch with:
+  `python3 tools/chatbridge_mcp_server.py`
+- Or use:
+  `./start-chatbridge-mcp.sh`
+  `start-chatbridge-mcp.cmd`
+
+This MCP server is designed as an isolated control plane instead of reusing ordinary WeChat session state. That means:
+
+- The management assistant does not depend on normal WeChat `/use`, `/backend`, or `/model` session switching for its own context
+- Any bridge command execution must explicitly target a `target_sender_id`
+- Delegating work to other agents or starting new agent sessions will not implicitly move the management assistant into another session
+
+To reduce accidental state changes, the management assistant must explicitly enter and exit control mode:
+
+- `enter_control_mode`
+  Enables state-changing operations and agent delegation
+- `exit_control_mode`
+  Leaves management mode and falls back to read-only queries
+
+Current MCP tools include:
+
+- `get_manager_guide`
+  Show control-plane rules and the recommended workflow
+- `get_management_snapshot`
+  Show the global overview, or a specific sender snapshot via `target_sender_id`
+- `run_sender_command`
+  Execute a bridge slash command for a specific sender
+- `start_agent_session`
+  Start a fresh agent session and send the first instruction
+- `delegate_task`
+  Delegate a new instruction to a target agent
+- `list_agents`
+  Show agent summaries
+- `get_task`
+  Show task details
+
+The runtime context model is fixed:
+
+- `Agent`
+  Defines the default backend, default model, default project(workdir), and prompt prefix
+- `Session`
+  Belongs to one sender only; `/use` changes only that sender
+- `Backend`
+  Decides which CLI backend executes the task
+- `Model`
+  Follows the agent by default; if the session has `/model`, the session override wins
+- `Project`
+  Follows the agent workdir by default; if the session has `/project`, the session override wins
 - `/notify config-on|config-off`
   Toggle configuration change notices
 - `/notify task-on|task-off`
@@ -255,5 +350,12 @@ The bridge supports the following WeChat commands:
   Close the current session
 - `/reset`
   Reset the current sender session state
+
+If you need to forward a slash command to the current agent unchanged, use double-slash passthrough:
+
+- `//help`
+  Ask the current agent to show its own supported commands
+- `//status`
+  Query the current agent's internal status
 
 When asynchronous tasks finish, task notices are pushed back into WeChat and include follow-up commands like `/task <task_id>` or `/last`.

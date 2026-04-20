@@ -61,7 +61,17 @@ def run_named_action(action: str) -> ServiceResult:
     return ServiceResult(ok=True, message=f"{result_message} | {notice.summary}")
 
 
-def submit_hub_task(agent_id: str, prompt: str, session_name: str = "", backend: str = "") -> ServiceResult:
+def submit_hub_task(
+    agent_id: str,
+    prompt: str,
+    session_name: str = "",
+    backend: str = "",
+    *,
+    source: str = "web",
+    sender_id: str = "",
+    workdir: str = "",
+    model: str = "",
+) -> ServiceResult:
     cleaned_prompt = prompt.strip()
     if not cleaned_prompt:
         return ServiceResult(ok=False, message="提交失败：prompt 不能为空")
@@ -71,9 +81,12 @@ def submit_hub_task(agent_id: str, prompt: str, session_name: str = "", backend:
         {
             "agent_id": agent_id.strip() or "main",
             "prompt": cleaned_prompt,
-            "source": "web",
+            "source": source.strip() or "web",
+            "sender_id": sender_id.strip(),
             "session_name": session_name.strip(),
             "backend": backend.strip(),
+            "workdir": workdir.strip(),
+            "model": model.strip(),
         },
     )
     try:

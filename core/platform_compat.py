@@ -5,6 +5,11 @@ import shutil
 import subprocess
 from pathlib import Path
 
+try:
+    import psutil
+except ImportError:  # pragma: no cover - optional dependency
+    psutil = None
+
 
 IS_WINDOWS = os.name == "nt"
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if IS_WINDOWS else 0
@@ -64,3 +69,56 @@ def shell_command(command: str) -> list[str]:
     if shell_path.exists():
         return [str(shell_path), "-lc", command]
     return ["/bin/sh", "-lc", command]
+
+
+def terminate_process_tree(pid: int) -> None:
+    if pid <= 0:
+        return
+    if IS_WINDOWS:
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=creationflags(),
+            check=False,
+        )
+        return
+
+    if psutil is not None:
+        try:
+            proc = psutil.Process(pid)
+        except (psutil.Error, ProcessLookupError):
+            return
+        children = proc.children(recursive=True)
+        for child in children:
+            try:
+                child.terminate()
+            except psutil.Error:
+                pass
+        try:
+            proc.terminate()
+            proc.wait(timeout=3)
+        except (psutil.Error, TimeoutError):
+            try:
+                proc.kill()
+            except psutil.Error:
+                pass
+        for child in children:
+            try:
+                child.wait(timeout=1)
+            except psutil.Error:
+                try:
+                    child.kill()
+                except psutil.Error:
+                    pass
+        return
+
+    try:
+        os.killpg(pid, 15)
+    except OSError:
+        try:
+            os.kill(pid, 15)
+        except OSError:
+            return

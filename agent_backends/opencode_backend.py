@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 
 from agent_backends.base import AgentBackend, AgentLike, BackendContext
@@ -12,6 +11,7 @@ from agent_backends.shared import (
     extract_session_id,
     find_latest_opencode_session,
     resolve_session_file,
+    run_process,
 )
 
 
@@ -33,17 +33,7 @@ class OpenCodeBackend(AgentBackend):
             argv.extend(["--session", existing_session])
         argv.append(final_prompt)
 
-        completed = subprocess.run(
-            argv,
-            cwd=str(workdir),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=context.creationflags,
-            check=False,
-            shell=False,
-        )
+        completed = run_process(argv, workdir, context)
 
         output, session_id, error_message = self._parse_stdout(completed.stdout)
         if not session_id:

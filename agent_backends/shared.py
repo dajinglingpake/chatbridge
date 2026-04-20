@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,36 @@ from agent_backends.base import AgentLike, BackendContext
 
 def build_final_prompt(agent: AgentLike, prompt: str) -> str:
     return prompt if not agent.prompt_prefix else f"{agent.prompt_prefix}\n\n{prompt}"
+
+
+@dataclass(frozen=True)
+class ProcessResult:
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+def run_process(argv: list[str], cwd: Path, context: BackendContext) -> ProcessResult:
+    proc = subprocess.Popen(
+        argv,
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=context.creationflags,
+        start_new_session=context.start_new_session,
+        shell=False,
+    )
+    if context.on_process_started is not None:
+        context.on_process_started(proc.pid)
+    stdout, stderr = proc.communicate()
+    return ProcessResult(
+        returncode=int(proc.returncode or 0),
+        stdout=stdout or "",
+        stderr=stderr or "",
+    )
 
 
 def resolve_session_file(agent: AgentLike, session_name: str, session_dir: Path) -> Path:

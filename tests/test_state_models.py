@@ -63,6 +63,7 @@ class StateModelTests(unittest.TestCase):
         self.assertEqual("main", task.agent_name)
         self.assertEqual("codex", task.backend)
         self.assertEqual("queued", task.status)
+        self.assertEqual("", task.model)
 
     def test_agent_runtime_from_dict_recovers_invalid_payload(self) -> None:
         runtime = AgentRuntimeState.from_dict("broken", now="2026-01-01T00:00:00")
@@ -87,6 +88,7 @@ class StateModelTests(unittest.TestCase):
         self.assertEqual("focus", binding.current_session)
         self.assertEqual({"focus"}, set(binding.sessions.keys()))
         self.assertEqual("claude", binding.sessions["focus"].backend)
+        self.assertEqual("", binding.sessions["focus"].model)
 
     def test_weixin_conversation_binding_ensures_default_session(self) -> None:
         binding = WeixinConversationBinding.from_dict(

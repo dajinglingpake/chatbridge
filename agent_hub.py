@@ -16,7 +16,7 @@ from core.json_store import load_json, save_json
 from core.state_models import AgentRuntimeState, HubTask, IpcRequestEnvelope, IpcResponseEnvelope
 from core.weixin_notifier import broadcast_weixin_notice_by_kind, build_task_followup_hint
 from local_ipc import REQUEST_DIR, ensure_ipc_dirs, mark_processed, read_request, write_response
-from core.platform_compat import creationflags, resolve_command
+from core.platform_compat import IS_WINDOWS, creationflags, resolve_command, terminate_process_tree
 from runtime_stack import discover_external_agent_processes
 
 
@@ -153,6 +153,8 @@ class MultiCodexHub:
         self.runtimes: dict[str, AgentRuntimeState] = {}
         self.queues: dict[str, queue.Queue[HubTask]] = {}
         self.started_workers: set[str] = set()
+        self.running_task_pids: dict[str, int] = {}
+        self.cancel_requested_task_ids: set[str] = set()
         self._restore_previous_state()
         for agent in self.config.agents:
             self._ensure_agent(agent)
@@ -201,6 +203,82 @@ class MultiCodexHub:
             if task.id == task_id:
                 return task.to_dict()
         return None
+
+    def _find_task(self, task_id: str) -> HubTask | None:
+        for task in self.tasks:
+            if task.id == task_id:
+                return task
+        return None
+
+    def _queued_task_count(self, agent_id: str) -> int:
+        return sum(1 for task in self.tasks if task.agent_id == agent_id and task.status == "queued")
+
+    def _refresh_runtime_queue_size(self, agent_id: str) -> None:
+        runtime = self.runtimes.setdefault(agent_id, AgentRuntimeState(updated_at=now_iso()))
+        runtime.queue_size = self._queued_task_count(agent_id)
+        runtime.updated_at = now_iso()
+
+    def cancel_task(self, task_id: str) -> dict[str, Any]:
+        cleaned_id = task_id.strip()
+        if not cleaned_id:
+            raise ValueError("task_id is required")
+        pid = 0
+        with self.lock:
+            task = self._find_task(cleaned_id)
+            if task is None:
+                raise ValueError("task not found")
+            if task.status == "queued":
+                task.status = "canceled"
+                task.finished_at = now_iso()
+                task.error = "Task canceled before execution."
+                self._refresh_runtime_queue_size(task.agent_id)
+                self._save_state()
+                return task.to_dict()
+            if task.status == "running":
+                pid = int(self.running_task_pids.get(cleaned_id) or 0)
+                if pid <= 0:
+                    raise ValueError("running task cannot be canceled right now")
+                self.cancel_requested_task_ids.add(cleaned_id)
+                task_payload = task.to_dict()
+            else:
+                if task.status == "canceled":
+                    raise ValueError("task already canceled")
+                raise ValueError(f"task cannot be canceled from status: {task.status}")
+        terminate_process_tree(pid)
+        return task_payload
+
+    def retry_task(
+        self,
+        task_id: str,
+        *,
+        source: str = "",
+        sender_id: str = "",
+    ) -> dict[str, Any]:
+        cleaned_id = task_id.strip()
+        if not cleaned_id:
+            raise ValueError("task_id is required")
+        with self.lock:
+            task = self._find_task(cleaned_id)
+            if task is None:
+                raise ValueError("task not found")
+            if task.status in {"queued", "running"}:
+                raise ValueError(f"task cannot be retried from status: {task.status}")
+            agent_id = task.agent_id
+            prompt = task.prompt
+            task_source = source.strip() or task.source or "desktop"
+            task_sender_id = sender_id.strip() or task.sender_id
+            session_name = task.session_name
+            backend = task.backend
+        return self.submit_task(
+            agent_id,
+            prompt,
+            task_source,
+            task_sender_id,
+            session_name,
+            backend,
+            task.workdir,
+            task.model,
+        )
 
     def create_or_update_agent(self, payload: dict[str, Any]) -> AgentConfig:
         with self.lock:
@@ -268,6 +346,8 @@ class MultiCodexHub:
         sender_id: str = "",
         session_name: str = "",
         backend: str = "",
+        workdir: str = "",
+        model: str = "",
     ) -> dict[str, Any]:
         prompt = (prompt or "").strip()
         if not prompt:
@@ -286,11 +366,13 @@ class MultiCodexHub:
             status="queued",
             created_at=now_iso(),
             session_name=session_name.strip(),
+            workdir=workdir.strip(),
+            model=model.strip(),
         )
         with self.lock:
             self.tasks.append(task)
             self.queues[agent.id].put(task)
-            self.runtimes[agent.id].queue_size = self.queues[agent.id].qsize()
+            self._refresh_runtime_queue_size(agent.id)
             self._save_state()
         return task.to_dict()
 
@@ -307,6 +389,8 @@ class MultiCodexHub:
             sender_id=str(payload.get("sender_id") or ""),
             session_name=str(payload.get("session_name") or ""),
             backend=str(payload.get("backend") or ""),
+            workdir=str(payload.get("workdir") or ""),
+            model=str(payload.get("model") or ""),
         )
 
     def _worker(self, agent_id: str) -> None:
@@ -314,12 +398,17 @@ class MultiCodexHub:
         while True:
             task = q.get()
             try:
+                if task.status == "canceled":
+                    continue
                 self._run_task(agent_id, task)
             finally:
                 with self.lock:
                     runtime = self.runtimes[agent_id]
-                    runtime.queue_size = q.qsize()
-                    runtime.updated_at = now_iso()
+                    self._refresh_runtime_queue_size(agent_id)
+                    if runtime.status == "running" and not any(
+                        item.agent_id == agent_id and item.status == "running" for item in self.tasks
+                    ):
+                        runtime.status = "idle"
                     self._save_state()
                 q.task_done()
 
@@ -331,30 +420,69 @@ class MultiCodexHub:
             self.runtimes[agent_id].status = "running"
             self._save_state()
         try:
-            result = self._invoke_backend(agent, task.prompt, task.session_name, task.backend)
+            result = self._invoke_backend(agent, task)
+            canceled = self._consume_cancel_request(task.id)
+            self._clear_running_task_pid(task.id)
             with self.lock:
                 runtime = self.runtimes[agent_id]
-                task.status = "succeeded"
                 task.finished_at = now_iso()
-                task.output = result["output"]
-                task.session_id = result["session_id"]
                 runtime.status = "idle"
-                runtime.success_count += 1
-                runtime.last_output = result["output"][:1800]
-                runtime.last_error = ""
+                if canceled:
+                    task.status = "canceled"
+                    task.error = "Task canceled during execution."
+                    task.output = ""
+                    runtime.last_error = task.error
+                else:
+                    task.status = "succeeded"
+                    task.output = result["output"]
+                    task.session_id = result["session_id"]
+                    runtime.success_count += 1
+                    runtime.last_output = result["output"][:1800]
+                    runtime.last_error = ""
                 self._save_state()
+            if canceled:
+                self._notify_task_canceled(task)
+                return
             self._notify_task_result(task, succeeded=True)
         except Exception as exc:  # noqa: BLE001
+            canceled = self._consume_cancel_request(task.id)
+            self._clear_running_task_pid(task.id)
             with self.lock:
                 runtime = self.runtimes[agent_id]
-                task.status = "failed"
                 task.finished_at = now_iso()
-                task.error = str(exc)
-                runtime.status = "failed"
-                runtime.failure_count += 1
-                runtime.last_error = str(exc)
+                if canceled:
+                    task.status = "canceled"
+                    task.error = "Task canceled during execution."
+                    runtime.status = "idle"
+                    runtime.last_error = task.error
+                else:
+                    task.status = "failed"
+                    task.error = str(exc)
+                    runtime.status = "failed"
+                    runtime.failure_count += 1
+                    runtime.last_error = str(exc)
                 self._save_state()
+            if canceled:
+                self._notify_task_canceled(task)
+                return
             self._notify_task_result(task, succeeded=False)
+
+    def _register_running_task_pid(self, task_id: str, pid: int) -> None:
+        if pid <= 0:
+            return
+        with self.lock:
+            self.running_task_pids[task_id] = pid
+
+    def _clear_running_task_pid(self, task_id: str) -> None:
+        with self.lock:
+            self.running_task_pids.pop(task_id, None)
+
+    def _consume_cancel_request(self, task_id: str) -> bool:
+        with self.lock:
+            if task_id not in self.cancel_requested_task_ids:
+                return False
+            self.cancel_requested_task_ids.remove(task_id)
+            return True
 
     def _notify_task_result(self, task: HubTask, succeeded: bool) -> None:
         if task.source.strip().lower() == "wechat":
@@ -388,27 +516,58 @@ class MultiCodexHub:
         )
         broadcast_weixin_notice_by_kind("task", "任务执行失败", detail)
 
-    def _invoke_backend(self, agent: AgentConfig, prompt: str, session_name: str = "", backend: str = "") -> dict[str, str]:
-        normalized_backend = normalize_backend(backend or agent.backend)
+    def _notify_task_canceled(self, task: HubTask) -> None:
+        if task.source.strip().lower() == "wechat":
+            return
+        task_id = task.id
+        agent_name = task.agent_name or task.agent_id
+        session_name = task.session_name or "default"
+        backend = task.backend or DEFAULT_BACKEND_KEY
+        detail = (
+            f"任务 ID: {task_id}\n"
+            f"Agent: {agent_name}\n"
+            f"会话: {session_name}\n"
+            f"后端: {backend}\n"
+            f"状态: 已取消\n"
+            f"说明: {(task.error or 'Task canceled during execution.')[:600]}\n"
+            f"{build_task_followup_hint(task_id=task_id, session_name=session_name, allow_retry=True)}"
+        )
+        broadcast_weixin_notice_by_kind("task", "任务已取消", detail)
+
+    def _invoke_backend(self, agent: AgentConfig, task: HubTask) -> dict[str, str]:
+        normalized_backend = normalize_backend(task.backend or agent.backend)
         backend = self.backend_registry.get(normalized_backend)
         if backend is None:
             raise ValueError(f"unsupported backend: {normalized_backend}")
+        effective_agent = AgentConfig(
+            id=agent.id,
+            name=agent.name,
+            workdir=task.workdir.strip() or agent.workdir,
+            session_file=agent.session_file,
+            backend=agent.backend,
+            model=task.model.strip() or agent.model,
+            prompt_prefix=agent.prompt_prefix,
+            enabled=agent.enabled,
+        )
         return backend.invoke(
-            agent=agent,
-            prompt=prompt,
-            session_name=session_name,
+            agent=effective_agent,
+            prompt=task.prompt,
+            session_name=task.session_name,
             context=BackendContext(
                 codex_command=self.config.codex_command,
                 claude_command=self.config.claude_command,
                 opencode_command=self.config.opencode_command,
                 session_dir=SESSION_DIR,
                 creationflags=creationflags(),
+                start_new_session=not IS_WINDOWS,
+                on_process_started=lambda pid: self._register_running_task_pid(task.id, pid),
             ),
         )
 
     def _save_state(self) -> None:
         ensure_ipc_dirs()
         STATE_DIR.mkdir(parents=True, exist_ok=True)
+        external_agent_processes = [item.to_dict() for item in discover_external_agent_processes()]
         save_json(
             STATE_PATH,
             {
@@ -420,7 +579,7 @@ class MultiCodexHub:
                 },
                 "agents": self.list_agents(),
                 "tasks": self.list_tasks(),
-                "external_agent_processes": discover_external_agent_processes(),
+                "external_agent_processes": external_agent_processes,
             },
         )
 
@@ -445,13 +604,15 @@ class MultiCodexHub:
             return IpcResponseEnvelope(
                 ok=True,
                 payload={
-                    "task": self.submit_task(
+                        "task": self.submit_task(
                     str(payload.get("agent_id") or ""),
                     str(payload.get("prompt") or ""),
                     str(payload.get("source") or "desktop"),
                     str(payload.get("sender_id") or ""),
                     str(payload.get("session_name") or ""),
                     str(payload.get("backend") or ""),
+                    str(payload.get("workdir") or ""),
+                    str(payload.get("model") or ""),
                     ),
                 },
             )
@@ -460,6 +621,19 @@ class MultiCodexHub:
             if task is None:
                 return IpcResponseEnvelope(ok=False, error="task not found")
             return IpcResponseEnvelope(ok=True, payload={"task": task})
+        if action == "cancel_task":
+            return IpcResponseEnvelope(ok=True, payload={"task": self.cancel_task(str(payload.get("task_id") or ""))})
+        if action == "retry_task":
+            return IpcResponseEnvelope(
+                ok=True,
+                payload={
+                    "task": self.retry_task(
+                        str(payload.get("task_id") or ""),
+                        source=str(payload.get("source") or ""),
+                        sender_id=str(payload.get("sender_id") or ""),
+                    )
+                },
+            )
         if action == "wechat_message":
             return IpcResponseEnvelope(ok=True, payload={"task": self.handle_wechat_message(payload)})
         if action == "save_agent":
@@ -468,6 +642,7 @@ class MultiCodexHub:
             self.delete_agent(str(payload.get("agent_id") or ""))
             return IpcResponseEnvelope(ok=True)
         if action == "state":
+            external_agent_processes = [item.to_dict() for item in discover_external_agent_processes()]
             return IpcResponseEnvelope(
                 ok=True,
                 payload={
@@ -479,7 +654,7 @@ class MultiCodexHub:
                     },
                     "agents": self.list_agents(),
                     "tasks": self.list_tasks(),
-                    "external_agent_processes": discover_external_agent_processes(),
+                    "external_agent_processes": external_agent_processes,
                 },
             )
         raise ValueError(f"unsupported action: {action}")

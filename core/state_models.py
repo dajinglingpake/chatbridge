@@ -133,6 +133,8 @@ class HubTask:
     error: str = ""
     session_id: str = ""
     session_name: str = ""
+    workdir: str = ""
+    model: str = ""
 
     @classmethod
     def from_dict(cls, raw: object, *, default_backend: str) -> "HubTask | None":
@@ -159,6 +161,8 @@ class HubTask:
             error=str(raw.get("error") or ""),
             session_id=str(raw.get("session_id") or "").strip(),
             session_name=str(raw.get("session_name") or "").strip(),
+            workdir=str(raw.get("workdir") or "").strip(),
+            model=str(raw.get("model") or "").strip(),
         )
 
     def to_dict(self) -> JsonObject:
@@ -249,6 +253,8 @@ class WeixinSessionMeta:
     backend: str
     created_at: str
     updated_at: str
+    workdir: str = ""
+    model: str = ""
 
     @classmethod
     def from_dict(
@@ -269,11 +275,23 @@ class WeixinSessionMeta:
             backend=normalize_backend(str(raw.get("backend") or default_backend)),
             created_at=str(raw.get("created_at") or now),
             updated_at=str(raw.get("updated_at") or now),
+            workdir=str(raw.get("workdir") or "").strip(),
+            model=str(raw.get("model") or "").strip(),
         )
 
-    def touch(self, now: str, backend: str | None = None) -> None:
+    def touch(
+        self,
+        now: str,
+        backend: str | None = None,
+        workdir: str | None = None,
+        model: str | None = None,
+    ) -> None:
         if backend is not None:
             self.backend = backend
+        if workdir is not None:
+            self.workdir = workdir
+        if model is not None:
+            self.model = model
         self.updated_at = now
 
     def to_dict(self) -> JsonObject:

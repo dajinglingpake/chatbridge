@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 
 from agent_backends.base import AgentBackend, AgentLike, BackendContext
-from agent_backends.shared import build_final_prompt, collect_text_fragments, extract_error_text, extract_session_id, resolve_session_file
+from agent_backends.shared import build_final_prompt, collect_text_fragments, extract_error_text, extract_session_id, resolve_session_file, run_process
 
 
 class ClaudeBackend(AgentBackend):
@@ -25,17 +24,7 @@ class ClaudeBackend(AgentBackend):
         if existing_session:
             argv.extend(["--resume", existing_session])
 
-        completed = subprocess.run(
-            argv,
-            cwd=str(workdir),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=context.creationflags,
-            check=False,
-            shell=False,
-        )
+        completed = run_process(argv, workdir, context)
 
         output, session_id, error_message = self._parse_stdout(completed.stdout)
         if not session_id:

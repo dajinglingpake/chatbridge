@@ -248,18 +248,60 @@ Web 模式启动后，终端会打印本地地址和局域网地址，例如 `ht
   查看帮助
 - `/status`
   查看当前微信桥 Agent、当前会话、当前后端和会话数量
+- `/context`
+  查看 Agent / Session / Backend / Model / Project 的关系和当前生效值
 - `/new <name>`
   新建会话并切换到该会话
 - `/list`
-  列出当前发送方的所有会话
+  列出当前发送方的所有会话摘要
+- `/sessions [page]`
+  按页查看会话摘要
+- `/sessions search <keyword>`
+  按会话名或最近摘要过滤会话
+- `/sessions delete <a,b,c>`
+  批量删除指定会话
+- `/sessions clear-empty`
+  批量删除没有任务历史的空会话
+- `/preview [name]`
+  查看当前或指定会话最近几轮摘要
+- `/history [name]`
+  查看当前或指定会话的历史摘要
+- `/export [name]`
+  导出当前或指定会话历史到本地 Markdown 文件
 - `/use <name>`
   切换到指定会话
+- `/rename <new>` / `/rename <old> <new>`
+  重命名当前或指定会话
+- `/delete <name>`
+  删除指定会话
+- `/cancel [task_id]`
+  取消当前发送方最近的排队中或运行中任务，或取消指定任务
+- `/retry [task_id]`
+  重试当前发送方最近任务，或重试指定任务
+- `/model`
+  查看当前会话绑定的模型
+- `/model <name>`
+  切换当前会话的模型
+- `/model reset`
+  恢复跟随当前 Agent 的默认模型
+- `/project`
+  查看当前会话绑定的工程目录
+- `/project list`
+  列出可选工程目录
+- `/project <name|path>`
+  切换当前会话的工程目录
+- `/project reset`
+  恢复跟随当前 Agent 的默认工程目录
 - `/backend`
   查看当前会话后端
 - `/backend <codex|claude|opencode>`
   切换当前会话后端
 - `/agent`
-  查看当前微信桥默认 Agent
+  查看当前微信桥默认 Agent 详情
+- `/agent list`
+  列出所有 Agent 的后端、模型和工作目录摘要
+- `/agent help`
+  查看如何查询当前 Agent 自身支持的命令
 - `/agent <name>`
   切换微信桥默认 Agent
 - `/notify`
@@ -268,6 +310,59 @@ Web 模式启动后，终端会打印本地地址和局域网地址，例如 `ht
   一次性开关全部通知
 - `/notify service-on|service-off`
   开关服务生命周期通知
+
+## MCP 管理助手
+
+项目现在额外提供了一个面向外部 Agent 的 MCP stdio server：
+
+- 启动命令：
+  `python3 tools/chatbridge_mcp_server.py`
+- 或直接使用：
+  `./start-chatbridge-mcp.sh`
+  `start-chatbridge-mcp.cmd`
+
+这个 MCP server 的设计是独立控制平面，不复用普通微信会话，因此：
+
+- 管理助手自己的上下文不依赖微信 `/use`、`/backend`、`/model` 之类的会话切换
+- 对目标发送方执行桥命令时，必须显式传入 `target_sender_id`
+- 对其他 Agent 委派任务或启动新会话时，不会隐式把管理助手自己切到别的会话
+
+为了避免误操作，管理助手必须显式进入和退出管理模式：
+
+- `enter_control_mode`
+  进入管理模式，之后才允许执行会修改状态或触发其他 Agent 的操作
+- `exit_control_mode`
+  退出管理模式，之后只保留只读查询
+
+当前 MCP 主要工具包括：
+
+- `get_manager_guide`
+  查看管理助手规则和推荐流程
+- `get_management_snapshot`
+  查看全局总览，或按 `target_sender_id` 查看某个发送方的当前上下文
+- `run_sender_command`
+  对指定发送方执行桥接层 slash 命令
+- `start_agent_session`
+  显式启动一个新的 Agent 会话，并发送首条指令
+- `delegate_task`
+  向指定 Agent 委派新任务
+- `list_agents`
+  查看 Agent 摘要
+- `get_task`
+  查看任务详情
+
+当前系统里的上下文关系是固定的：
+
+- `Agent`
+  定义默认 backend、默认 model、默认 project(workdir) 和提示词前缀
+- `Session`
+  只属于某个发送方，`/use` 只切这个发送方，不会影响其他发送方
+- `Backend`
+  决定这次任务实际走哪个 CLI 后端
+- `Model`
+  默认跟随 Agent；如果 Session 设置了 `/model`，则 Session 覆盖优先
+- `Project`
+  默认跟随 Agent workdir；如果 Session 设置了 `/project`，则 Session 覆盖优先
 - `/notify config-on|config-off`
   开关配置变更通知
 - `/notify task-on|task-off`
@@ -280,5 +375,12 @@ Web 模式启动后，终端会打印本地地址和局域网地址，例如 `ht
   结束当前会话
 - `/reset`
   重置当前发送方的会话状态
+
+如果你要把以 `/` 开头的消息原样发给当前 Agent，可以用双斜杠透传：
+
+- `//help`
+  让当前 Agent 返回自身支持的命令
+- `//status`
+  查询当前 Agent 的内部状态
 
 异步任务执行完成后，任务通知会直接回推到微信，并提示可继续使用 `/task <task_id>` 或 `/last` 查看详情。

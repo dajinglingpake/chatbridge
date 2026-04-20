@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import json
-import subprocess
 import tempfile
 import uuid
 from pathlib import Path
 
 from agent_backends.base import AgentBackend, AgentLike, BackendContext
-from agent_backends.shared import build_final_prompt, resolve_session_file
+from agent_backends.shared import build_final_prompt, resolve_session_file, run_process
 
 
 class CodexBackend(AgentBackend):
@@ -30,17 +29,7 @@ class CodexBackend(AgentBackend):
         else:
             argv = [context.codex_command, "exec", *options, "-C", str(workdir), final_prompt]
 
-        completed = subprocess.run(
-            argv,
-            cwd=str(workdir),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=context.creationflags,
-            check=False,
-            shell=False,
-        )
+        completed = run_process(argv, workdir, context)
         session_id = existing_session
         error_message = completed.stderr.strip()
         for line in completed.stdout.splitlines():

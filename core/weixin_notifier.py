@@ -75,10 +75,17 @@ def _build_notice_text(title: str, detail: str) -> str:
     return f"[ChatBridge 系统通知]\n操作: {title}\n结果: {body}"
 
 
-def build_task_followup_hint(task_id: str = "", session_name: str = "") -> str:
+def build_task_followup_hint(
+    task_id: str = "",
+    session_name: str = "",
+    *,
+    allow_retry: bool = False,
+) -> str:
     lines = ["可继续发送命令查看详情:"]
     if task_id:
         lines.append(f"/task {task_id}")
+    if allow_retry and task_id:
+        lines.append(f"/retry {task_id}")
     lines.append("/last")
     if session_name:
         lines.append(f"当前会话: {session_name}")
