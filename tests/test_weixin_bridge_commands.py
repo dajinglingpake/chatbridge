@@ -136,6 +136,22 @@ class FeedbackBridge(FakeBridge):
         self._poll_pending_tasks("https://example.com", "token")
 
 
+class TimeoutPollingBridge(FakeBridge):
+    def __init__(self, config: BridgeConfig) -> None:
+        super().__init__(config)
+        self.poll_calls = 0
+
+    def _load_account(self) -> dict[str, object]:
+        return {"token": "token", "baseUrl": "https://example.com"}
+
+    def _load_sync_buf(self) -> str:
+        return ""
+
+    def _post_json(self, url: str, body: dict[str, object], token: str = "", timeout_ms: int = 15000) -> dict[str, object]:
+        self.poll_calls += 1
+        raise RuntimeError(f"POST {url} failed: The read operation timed out")
+
+
 def _fake_agent(
     agent_id: str,
     *,
@@ -191,6 +207,12 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         self.assertIn("Current system notices", reply)
         self.assertIn("Service lifecycle:", reply)
         self.assertNotIn("\\n", reply)
+
+    def test_poll_once_ignores_expected_getupdates_timeout(self) -> None:
+        bridge = TimeoutPollingBridge(BridgeConfig.load())
+        bridge.poll_once()
+        self.assertEqual(1, bridge.poll_calls)
+        self.assertEqual("", bridge.state.last_error)
 
     def test_handle_message_sends_queued_and_running_feedback(self) -> None:
         bridge = FeedbackBridge(

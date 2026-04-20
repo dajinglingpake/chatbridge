@@ -92,7 +92,13 @@ class WeixinBridge:
 
         payload = {"get_updates_buf": buf, "base_info": {"channel_version": "2.1.1"}}
         timeout_ms = ACTIVE_TASK_POLL_TIMEOUT_MS if self.pending_tasks else self.config.poll_timeout_ms
-        response = self._post_json(f"{base_url}/ilink/bot/getupdates", payload, token=token, timeout_ms=timeout_ms)
+        try:
+            response = self._post_json(f"{base_url}/ilink/bot/getupdates", payload, token=token, timeout_ms=timeout_ms)
+        except RuntimeError as exc:
+            if self._is_expected_getupdates_timeout(exc):
+                self.state.mark_poll(now=now_iso())
+                return
+            raise
         self.state.mark_poll(now=now_iso())
         if response.get("ret") not in (None, 0):
             raise RuntimeError(f"weixin getupdates failed: ret={response.get('ret')} errcode={response.get('errcode')} errmsg={response.get('errmsg')}")
@@ -158,7 +164,7 @@ class WeixinBridge:
                 "session_name": session_name,
                 "backend": session_meta.backend,
                 "workdir": self._resolve_session_workdir(session_meta),
-                "model": self._resolve_session_model(session_meta),
+                "model": self._effective_session_model(session_meta),
             },
             timeout_seconds=15,
         )
@@ -178,7 +184,7 @@ class WeixinBridge:
                 task_id=task_id,
                 session=session_name or "default",
                 backend=session_meta.backend,
-                model=self._resolve_session_model(session_meta),
+                model=self._display_model(self._effective_session_model(session_meta)),
             ),
         )
         tracked_task = WeixinPendingTaskState(
@@ -186,7 +192,7 @@ class WeixinBridge:
             sender_id=sender_id,
             session_name=session_name or "default",
             backend=session_meta.backend,
-            model=self._resolve_session_model(session_meta),
+            model=self._effective_session_model(session_meta),
             workdir=self._resolve_session_workdir(session_meta),
             context_token=str(msg.get("context_token") or "").strip(),
         )
@@ -212,7 +218,7 @@ class WeixinBridge:
                 task_id=task.id,
                 session=task.session_name or "default",
                 backend=task.backend or self.config.default_backend,
-                model=task.model.strip() or tracked.model or "-",
+                model=self._display_model(task.model.strip() or tracked.model),
                 workdir=task.workdir.strip() or tracked.workdir or "-",
             ),
         )
@@ -257,7 +263,7 @@ class WeixinBridge:
                 session=task.session_name or tracked.session_name or "default",
                 session_id=task.session_id or "-",
                 backend=task.backend or tracked.backend or self.config.default_backend,
-                model=task.model.strip() or tracked.model or "-",
+                model=self._display_model(task.model.strip() or tracked.model),
                 workdir=task.workdir.strip() or tracked.workdir or "-",
                 result=(f"{self.config.auto_reply_prefix}{task.output.strip()}" if self.config.auto_reply_prefix else task.output.strip()) or "(empty)",
             )
@@ -1123,12 +1129,20 @@ class WeixinBridge:
         return str((APP_DIR / "workspace").resolve())
 
     def _resolve_session_model(self, session_meta: WeixinSessionMeta) -> str:
+        model = self._effective_session_model(session_meta)
+        return self._display_model(model)
+
+    def _effective_session_model(self, session_meta: WeixinSessionMeta) -> str:
         if session_meta.model.strip():
             return session_meta.model.strip()
         agent = self._find_agent_config(self.config.backend_id)
         if agent is not None and agent.model.strip():
             return agent.model.strip()
-        return "-"
+        return ""
+
+    @staticmethod
+    def _display_model(model: str) -> str:
+        return model.strip() or "-"
 
     def _render_model_status(self, session_name: str, session_meta: WeixinSessionMeta) -> str:
         session_model = self._resolve_session_model(session_meta)
@@ -1370,6 +1384,13 @@ class WeixinBridge:
             return self._request("POST", url, body=body, token=token, timeout_ms=timeout_ms)
         except RuntimeError as exc:
             raise RuntimeError(f"POST {url} failed: {exc}") from exc
+
+    @staticmethod
+    def _is_expected_getupdates_timeout(exc: RuntimeError) -> bool:
+        message = str(exc).lower()
+        if "/ilink/bot/getupdates" not in message:
+            return False
+        return "timed out" in message or "timeout" in message
 
     def _ipc_request(self, action: str, payload: dict[str, Any], timeout_seconds: float) -> IpcResponseEnvelope:
         request_id = create_request(action, payload)
