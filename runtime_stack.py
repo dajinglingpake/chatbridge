@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -15,7 +16,9 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     psutil = None
 
+from core.json_store import load_json, save_json
 from core.platform_compat import IS_WINDOWS, creationflags
+from core.state_models import ExternalAgentProcessState, RuntimeSnapshot
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -44,16 +47,6 @@ class ManagedStatus:
     pid_file: Path
     running: bool
     pid: int | None = None
-
-
-@dataclass
-class RuntimeSnapshot:
-    hub_running: bool
-    bridge_running: bool
-    hub_pid: int | None
-    bridge_pid: int | None
-    codex_processes: list[str]
-    log_dir: str
 
 
 def _normalize_process_text(name: str, cmdline: str) -> str:
@@ -86,14 +79,17 @@ def ensure_runtime_dirs() -> None:
 
 
 def _read_pid_file(path: Path) -> int | None:
+    data = load_json(path, None)
+    if data is None:
+        return None
     try:
-        return int(path.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
+        return int(data)
+    except (TypeError, ValueError):
         return None
 
 
 def _write_pid_file(path: Path, pid: int) -> None:
-    path.write_text(str(pid), encoding="utf-8")
+    save_json(path, pid)
 
 
 def _clear_pid_file(path: Path) -> None:
@@ -152,13 +148,13 @@ def _has_managed_ancestor(proc, managed_root_pids: set[int]) -> bool:
     return False
 
 
-def discover_external_agent_processes() -> list[dict[str, str | int]]:
+def discover_external_agent_processes() -> list[ExternalAgentProcessState]:
     if psutil is None:
         return []
 
     current_pid = os.getpid()
     managed_root_pids = _managed_root_pids()
-    rendered: list[dict[str, str | int]] = []
+    rendered: list[ExternalAgentProcessState] = []
     parent_map: dict[int, int | None] = {}
     for proc in psutil.process_iter(["pid", "name", "cmdline"]):
         pid = proc.info.get("pid")
@@ -178,29 +174,28 @@ def discover_external_agent_processes() -> list[dict[str, str | int]]:
         except psutil.Error:
             parent_map[int(pid)] = None
         rendered.append(
-            {
-                "pid": int(pid),
-                "name": name,
-                "backend": infer_agent_backend(name, cmdline),
-                "session_hint": extract_agent_session_hint(cmdline),
-                "command_line": cmdline,
-            }
+            ExternalAgentProcessState(
+                pid=int(pid),
+                name=name,
+                backend=infer_agent_backend(name, cmdline),
+                session_hint=extract_agent_session_hint(cmdline),
+                command_line=cmdline,
+            )
         )
-    candidate_pids = {int(item["pid"]) for item in rendered}
+    candidate_pids = {item.pid for item in rendered}
     parent_candidates = {parent_pid for parent_pid in parent_map.values() if parent_pid in candidate_pids}
-    filtered: list[dict[str, str | int]] = []
+    filtered: list[ExternalAgentProcessState] = []
     for item in rendered:
-        pid = int(item["pid"])
-        if pid in parent_candidates:
+        if item.pid in parent_candidates:
             continue
         filtered.append(item)
-    return sorted(filtered, key=lambda item: int(item["pid"]))
+    return sorted(filtered, key=lambda item: item.pid)
 
 
 def stop_external_agent_process(pid: int) -> str:
     if pid <= 0:
         return "结束失败：PID 无效"
-    known_pids = {int(item["pid"]) for item in discover_external_agent_processes()}
+    known_pids = {item.pid for item in discover_external_agent_processes()}
     if pid not in known_pids:
         return f"结束失败：PID {pid} 不是可控的外部 Agent 进程"
     _taskkill(pid)
@@ -238,11 +233,7 @@ def _get_python_command(gui: bool = False) -> str:
 
 
 def shutil_which(name: str) -> str | None:
-    for directory in os.environ.get("PATH", "").split(os.pathsep):
-        candidate = Path(directory) / name
-        if candidate.exists():
-            return str(candidate)
-    return None
+    return shutil.which(name)
 
 
 def start_managed(name: str, script_path: Path, pid_file: Path, stdout_log: Path, stderr_log: Path) -> str:
@@ -411,12 +402,8 @@ def list_codex_processes() -> list[str]:
 
 
 def read_json(path: Path) -> dict:
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+    data = load_json(path, {}, expect_type=dict)
+    return data if isinstance(data, dict) else {}
 
 
 def get_runtime_snapshot() -> RuntimeSnapshot:

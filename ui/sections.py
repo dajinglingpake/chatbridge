@@ -1,35 +1,77 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Callable, Protocol, Self
 
 from agent_backends import supported_backend_options
 from core.navigation import DIAGNOSTICS_PAGE, HOME_PAGE, ISSUES_PAGE, SESSIONS_PAGE
 from core.view_models import WebConsoleViewModel
 
 
-def _render_page_intro(ui: Any, title: str, description: str, kicker: str) -> None:
+class UIEventLike(Protocol):
+    value: object
+
+
+class UIElementLike(Protocol):
+    value: object
+    text: str
+
+    def __enter__(self) -> Self: ...
+    def __exit__(self, exc_type, exc, tb) -> bool | None: ...
+    def classes(self, value: str) -> Self: ...
+    def props(self, value: str) -> Self: ...
+    def set_enabled(self, value: bool) -> Self: ...
+    def set_source(self, value: str) -> Self: ...
+    def on_value_change(self, handler: Callable[[UIEventLike], None]) -> Self: ...
+    def set_value(self, value: object) -> Self: ...
+    def open(self) -> None: ...
+    def close(self) -> None: ...
+    def deactivate(self) -> None: ...
+
+
+class UIFactoryLike(Protocol):
+    def column(self) -> UIElementLike: ...
+    def row(self) -> UIElementLike: ...
+    def card(self) -> UIElementLike: ...
+    def label(self, text: str = "") -> UIElementLike: ...
+    def code(self, content: str) -> UIElementLike: ...
+    def element(self, tag: str) -> UIElementLike: ...
+    def button(self, text: str, on_click=None, **kwargs) -> UIElementLike: ...
+    def tabs(self) -> UIElementLike: ...
+    def tab(self, name: str, *, label: str = "") -> UIElementLike: ...
+    def tab_panels(self, tab_bar: UIElementLike, *, value: UIElementLike) -> UIElementLike: ...
+    def tab_panel(self, name: str) -> UIElementLike: ...
+    def textarea(self, *, label: str = "", placeholder: str = "") -> UIElementLike: ...
+    def select(self, options, *, value=None, label: str = "", on_change=None) -> UIElementLike: ...
+    def input(self, *, label: str = "", placeholder: str = "") -> UIElementLike: ...
+    def switch(self, text: str, *, value: bool = False) -> UIElementLike: ...
+    def table(self, *, columns, rows, row_key: str) -> UIElementLike: ...
+    def dialog(self) -> UIElementLike: ...
+    def separator(self) -> UIElementLike: ...
+
+
+def _render_page_intro(ui: UIFactoryLike, title: str, description: str, kicker: str) -> None:
     with ui.column().classes("gap-1 mb-1"):
         ui.label(kicker).classes("cb-kicker")
         ui.label(title).classes("text-3xl font-black tracking-tight text-slate-900")
         ui.label(description).classes("text-base cb-muted max-w-3xl")
 
 
-def _render_card_title(ui: Any, title: str, detail: str = "") -> None:
+def _render_card_title(ui: UIFactoryLike, title: str, detail: str = "") -> None:
     with ui.column().classes("gap-1 mb-3"):
         ui.label(title).classes("cb-section-title")
         if detail:
             ui.label(detail).classes("text-sm cb-muted")
 
 
-def _render_code_block(ui: Any, content: str, extra_classes: str = "") -> None:
+def _render_code_block(ui: UIFactoryLike, content: str, extra_classes: str = "") -> None:
     ui.code(content or "暂无数据").classes(f"cb-code w-full {extra_classes}".strip())
 
 
-def _responsive_grid(ui: Any, classes: str):
+def _responsive_grid(ui: UIFactoryLike, classes: str) -> UIElementLike:
     return ui.element("div").classes(f"grid w-full gap-4 {classes}".strip())
 
 
-def _render_meta_line(ui: Any, text: str) -> None:
+def _render_meta_line(ui: UIFactoryLike, text: str) -> None:
     ui.label(text).classes("text-sm cb-muted")
 
 
@@ -50,7 +92,7 @@ def _severity_variant(text: str) -> tuple[str, str]:
     return "cb-chip cb-chip-ok", "正常"
 
 
-def _render_session_summary_cards(ui: Any, model: WebConsoleViewModel, on_select_session) -> None:
+def _render_session_summary_cards(ui: UIFactoryLike, model: WebConsoleViewModel, on_select_session) -> None:
     with _responsive_grid(ui, "grid-cols-1 lg:grid-cols-2"):
         for row in model.session_rows:
             selected = row.name == model.selected_session_name
@@ -71,7 +113,7 @@ def _render_session_summary_cards(ui: Any, model: WebConsoleViewModel, on_select
                             ui.label(str(value)).classes("text-base font-bold text-slate-900")
 
 
-def _render_task_summary_cards(ui: Any, model: WebConsoleViewModel, on_select_task) -> None:
+def _render_task_summary_cards(ui: UIFactoryLike, model: WebConsoleViewModel, on_select_task) -> None:
     with ui.column().classes("w-full gap-3"):
         for task in model.tasks:
             with ui.card().classes("cb-soft-card w-full p-4 shadow-none"):
@@ -87,7 +129,7 @@ def _render_task_summary_cards(ui: Any, model: WebConsoleViewModel, on_select_ta
                     ).props("color=primary unelevated" if task.task_id == model.selected_task_id else "outline")
 
 
-def _render_detail_tabs(ui: Any, tabs: list[tuple[str, str, str]], code_classes: str = "") -> None:
+def _render_detail_tabs(ui: UIFactoryLike, tabs: list[tuple[str, str, str]], code_classes: str = "") -> None:
     with ui.tabs().classes("w-full") as tab_bar:
         tab_items = []
         for name, label, _content in tabs:
@@ -103,7 +145,7 @@ def _render_detail_tabs(ui: Any, tabs: list[tuple[str, str, str]], code_classes:
 
 
 def render_home_section(
-    ui: Any,
+    ui: UIFactoryLike,
     model: WebConsoleViewModel,
     on_run_action,
     on_submit_task,
@@ -237,7 +279,7 @@ def render_home_section(
                 ).props("color=primary unelevated")
 
 
-def render_issues_section(ui: Any, model: WebConsoleViewModel, on_run_repair_command) -> None:
+def render_issues_section(ui: UIFactoryLike, model: WebConsoleViewModel, on_run_repair_command) -> None:
     with ui.element("section").props(f"id={ISSUES_PAGE.anchor}").classes("w-full"):
         _render_page_intro(ui, ISSUES_PAGE.title, ISSUES_PAGE.description, "Health")
         with ui.card().classes("cb-card w-full p-5"):
@@ -272,7 +314,7 @@ def render_issues_section(ui: Any, model: WebConsoleViewModel, on_run_repair_com
 
 
 def render_sessions_section(
-    ui: Any,
+    ui: UIFactoryLike,
     model: WebConsoleViewModel,
     on_select_session,
     on_set_session_page,
@@ -447,7 +489,7 @@ def render_sessions_section(
 
 
 def render_diagnostics_section(
-    ui: Any,
+    ui: UIFactoryLike,
     model: WebConsoleViewModel,
     on_set_checks_page,
     on_switch_bridge_agent,

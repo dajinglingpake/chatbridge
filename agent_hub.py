@@ -12,6 +12,8 @@ from typing import Any
 
 from agent_backends import DEFAULT_BACKEND_KEY, BackendContext, build_backend_registry, supported_backend_keys
 from bridge_config import BridgeConfig
+from core.json_store import load_json, save_json
+from core.state_models import AgentRuntimeState, HubTask, IpcRequestEnvelope, IpcResponseEnvelope
 from core.weixin_notifier import broadcast_weixin_notice_by_kind, build_task_followup_hint
 from local_ipc import REQUEST_DIR, ensure_ipc_dirs, mark_processed, read_request, write_response
 from core.platform_compat import creationflags, resolve_command
@@ -54,6 +56,7 @@ def normalize_backend(value: str) -> str:
     backend = (value or DEFAULT_BACKEND_KEY).strip().lower()
     return backend if backend in SUPPORTED_BACKENDS else DEFAULT_BACKEND_KEY
 
+
 @dataclass
 class AgentConfig:
     id: str
@@ -64,6 +67,24 @@ class AgentConfig:
     model: str = ""
     prompt_prefix: str = ""
     enabled: bool = True
+
+
+def _normalize_agent(raw: object) -> AgentConfig | None:
+    if not isinstance(raw, dict):
+        return None
+    agent_id = str(raw.get("id") or "").strip()
+    if not agent_id:
+        return None
+    return AgentConfig(
+        id=agent_id,
+        name=str(raw.get("name") or agent_id).strip() or agent_id,
+        workdir=_to_abs_path(str(raw.get("workdir") or ""), WORKSPACE_DIR),
+        session_file=_to_abs_path(str(raw.get("session_file") or ""), SESSION_DIR / f"{agent_id}.txt"),
+        backend=normalize_backend(str(raw.get("backend") or DEFAULT_BACKEND_KEY)),
+        model=str(raw.get("model") or "").strip(),
+        prompt_prefix=str(raw.get("prompt_prefix") or "").strip(),
+        enabled=bool(raw.get("enabled", True)),
+    )
 
 
 @dataclass
@@ -85,14 +106,27 @@ class HubConfig:
             )
             cfg.save()
             return cfg
-        raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        raw["agents"] = [AgentConfig(**a) for a in raw.get("agents", [])]
+        raw = load_json(CONFIG_PATH, None, expect_type=dict)
+        if raw is None:
+            SESSION_DIR.mkdir(parents=True, exist_ok=True)
+            cfg = cls(
+                agents=[
+                    AgentConfig("main", "默认会话", str(WORKSPACE_DIR), str(SESSION_DIR / "main.txt")),
+                ]
+            )
+            cfg.save()
+            return cfg
+        raw["agents"] = [agent for item in raw.get("agents", []) if (agent := _normalize_agent(item)) is not None]
         raw.pop("host", None)
         raw.pop("port", None)
         raw.pop("auto_open_browser", None)
         raw["codex_command"] = resolve_command(str(raw.get("codex_command") or DEFAULT_BACKEND_KEY))
         raw["claude_command"] = resolve_command(str(raw.get("claude_command") or "claude"))
         raw["opencode_command"] = resolve_command(str(raw.get("opencode_command") or "opencode"))
+        if not raw["agents"]:
+            raw["agents"] = [
+                AgentConfig("main", "默认会话", str(WORKSPACE_DIR), str(SESSION_DIR / "main.txt")),
+            ]
         for agent in raw["agents"]:
             agent.name = (agent.name or "默认会话").strip()
             agent.workdir = _to_abs_path(agent.workdir, WORKSPACE_DIR)
@@ -107,8 +141,7 @@ class HubConfig:
             agent["workdir"] = _to_rel_path(str(agent.get("workdir") or WORKSPACE_DIR))
             agent["session_file"] = _to_rel_path(str(agent.get("session_file") or (SESSION_DIR / "main.txt")))
             agent["backend"] = normalize_backend(str(agent.get("backend") or DEFAULT_BACKEND_KEY))
-        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        CONFIG_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        save_json(CONFIG_PATH, data)
 
 
 class MultiCodexHub:
@@ -116,9 +149,9 @@ class MultiCodexHub:
         self.config = config
         self.backend_registry = build_backend_registry()
         self.lock = threading.RLock()
-        self.tasks: list[dict[str, Any]] = []
-        self.runtimes: dict[str, dict[str, Any]] = {}
-        self.queues: dict[str, queue.Queue[dict[str, Any]]] = {}
+        self.tasks: list[HubTask] = []
+        self.runtimes: dict[str, AgentRuntimeState] = {}
+        self.queues: dict[str, queue.Queue[HubTask]] = {}
         self.started_workers: set[str] = set()
         self._restore_previous_state()
         for agent in self.config.agents:
@@ -126,40 +159,31 @@ class MultiCodexHub:
         self._save_state()
 
     def _restore_previous_state(self) -> None:
-        if not STATE_PATH.exists():
+        previous = load_json(STATE_PATH, None, expect_type=dict)
+        if previous is None:
             return
-        try:
-            previous = json.loads(STATE_PATH.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return
-        for task in previous.get("tasks", []):
-            if not isinstance(task, dict):
+        for raw_task in previous.get("tasks", []):
+            task = HubTask.from_dict(raw_task, default_backend=DEFAULT_BACKEND_KEY)
+            if task is None:
                 continue
-            if task.get("status") == "running":
-                task["status"] = "unknown_after_restart"
-                task["error"] = "Hub restarted while this task was running."
-                task["finished_at"] = now_iso()
-            if not task.get("backend"):
-                task["backend"] = DEFAULT_BACKEND_KEY
+            task.backend = normalize_backend(task.backend)
+            if task.status == "running":
+                task.status = "unknown_after_restart"
+                task.error = "Hub restarted while this task was running."
+                task.finished_at = now_iso()
             self.tasks.append(task)
-        for agent in previous.get("agents", []):
-            agent_id = agent.get("id")
-            runtime = agent.get("runtime")
-            if isinstance(agent_id, str) and isinstance(runtime, dict):
-                self.runtimes[agent_id] = runtime
+        for raw_agent in previous.get("agents", []):
+            if not isinstance(raw_agent, dict):
+                continue
+            agent_id = str(raw_agent.get("id") or "").strip()
+            if not agent_id:
+                continue
+            self.runtimes[agent_id] = AgentRuntimeState.from_dict(raw_agent.get("runtime"), now=now_iso())
 
     def _ensure_agent(self, agent: AgentConfig) -> None:
         self.runtimes.setdefault(
             agent.id,
-            {
-                "status": "idle",
-                "queue_size": 0,
-                "success_count": 0,
-                "failure_count": 0,
-                "last_output": "",
-                "last_error": "",
-                "updated_at": now_iso(),
-            },
+            AgentRuntimeState(updated_at=now_iso()),
         )
         self.queues.setdefault(agent.id, queue.Queue())
         if agent.id not in self.started_workers:
@@ -167,15 +191,15 @@ class MultiCodexHub:
             self.started_workers.add(agent.id)
 
     def list_agents(self) -> list[dict[str, Any]]:
-        return [{**asdict(agent), "runtime": dict(self.runtimes.get(agent.id, {}))} for agent in self.config.agents]
+        return [{**asdict(agent), "runtime": self.runtimes.get(agent.id, AgentRuntimeState()).to_dict()} for agent in self.config.agents]
 
     def list_tasks(self) -> list[dict[str, Any]]:
-        return sorted(self.tasks, key=lambda x: x["created_at"], reverse=True)[:50]
+        return [task.to_dict() for task in sorted(self.tasks, key=lambda item: item.created_at, reverse=True)[:50]]
 
     def get_task(self, task_id: str) -> dict[str, Any] | None:
         for task in self.tasks:
-            if task["id"] == task_id:
-                return dict(task)
+            if task.id == task_id:
+                return task.to_dict()
         return None
 
     def create_or_update_agent(self, payload: dict[str, Any]) -> AgentConfig:
@@ -225,14 +249,14 @@ class MultiCodexHub:
             bridge_agent_id = BridgeConfig.load().backend_id.strip()
             if bridge_agent_id and bridge_agent_id == cleaned_id:
                 raise ValueError(f"agent is in use by weixin bridge: {cleaned_id}")
-            runtime = self.runtimes.get(cleaned_id) or {}
-            if str(runtime.get("status") or "") == "running" or int(runtime.get("queue_size") or 0) > 0:
+            runtime = self.runtimes.get(cleaned_id) or AgentRuntimeState()
+            if runtime.status == "running" or runtime.queue_size > 0:
                 raise ValueError(f"agent still has active work: {cleaned_id}")
             self.config.agents = [item for item in self.config.agents if item.id != cleaned_id]
             self.queues.pop(cleaned_id, None)
             self.runtimes.pop(cleaned_id, None)
             self.started_workers.discard(cleaned_id)
-            self.tasks = [task for task in self.tasks if str(task.get('agent_id') or '') != cleaned_id]
+            self.tasks = [task for task in self.tasks if task.agent_id != cleaned_id]
             self.config.save()
             self._save_state()
 
@@ -251,29 +275,24 @@ class MultiCodexHub:
         agent = next((a for a in self.config.agents if a.id == agent_id and a.enabled), None)
         if agent is None:
             raise ValueError(f"agent not found or disabled: {agent_id}")
-        task = {
-            "id": f"task-{uuid.uuid4().hex[:10]}",
-            "agent_id": agent.id,
-            "agent_name": agent.name,
-            "backend": normalize_backend(backend or agent.backend),
-            "source": source,
-            "sender_id": sender_id,
-            "prompt": prompt,
-            "status": "queued",
-            "created_at": now_iso(),
-            "started_at": "",
-            "finished_at": "",
-            "output": "",
-            "error": "",
-            "session_id": "",
-            "session_name": session_name.strip(),
-        }
+        task = HubTask(
+            id=f"task-{uuid.uuid4().hex[:10]}",
+            agent_id=agent.id,
+            agent_name=agent.name,
+            backend=normalize_backend(backend or agent.backend),
+            source=source,
+            sender_id=sender_id,
+            prompt=prompt,
+            status="queued",
+            created_at=now_iso(),
+            session_name=session_name.strip(),
+        )
         with self.lock:
             self.tasks.append(task)
             self.queues[agent.id].put(task)
-            self.runtimes[agent.id]["queue_size"] = self.queues[agent.id].qsize()
+            self.runtimes[agent.id].queue_size = self.queues[agent.id].qsize()
             self._save_state()
-        return task
+        return task.to_dict()
 
     def handle_wechat_message(self, payload: dict[str, Any]) -> dict[str, Any]:
         preferred = (payload.get("preferred_agent_id") or "").strip()
@@ -298,51 +317,54 @@ class MultiCodexHub:
                 self._run_task(agent_id, task)
             finally:
                 with self.lock:
-                    self.runtimes[agent_id]["queue_size"] = q.qsize()
-                    self.runtimes[agent_id]["updated_at"] = now_iso()
+                    runtime = self.runtimes[agent_id]
+                    runtime.queue_size = q.qsize()
+                    runtime.updated_at = now_iso()
                     self._save_state()
                 q.task_done()
 
-    def _run_task(self, agent_id: str, task: dict[str, Any]) -> None:
+    def _run_task(self, agent_id: str, task: HubTask) -> None:
         agent = next(a for a in self.config.agents if a.id == agent_id)
         with self.lock:
-            task["status"] = "running"
-            task["started_at"] = now_iso()
-            self.runtimes[agent_id]["status"] = "running"
+            task.status = "running"
+            task.started_at = now_iso()
+            self.runtimes[agent_id].status = "running"
             self._save_state()
         try:
-            result = self._invoke_backend(agent, task["prompt"], task.get("session_name", ""), task.get("backend", DEFAULT_BACKEND_KEY))
+            result = self._invoke_backend(agent, task.prompt, task.session_name, task.backend)
             with self.lock:
-                task["status"] = "succeeded"
-                task["finished_at"] = now_iso()
-                task["output"] = result["output"]
-                task["session_id"] = result["session_id"]
-                self.runtimes[agent_id]["status"] = "idle"
-                self.runtimes[agent_id]["success_count"] += 1
-                self.runtimes[agent_id]["last_output"] = result["output"][:1800]
-                self.runtimes[agent_id]["last_error"] = ""
+                runtime = self.runtimes[agent_id]
+                task.status = "succeeded"
+                task.finished_at = now_iso()
+                task.output = result["output"]
+                task.session_id = result["session_id"]
+                runtime.status = "idle"
+                runtime.success_count += 1
+                runtime.last_output = result["output"][:1800]
+                runtime.last_error = ""
                 self._save_state()
             self._notify_task_result(task, succeeded=True)
         except Exception as exc:  # noqa: BLE001
             with self.lock:
-                task["status"] = "failed"
-                task["finished_at"] = now_iso()
-                task["error"] = str(exc)
-                self.runtimes[agent_id]["status"] = "failed"
-                self.runtimes[agent_id]["failure_count"] += 1
-                self.runtimes[agent_id]["last_error"] = str(exc)
+                runtime = self.runtimes[agent_id]
+                task.status = "failed"
+                task.finished_at = now_iso()
+                task.error = str(exc)
+                runtime.status = "failed"
+                runtime.failure_count += 1
+                runtime.last_error = str(exc)
                 self._save_state()
             self._notify_task_result(task, succeeded=False)
 
-    def _notify_task_result(self, task: dict[str, Any], succeeded: bool) -> None:
-        if str(task.get("source") or "").strip().lower() == "wechat":
+    def _notify_task_result(self, task: HubTask, succeeded: bool) -> None:
+        if task.source.strip().lower() == "wechat":
             return
-        task_id = str(task.get("id") or "")
-        agent_name = str(task.get("agent_name") or task.get("agent_id") or "")
-        session_name = str(task.get("session_name") or "default")
-        backend = str(task.get("backend") or DEFAULT_BACKEND_KEY)
+        task_id = task.id
+        agent_name = task.agent_name or task.agent_id
+        session_name = task.session_name or "default"
+        backend = task.backend or DEFAULT_BACKEND_KEY
         if succeeded:
-            output = str(task.get("output") or "").strip() or "(empty)"
+            output = task.output.strip() or "(empty)"
             detail = (
                 f"任务 ID: {task_id}\n"
                 f"Agent: {agent_name}\n"
@@ -354,7 +376,7 @@ class MultiCodexHub:
             )
             broadcast_weixin_notice_by_kind("task", "任务执行完成", detail)
             return
-        error_text = str(task.get("error") or "unknown error").strip()
+        error_text = task.error.strip() or "unknown error"
         detail = (
             f"任务 ID: {task_id}\n"
             f"Agent: {agent_name}\n"
@@ -387,23 +409,19 @@ class MultiCodexHub:
     def _save_state(self) -> None:
         ensure_ipc_dirs()
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        STATE_PATH.write_text(
-            json.dumps(
-                {
-                    "generated_at": now_iso(),
-                    "config": {
-                        "codex_command": self.config.codex_command,
-                        "claude_command": self.config.claude_command,
-                        "opencode_command": self.config.opencode_command,
-                    },
-                    "agents": self.list_agents(),
-                    "tasks": self.list_tasks(),
-                    "external_agent_processes": discover_external_agent_processes(),
+        save_json(
+            STATE_PATH,
+            {
+                "generated_at": now_iso(),
+                "config": {
+                    "codex_command": self.config.codex_command,
+                    "claude_command": self.config.claude_command,
+                    "opencode_command": self.config.opencode_command,
                 },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
+                "agents": self.list_agents(),
+                "tasks": self.list_tasks(),
+                "external_agent_processes": discover_external_agent_processes(),
+            },
         )
 
     def process_ipc_once(self) -> None:
@@ -414,52 +432,56 @@ class MultiCodexHub:
                 response = self._dispatch_request(request)
             except Exception as exc:  # noqa: BLE001
                 request_id = request_path.stem
-                response = {"ok": False, "error": str(exc)}
+                response = IpcResponseEnvelope(ok=False, error=str(exc))
             else:
-                request_id = str(request.get("id") or request_path.stem)
+                request_id = request.id or request_path.stem
             write_response(request_id, response)
             mark_processed(request_path)
 
-    def _dispatch_request(self, request: dict[str, Any]) -> dict[str, Any]:
-        action = str(request.get("action") or "").strip()
-        payload = request.get("payload") or {}
+    def _dispatch_request(self, request: IpcRequestEnvelope) -> IpcResponseEnvelope:
+        action = request.action
+        payload = request.payload
         if action == "submit_task":
-            return {
-                "ok": True,
-                "task": self.submit_task(
+            return IpcResponseEnvelope(
+                ok=True,
+                payload={
+                    "task": self.submit_task(
                     str(payload.get("agent_id") or ""),
                     str(payload.get("prompt") or ""),
                     str(payload.get("source") or "desktop"),
                     str(payload.get("sender_id") or ""),
                     str(payload.get("session_name") or ""),
                     str(payload.get("backend") or ""),
-                ),
-            }
+                    ),
+                },
+            )
         if action == "get_task":
             task = self.get_task(str(payload.get("task_id") or ""))
             if task is None:
-                return {"ok": False, "error": "task not found"}
-            return {"ok": True, "task": task}
+                return IpcResponseEnvelope(ok=False, error="task not found")
+            return IpcResponseEnvelope(ok=True, payload={"task": task})
         if action == "wechat_message":
-            return {"ok": True, "task": self.handle_wechat_message(payload)}
+            return IpcResponseEnvelope(ok=True, payload={"task": self.handle_wechat_message(payload)})
         if action == "save_agent":
-            return {"ok": True, "agent": asdict(self.create_or_update_agent(payload))}
+            return IpcResponseEnvelope(ok=True, payload={"agent": asdict(self.create_or_update_agent(payload))})
         if action == "delete_agent":
             self.delete_agent(str(payload.get("agent_id") or ""))
-            return {"ok": True}
+            return IpcResponseEnvelope(ok=True)
         if action == "state":
-            return {
-                "ok": True,
-                "generated_at": now_iso(),
-                "config": {
-                    "codex_command": self.config.codex_command,
-                    "claude_command": self.config.claude_command,
-                    "opencode_command": self.config.opencode_command,
+            return IpcResponseEnvelope(
+                ok=True,
+                payload={
+                    "generated_at": now_iso(),
+                    "config": {
+                        "codex_command": self.config.codex_command,
+                        "claude_command": self.config.claude_command,
+                        "opencode_command": self.config.opencode_command,
+                    },
+                    "agents": self.list_agents(),
+                    "tasks": self.list_tasks(),
+                    "external_agent_processes": discover_external_agent_processes(),
                 },
-                "agents": self.list_agents(),
-                "tasks": self.list_tasks(),
-                "external_agent_processes": discover_external_agent_processes(),
-            }
+            )
         raise ValueError(f"unsupported action: {action}")
 
 

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import json
 import locale
 import os
 from pathlib import Path
 from typing import Any
+
+from core.json_store import load_json
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -62,8 +63,7 @@ def load_messages(language: str) -> dict[str, str]:
 
 
 def _read_locale_file(path: Path) -> dict[str, str]:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
+    data = load_json(path, {}, expect_type=dict)
+    if not isinstance(data, dict):
         return {}
     return {str(key): str(value) for key, value in data.items()}

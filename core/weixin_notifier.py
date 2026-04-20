@@ -4,13 +4,14 @@ import base64
 import json
 import random
 import time
-import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
 from bridge_config import BridgeConfig
-from core.accounts import DEFAULT_ILINK_BASE_URL
+from core.accounts import AccountFilePayload, DEFAULT_ILINK_BASE_URL, load_account_file_payload
+from core.http_json import request_json
+from core.json_store import load_json
 from runtime_stack import BRIDGE_CONVERSATIONS_PATH
 
 
@@ -53,10 +54,10 @@ def broadcast_weixin_notice_by_kind(kind: str, title: str, detail: str, config: 
     if not recipients:
         return NoticeResult(sent_count=0, recipient_count=0)
     account = _load_account_payload(Path(cfg.account_file))
-    token = str(account.get("token") or "").strip()
+    token = account.token
     if not token:
         return NoticeResult(sent_count=0, recipient_count=len(recipients), error="active account token is missing")
-    base_url = str(account.get("baseUrl") or DEFAULT_ILINK_BASE_URL).strip() or DEFAULT_ILINK_BASE_URL
+    base_url = account.base_url or DEFAULT_ILINK_BASE_URL
     message = _build_notice_text(title, detail)
     sent_count = 0
     last_error = ""
@@ -84,22 +85,12 @@ def build_task_followup_hint(task_id: str = "", session_name: str = "") -> str:
     return "\n".join(lines)
 
 
-def _load_account_payload(account_path: Path) -> dict[str, object]:
-    if not account_path.exists():
-        return {}
-    try:
-        return json.loads(account_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+def _load_account_payload(account_path: Path) -> AccountFilePayload:
+    return load_account_file_payload(account_path)
 
 
 def _load_recipient_ids() -> list[str]:
-    if not BRIDGE_CONVERSATIONS_PATH.exists():
-        return []
-    try:
-        payload = json.loads(BRIDGE_CONVERSATIONS_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
+    payload = load_json(BRIDGE_CONVERSATIONS_PATH, {}, expect_type=dict)
     if not isinstance(payload, dict):
         return []
     return [str(sender_id).strip() for sender_id in payload.keys() if str(sender_id).strip()]
@@ -134,9 +125,4 @@ def _send_text(base_url: str, token: str, to_user_id: str, text: str) -> None:
         headers=headers,
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=15) as response:
-            json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
+    request_json(request, timeout=15)

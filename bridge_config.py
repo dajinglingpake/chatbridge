@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from agent_backends import DEFAULT_BACKEND_KEY, supported_backend_keys
+from core.json_store import load_json, save_json
 
 APP_DIR = Path(__file__).resolve().parent
 WEIXIN_ACCOUNTS_DIR = APP_DIR / "accounts"
@@ -141,12 +142,7 @@ def build_account_profiles(raw: dict[str, object]) -> tuple[list[WeixinAccountPr
 
 
 def load_account_runtime_state() -> dict[str, object]:
-    if not ACCOUNT_STATE_PATH.exists():
-        return {}
-    try:
-        raw = json.loads(ACCOUNT_STATE_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+    raw = load_json(ACCOUNT_STATE_PATH, {}, expect_type=dict)
     return raw if isinstance(raw, dict) else {}
 
 
@@ -176,7 +172,12 @@ class BridgeConfig:
             cfg._sync_active_account_fields()
             cfg.save()
             return cfg
-        raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        raw = load_json(CONFIG_PATH, None, expect_type=dict)
+        if raw is None:
+            cfg = cls()
+            cfg._sync_active_account_fields()
+            cfg.save()
+            return cfg
         accounts, active_account_id = build_account_profiles(raw)
         raw["accounts"] = accounts
         raw["active_account_id"] = active_account_id
@@ -242,19 +243,13 @@ class BridgeConfig:
             "auto_reply_prefix": self.auto_reply_prefix,
             "ignore_prefixes": list(self.ignore_prefixes),
         }
-        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        CONFIG_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        save_json(CONFIG_PATH, data)
         self._save_account_runtime_state()
 
     def _save_account_runtime_state(self) -> None:
-        ACCOUNT_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        ACCOUNT_STATE_PATH.write_text(
-            json.dumps(
-                {
-                    "active_account_id": self.active_account_id,
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
+        save_json(
+            ACCOUNT_STATE_PATH,
+            {
+                "active_account_id": self.active_account_id,
+            },
         )

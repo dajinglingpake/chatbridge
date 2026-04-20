@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
+
+from core.state_models import HubStateSnapshot, HubTask
 
 
 @dataclass
@@ -23,7 +25,7 @@ class SessionDetail:
 
 @dataclass
 class SessionAggregate:
-    last_task: dict[str, Any]
+    last_task: HubTask
     queue_size: int = 0
     success_count: int = 0
     failure_count: int = 0
@@ -59,31 +61,35 @@ def session_file_for_name(session_dir: Path, session_name: str) -> Path:
     return session_dir / f"main__{safe}.txt"
 
 
-def normalize_task_session_name(task: dict[str, Any]) -> str:
-    return str(task.get("session_name") or "default")
+def _hub_tasks(hub_state: HubStateSnapshot) -> list[HubTask]:
+    return hub_state.tasks
 
 
-def build_hub_signature(hub_state: dict[str, Any]) -> tuple:
+def normalize_task_session_name(task: HubTask) -> str:
+    return task.session_name or "default"
+
+
+def build_hub_signature(hub_state: HubStateSnapshot) -> tuple:
     agents = tuple(
         (
-            agent.get("id"),
-            (agent.get("runtime") or {}).get("status"),
-            (agent.get("runtime") or {}).get("queue_size"),
-            (agent.get("runtime") or {}).get("success_count"),
-            (agent.get("runtime") or {}).get("failure_count"),
-            (agent.get("runtime") or {}).get("updated_at"),
+            agent.id,
+            agent.runtime.status,
+            agent.runtime.queue_size,
+            agent.runtime.success_count,
+            agent.runtime.failure_count,
+            agent.runtime.updated_at,
         )
-        for agent in hub_state.get("agents", [])
+        for agent in hub_state.agents
     )
     tasks = tuple(
         (
-            task.get("id"),
-            task.get("status"),
-            task.get("finished_at"),
-            task.get("session_name"),
-            task.get("agent_id"),
+            task.id,
+            task.status,
+            task.finished_at,
+            task.session_name,
+            task.agent_id,
         )
-        for task in hub_state.get("tasks", [])[:20]
+        for task in _hub_tasks(hub_state)[:20]
     )
     return agents, tasks
 
@@ -102,13 +108,13 @@ def build_session_dir_signature(session_dir: Path) -> tuple:
     )
 
 
-def build_session_rows(hub_state: dict[str, Any], session_dir: Path) -> list[SessionRow]:
+def build_session_rows(hub_state: HubStateSnapshot, session_dir: Path) -> list[SessionRow]:
     cache_key = (build_hub_signature(hub_state), build_session_dir_signature(session_dir))
     cached_rows = _SESSION_ROWS_CACHE.get(cache_key)
     if cached_rows is not None:
         return cached_rows
 
-    tasks = hub_state.get("tasks", [])
+    tasks = _hub_tasks(hub_state)
     session_names: set[str] = {"default"}
     aggregates: dict[str, SessionAggregate] = {}
     for task in tasks:
@@ -118,7 +124,7 @@ def build_session_rows(hub_state: dict[str, Any], session_dir: Path) -> list[Ses
         if aggregate is None:
             aggregate = SessionAggregate(last_task=task)
             aggregates[session_name] = aggregate
-        status = str(task.get("status") or "")
+        status = task.status
         if status in {"queued", "running"}:
             aggregate.queue_size += 1
         if status == "running":
@@ -146,7 +152,7 @@ def build_session_rows(hub_state: dict[str, Any], session_dir: Path) -> list[Ses
             if queue_size:
                 status = "running" if aggregate.has_running else "queued"
             else:
-                status = str(aggregate.last_task.get("status") or "idle")
+                status = aggregate.last_task.status or "idle"
         rows.append(
             SessionRow(
                 name=session_name,
@@ -162,7 +168,7 @@ def build_session_rows(hub_state: dict[str, Any], session_dir: Path) -> list[Ses
 
 
 def build_session_detail(
-    hub_state: dict[str, Any],
+    hub_state: HubStateSnapshot,
     session_dir: Path,
     session_name: str,
     task_status_text: Callable[[str], str] | None = None,
@@ -173,8 +179,8 @@ def build_session_detail(
         empty_conversation = t("ui.agent.select_preview") if t else "这里会显示该会话最近几轮对话。"
         return SessionDetail(rows=[], detail_lines=[empty_detail], conversation_lines=[empty_conversation])
 
-    all_tasks = hub_state.get("tasks", [])
-    matching_tasks: list[dict[str, Any]] = []
+    all_tasks = _hub_tasks(hub_state)
+    matching_tasks: list[HubTask] = []
     queue_size = 0
     success_count = 0
     failure_count = 0
@@ -183,7 +189,7 @@ def build_session_detail(
         if normalize_task_session_name(task) != session_name:
             continue
         matching_tasks.append(task)
-        status = str(task.get("status") or "")
+        status = task.status
         if status in {"queued", "running"}:
             queue_size += 1
         if status == "running":
@@ -192,7 +198,7 @@ def build_session_detail(
             success_count += 1
         elif status == "failed":
             failure_count += 1
-    tasks = sorted(matching_tasks[:8], key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    tasks = sorted(matching_tasks[:8], key=lambda item: item.created_at, reverse=True)
 
     selected_session_file = session_file_for_name(session_dir, session_name)
     selected_session_id = selected_session_file.read_text(encoding="utf-8").strip() if selected_session_file.exists() else ""
@@ -200,7 +206,7 @@ def build_session_detail(
     if queue_size:
         status = "running" if has_running else "queued"
     elif tasks:
-        status = str(tasks[0].get("status") or "idle")
+        status = tasks[0].status or "idle"
     else:
         status = "idle"
 
@@ -228,34 +234,34 @@ def build_session_detail(
         detail_lines.extend(["", t("ui.agent.detail.recent") if t else "最近任务:"])
         for task in tasks:
             detail_lines.append(
-                f"[{render_status(str(task.get('status') or 'idle'))}] {task.get('created_at')}  "
-                f"session={normalize_task_session_name(task)}  source={task.get('source') or '-'}"
+                f"[{render_status(task.status or 'idle')}] {task.created_at}  "
+                f"session={normalize_task_session_name(task)}  source={task.source or '-'}"
             )
-            detail_lines.append(str(task.get("prompt") or ""))
-            if task.get("output"):
-                detail_lines.append(f"output: {str(task.get('output'))[:240]}")
-            if task.get("error"):
-                detail_lines.append(f"error: {str(task.get('error'))[:240]}")
+            detail_lines.append(task.prompt or "")
+            if task.output:
+                detail_lines.append(f"output: {task.output[:240]}")
+            if task.error:
+                detail_lines.append(f"error: {task.error[:240]}")
             detail_lines.append("")
 
         conversation_lines = [t("ui.agent.preview.title") if t else "会话预览:"]
         for index, task in enumerate(reversed(tasks[-6:]), start=1):
             if t:
-                conversation_lines.append(t("ui.agent.preview.round", index=index, time=task.get("created_at")))
-                conversation_lines.append(t("ui.agent.preview.user", text=str(task.get("prompt") or "(empty)")[:320]))
-                if task.get("output"):
-                    conversation_lines.append(t("ui.agent.preview.assistant", text=str(task.get("output") or "")[:320]))
-                elif task.get("error"):
-                    conversation_lines.append(t("ui.agent.preview.error", text=str(task.get("error") or "")[:320]))
+                conversation_lines.append(t("ui.agent.preview.round", index=index, time=task.created_at))
+                conversation_lines.append(t("ui.agent.preview.user", text=(task.prompt or "(empty)")[:320]))
+                if task.output:
+                    conversation_lines.append(t("ui.agent.preview.assistant", text=task.output[:320]))
+                elif task.error:
+                    conversation_lines.append(t("ui.agent.preview.error", text=task.error[:320]))
                 else:
                     conversation_lines.append(t("ui.agent.preview.no_output"))
             else:
-                conversation_lines.append(f"第 {index} 轮 | {task.get('created_at')}")
-                conversation_lines.append(f"用户: {str(task.get('prompt') or '(empty)')[:320]}")
-                if task.get("output"):
-                    conversation_lines.append(f"Codex: {str(task.get('output') or '')[:320]}")
-                elif task.get("error"):
-                    conversation_lines.append(f"错误: {str(task.get('error') or '')[:320]}")
+                conversation_lines.append(f"第 {index} 轮 | {task.created_at}")
+                conversation_lines.append(f"用户: {(task.prompt or '(empty)')[:320]}")
+                if task.output:
+                    conversation_lines.append(f"Codex: {task.output[:320]}")
+                elif task.error:
+                    conversation_lines.append(f"错误: {task.error[:320]}")
                 else:
                     conversation_lines.append("Codex: (no output)")
             conversation_lines.append("")

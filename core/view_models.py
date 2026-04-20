@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable, TypeVar
 
 from bridge_config import BridgeConfig
 from core.accounts import build_account_options
@@ -11,9 +11,11 @@ from core.actions import RepairCommand, build_repair_command_models
 from core.app_state import build_badge, build_issues, build_overview_lines, build_quickstart_lines, build_summary_text, decide_primary_action
 from core.dashboard import DashboardState, load_dashboard_state
 from core.sessions import SessionRow, build_session_detail, build_session_rows
+from core.state_models import CheckSnapshot, HubStateSnapshot, HubTask, RuntimeSnapshot, WeixinBridgeRuntimeState
 
 
 Translator = Callable[..., str]
+ItemT = TypeVar("ItemT")
 
 
 @dataclass
@@ -194,7 +196,7 @@ def summarize_text(value: str, limit: int = 96) -> str:
     return f"{compact[: limit - 3]}..."
 
 
-def paginate_items(items: list[Any], page: int, page_size: int) -> tuple[list[Any], int, int]:
+def paginate_items(items: list[ItemT], page: int, page_size: int) -> tuple[list[ItemT], int, int]:
     total_count = len(items)
     normalized_page_size = max(1, int(page_size))
     total_pages = max(1, math.ceil(total_count / normalized_page_size)) if total_count else 1
@@ -205,9 +207,9 @@ def paginate_items(items: list[Any], page: int, page_size: int) -> tuple[list[An
 
 
 def build_home_view_model(
-    snapshot: Any,
-    checks: dict[str, Any],
-    bridge_state: dict[str, Any],
+    snapshot: RuntimeSnapshot,
+    checks: dict[str, CheckSnapshot],
+    bridge_state: WeixinBridgeRuntimeState,
     active_account_id: str,
     accounts_dir: Path,
     t: Translator,
@@ -230,7 +232,7 @@ def build_home_view_model(
 
 
 def build_session_detail_view_model(
-    hub_state: dict[str, Any],
+    hub_state: HubStateSnapshot,
     session_dir: Path,
     session_name: str,
     task_status_text: Callable[[str], str] | None = None,
@@ -245,9 +247,9 @@ def build_session_detail_view_model(
 
 
 def build_issue_panel_view_model(
-    snapshot: Any,
-    bridge_state: dict[str, Any],
-    checks: dict[str, Any],
+    snapshot: RuntimeSnapshot,
+    bridge_state: WeixinBridgeRuntimeState,
+    checks: dict[str, CheckSnapshot],
     t: Translator,
 ) -> IssuePanelViewModel:
     issues = build_issues(snapshot, bridge_state, checks, t)
@@ -288,7 +290,7 @@ def build_account_management_view_model(t: Translator, config: BridgeConfig | No
     return AccountManagementViewModel(active_account_id=config.active_account_id, options=options)
 
 
-def build_diagnostics_view_model(checks: dict[str, Any], diag_at: str, t: Translator) -> DiagnosticsViewModel:
+def build_diagnostics_view_model(checks: dict[str, CheckSnapshot], diag_at: str, t: Translator) -> DiagnosticsViewModel:
     ordered_keys = ["python", "winget", "nvm", "psutil", "node", "npm", "codex", "claude", "opencode", "weixin_account", "project_files"]
     check_models: list[CheckViewModel] = []
     lines: list[str] = []
@@ -397,24 +399,24 @@ def build_web_console_view_model_from_dashboard(
 
     agent_options: list[AgentOptionViewModel] = []
     agent_management: list[AgentManagementViewModel] = []
-    for agent in hub_state.get("agents") or []:
-        agent_id = str(agent.get("id") or "")
-        name = str(agent.get("name") or agent_id)
-        runtime = agent.get("runtime") or {}
+    for agent in hub_state.agents:
+        agent_id = agent.id
+        name = agent.name or agent_id
+        runtime = agent.runtime
         if agent_id:
             agent_options.append(AgentOptionViewModel(agent_id=agent_id, label=f"{name} ({agent_id})"))
             agent_management.append(
                 AgentManagementViewModel(
                     agent_id=agent_id,
                     name=name,
-                    workdir=str(agent.get("workdir") or ""),
-                    session_file=str(agent.get("session_file") or ""),
-                    backend=str(agent.get("backend") or ""),
-                    model=str(agent.get("model") or ""),
-                    prompt_prefix=str(agent.get("prompt_prefix") or ""),
-                    enabled=bool(agent.get("enabled", True)),
-                    runtime_status=str(runtime.get("status") or "idle"),
-                    queue_size=int(runtime.get("queue_size") or 0),
+                    workdir=agent.workdir,
+                    session_file=agent.session_file,
+                    backend=agent.backend,
+                    model=agent.model,
+                    prompt_prefix=agent.prompt_prefix,
+                    enabled=agent.enabled,
+                    runtime_status=runtime.status or "idle",
+                    queue_size=runtime.queue_size,
                 )
             )
     if not agent_options:
@@ -424,19 +426,19 @@ def build_web_console_view_model_from_dashboard(
     agent_management, agent_page, agent_total_pages = paginate_items(all_agent_management, agent_page, 10)
 
     external_agent_processes: list[ExternalAgentProcessViewModel] = []
-    for process in dashboard.external_agent_processes or hub_state.get("external_agent_processes") or []:
-        pid = int(process.get("pid") or 0)
+    for process in dashboard.external_agent_processes or hub_state.external_agent_processes:
+        pid = process.pid
         if pid <= 0:
             continue
-        name = str(process.get("name") or "-")
-        backend = str(process.get("backend") or "").strip().lower() or "unknown"
-        command_line = str(process.get("command_line") or "").strip() or name
+        name = process.name or "-"
+        backend = process.backend or "unknown"
+        command_line = process.command_line.strip() or name
         external_agent_processes.append(
             ExternalAgentProcessViewModel(
                 pid=pid,
                 name=name,
                 backend=backend,
-                session_hint=str(process.get("session_hint") or ""),
+                session_hint=process.session_hint,
                 command_line=command_line,
                 managed_label="外部 / 未接管",
             )
@@ -445,35 +447,35 @@ def build_web_console_view_model_from_dashboard(
 
     weixin_conversations: list[WeixinConversationBindingViewModel] = []
     if normalized_page_key == "sessions":
-        latest_task_by_sender: dict[str, dict[str, Any]] = {}
-        for task in hub_state.get("tasks") or []:
-            sender_id = str(task.get("sender_id") or "").strip()
+        latest_task_by_sender: dict[str, HubTask] = {}
+        for task in hub_state.tasks:
+            sender_id = task.sender_id.strip()
             if sender_id and sender_id not in latest_task_by_sender:
                 latest_task_by_sender[sender_id] = task
         for sender_id, binding in sorted((bridge_conversations or {}).items()):
-            if not isinstance(binding, dict):
-                continue
-            current_session = str(binding.get("current_session") or "default")
-            sessions = binding.get("sessions") or {}
-            if not isinstance(sessions, dict):
-                sessions = {}
-            current_meta = sessions.get(current_session) or {}
-            latest_task = latest_task_by_sender.get(str(sender_id), {})
+            current_session = binding.current_session
+            sessions = binding.sessions
+            current_meta = sessions.get(current_session)
+            latest_task = latest_task_by_sender.get(str(sender_id))
+            current_backend = (current_meta.backend if current_meta is not None else bridge_config.default_backend)
+            updated_at = "-"
+            if current_meta is not None:
+                updated_at = current_meta.updated_at or current_meta.created_at or "-"
             weixin_conversations.append(
                 WeixinConversationBindingViewModel(
                     sender_id=str(sender_id),
                     agent_id=str(bridge_config.backend_id or "main"),
                     current_session=current_session,
-                    current_backend=str(current_meta.get("backend") or bridge_config.default_backend),
+                    current_backend=current_backend,
                     session_count=len(sessions),
-                    updated_at=str(current_meta.get("updated_at") or current_meta.get("created_at") or "-"),
-                    latest_task_id=str(latest_task.get("id") or ""),
-                    latest_task_status=str(latest_task.get("status") or ""),
-                    latest_task_session=str(latest_task.get("session_name") or current_session),
+                    updated_at=updated_at,
+                    latest_task_id=latest_task.id if latest_task is not None else "",
+                    latest_task_status=latest_task.status if latest_task is not None else "",
+                    latest_task_session=(latest_task.session_name or current_session) if latest_task is not None else current_session,
                 )
             )
 
-    raw_tasks = list(hub_state.get("tasks") or [])
+    raw_tasks = list(hub_state.tasks)
     task_status_options: list[str] = []
     task_agent_options: list[str] = []
     task_backend_options: list[str] = []
@@ -488,9 +490,9 @@ def build_web_console_view_model_from_dashboard(
     task_detail_lines = ["先切换到会话模块查看任务详情。"] if normalized_page_key != "sessions" else ["先在上方选中一个任务。"]
     task_result_lines = ["这里会显示该任务的完整输出或错误。"]
     if normalized_page_key == "sessions":
-        task_status_options = sorted({str(task.get("status") or "") for task in raw_tasks if str(task.get("status") or "")})
-        task_agent_options = sorted({str(task.get("agent_name") or task.get("agent_id") or "") for task in raw_tasks if str(task.get("agent_name") or task.get("agent_id") or "")})
-        task_backend_options = sorted({str(task.get("backend") or "") for task in raw_tasks if str(task.get("backend") or "")})
+        task_status_options = sorted({task.status for task in raw_tasks if task.status})
+        task_agent_options = sorted({(task.agent_name or task.agent_id) for task in raw_tasks if (task.agent_name or task.agent_id)})
+        task_backend_options = sorted({task.backend for task in raw_tasks if task.backend})
 
         resolved_task_status = selected_task_status if selected_task_status in task_status_options else ""
         resolved_task_agent = selected_task_agent if selected_task_agent in task_agent_options else ""
@@ -500,10 +502,10 @@ def build_web_console_view_model_from_dashboard(
         filtered_raw_tasks = [
             task
             for task in raw_tasks
-            if (not resolved_session_name or str(task.get("session_name") or "default") == resolved_session_name)
-            and (not resolved_task_status or str(task.get("status") or "") == resolved_task_status)
-            and (not resolved_task_agent or str(task.get("agent_name") or task.get("agent_id") or "") == resolved_task_agent)
-            and (not resolved_task_backend or str(task.get("backend") or "") == resolved_task_backend)
+            if (not resolved_session_name or (task.session_name or "default") == resolved_session_name)
+            and (not resolved_task_status or task.status == resolved_task_status)
+            and (not resolved_task_agent or (task.agent_name or task.agent_id) == resolved_task_agent)
+            and (not resolved_task_backend or task.backend == resolved_task_backend)
         ]
         filtered_task_count = len(filtered_raw_tasks)
         if not filtered_raw_tasks:
@@ -513,36 +515,36 @@ def build_web_console_view_model_from_dashboard(
         for task in paged_raw_tasks:
             tasks.append(
                 TaskViewModel(
-                    task_id=str(task.get("id") or ""),
-                    created_at=str(task.get("created_at") or ""),
-                    agent_name=str(task.get("agent_name") or task.get("agent_id") or ""),
-                    backend=str(task.get("backend") or ""),
-                    status=str(task.get("status") or ""),
-                    session_name=str(task.get("session_name") or "default"),
-                    prompt_summary=summarize_text(str(task.get("prompt") or "")),
-                    result_summary=summarize_text(str(task.get("output") or task.get("error") or "")),
+                    task_id=task.id,
+                    created_at=task.created_at,
+                    agent_name=task.agent_name or task.agent_id,
+                    backend=task.backend,
+                    status=task.status,
+                    session_name=task.session_name or "default",
+                    prompt_summary=summarize_text(task.prompt),
+                    result_summary=summarize_text(task.output or task.error),
                 )
             )
         available_task_ids = {task.task_id for task in tasks if task.task_id}
         resolved_task_id = selected_task_id if selected_task_id in available_task_ids else ""
         if not resolved_task_id and tasks:
             resolved_task_id = tasks[0].task_id
-        selected_task = next((task for task in filtered_raw_tasks if str(task.get("id") or "") == resolved_task_id), None)
+        selected_task = next((task for task in filtered_raw_tasks if task.id == resolved_task_id), None)
         if selected_task is not None and load_task_detail:
             task_detail_lines = [
-                f"任务 ID: {selected_task.get('id') or ''}",
-                f"创建时间: {selected_task.get('created_at') or ''}",
-                f"完成时间: {selected_task.get('finished_at') or '-'}",
-                f"Agent: {selected_task.get('agent_name') or selected_task.get('agent_id') or ''}",
-                f"后端: {selected_task.get('backend') or ''}",
-                f"状态: {selected_task.get('status') or ''}",
-                f"会话: {selected_task.get('session_name') or 'default'}",
-                f"来源: {selected_task.get('source') or '-'}",
+                f"任务 ID: {selected_task.id}",
+                f"创建时间: {selected_task.created_at}",
+                f"完成时间: {selected_task.finished_at or '-'}",
+                f"Agent: {selected_task.agent_name or selected_task.agent_id}",
+                f"后端: {selected_task.backend}",
+                f"状态: {selected_task.status}",
+                f"会话: {selected_task.session_name or 'default'}",
+                f"来源: {selected_task.source or '-'}",
                 "",
                 "输入:",
-                str(selected_task.get("prompt") or "(empty)"),
+                selected_task.prompt or "(empty)",
             ]
-            task_result = str(selected_task.get("output") or selected_task.get("error") or "(empty)")
+            task_result = selected_task.output or selected_task.error or "(empty)"
             task_result_lines = [task_result]
         elif selected_task is not None:
             task_detail_lines = ["点击“加载任务详情”后再读取完整输入和输出。"]

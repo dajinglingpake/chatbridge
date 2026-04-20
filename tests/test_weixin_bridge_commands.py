@@ -5,6 +5,7 @@ import os
 import unittest
 
 from bridge_config import BridgeConfig
+from core.state_models import IpcResponseEnvelope
 from runtime_stack import BRIDGE_CONVERSATIONS_PATH
 from weixin_hub_bridge import WeixinBridge
 
@@ -12,9 +13,10 @@ from weixin_hub_bridge import WeixinBridge
 class FakeBridge(WeixinBridge):
     def __init__(self, config: BridgeConfig) -> None:
         super().__init__(config)
-        self._state_payload = {
-            "ok": True,
-            "tasks": [
+        self._state_payload = IpcResponseEnvelope(
+            ok=True,
+            payload={
+                "tasks": [
                 {
                     "id": "task-test-001",
                     "sender_id": "sender-test",
@@ -25,18 +27,19 @@ class FakeBridge(WeixinBridge):
                     "prompt": "hello",
                     "output": "world",
                 }
-            ],
-        }
-        self._task_payload = {"ok": True, "task": self._state_payload["tasks"][0]}
+                ],
+            },
+        )
+        self._task_payload = IpcResponseEnvelope(ok=True, payload={"task": self._state_payload.payload["tasks"][0]})
 
-    def _ipc_request(self, action: str, payload: dict[str, object], timeout_seconds: float) -> dict[str, object]:
+    def _ipc_request(self, action: str, payload: dict[str, object], timeout_seconds: float) -> IpcResponseEnvelope:
         if action == "state":
             return self._state_payload
         if action == "get_task":
             task_id = str(payload.get("task_id") or "")
             if task_id == "task-test-001":
                 return self._task_payload
-            return {"ok": False, "error": "task not found"}
+            return IpcResponseEnvelope(ok=False, error="task not found")
         raise RuntimeError(f"unexpected action: {action}")
 
     def _save_conversations(self) -> None:
@@ -94,7 +97,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         self.assertTrue(handled)
         self.assertIn("claude", reply)
         binding = self.bridge.conversations["sender-test"]
-        self.assertEqual(binding["sessions"]["default"]["backend"], "claude")
+        self.assertEqual(binding.sessions["default"].backend, "claude")
 
 
 if __name__ == "__main__":

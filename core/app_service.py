@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 from agent_backends import supported_backend_keys
 from env_tools import run_shell_command
@@ -11,7 +10,9 @@ from local_ipc import create_request, wait_for_response
 from runtime_stack import BRIDGE_CONVERSATIONS_PATH, emergency_stop, get_runtime_snapshot, restart_all, restart_bridge, start_all, stop_all, stop_external_agent_process
 
 from core.accounts import activate_account
-from bridge_config import APP_DIR, BridgeConfig
+from bridge_config import APP_DIR, BridgeConfig, normalize_backend
+from core.json_store import load_json, save_json
+from core.state_models import HubAgentSnapshot, HubTask, JsonObject, WeixinConversationBinding
 from core.weixin_notifier import broadcast_weixin_notice_by_kind
 
 
@@ -28,7 +29,21 @@ class ServiceResult:
 class AgentServiceResult:
     ok: bool
     message: str
-    agent: dict[str, Any] | None = None
+    agent: HubAgentSnapshot | None = None
+
+
+def _parse_hub_task(raw: object) -> HubTask | None:
+    return HubTask.from_dict(raw, default_backend="")
+
+
+def _parse_hub_agent(raw: object) -> HubAgentSnapshot | None:
+    return HubAgentSnapshot.from_dict(raw, now=_state_now())
+
+
+def _parse_hub_agents(raw: object) -> list[HubAgentSnapshot]:
+    if not isinstance(raw, list):
+        return []
+    return [agent for item in raw if (agent := _parse_hub_agent(item)) is not None]
 
 
 def run_named_action(action: str) -> ServiceResult:
@@ -66,12 +81,13 @@ def submit_hub_task(agent_id: str, prompt: str, session_name: str = "", backend:
     except TimeoutError:
         return ServiceResult(ok=False, message="提交失败：Hub 响应超时")
 
-    if response.get("ok"):
-        task = response.get("task") or {}
-        message = f"任务已入队：{task.get('id')}"
+    if response.ok:
+        task = _parse_hub_task(response.payload.get("task"))
+        task_id = task.id if task is not None else ""
+        message = f"任务已入队：{task_id or request_id}"
         notice = broadcast_weixin_notice_by_kind("task", "提交任务", message)
         return ServiceResult(ok=True, message=f"{message} | {notice.summary}")
-    message = f"提交失败：{response.get('error') or 'unknown error'}"
+    message = f"提交失败：{response.error or 'unknown error'}"
     notice = broadcast_weixin_notice_by_kind("task", "提交任务", message)
     return ServiceResult(ok=False, message=f"{message} | {notice.summary}")
 
@@ -80,9 +96,10 @@ def switch_active_account(account_id: str, restart_if_running: bool = True) -> S
     cleaned_account_id = account_id.strip()
     if not cleaned_account_id:
         return ServiceResult(ok=False, message="切换失败：account_id 不能为空")
+    config = BridgeConfig.load()
     snapshot = get_runtime_snapshot()
-    pre_notice = broadcast_weixin_notice_by_kind("config", "切换微信账号", f"准备切换当前账号到: {cleaned_account_id}")
-    activate_account(cleaned_account_id)
+    pre_notice = broadcast_weixin_notice_by_kind("config", "切换微信账号", f"准备切换当前账号到: {cleaned_account_id}", config=config)
+    activate_account(cleaned_account_id, config=config)
     if restart_if_running and (snapshot.hub_running or snapshot.bridge_running):
         messages = restart_all()
         return ServiceResult(ok=True, message=f"已切换当前账号：{cleaned_account_id} | {' | '.join(messages)} | {pre_notice.summary}")
@@ -147,12 +164,13 @@ def save_agent(
     except TimeoutError:
         return AgentServiceResult(ok=False, message="保存失败：Hub 响应超时")
 
-    if response.get("ok"):
-        agent = response.get("agent") or {}
-        message = f"已保存 Agent：{agent.get('name') or cleaned_id}"
+    if response.ok:
+        agent_snapshot = _parse_hub_agent(response.payload.get("agent"))
+        agent_name = agent_snapshot.name if agent_snapshot is not None else cleaned_id
+        message = f"已保存 Agent：{agent_name}"
         notice = broadcast_weixin_notice_by_kind("config", "保存 Agent", message)
-        return AgentServiceResult(ok=True, message=f"{message} | {notice.summary}", agent=agent)
-    return AgentServiceResult(ok=False, message=f"保存失败：{response.get('error') or 'unknown error'}")
+        return AgentServiceResult(ok=True, message=f"{message} | {notice.summary}", agent=agent_snapshot)
+    return AgentServiceResult(ok=False, message=f"保存失败：{response.error or 'unknown error'}")
 
 
 def delete_agent(agent_id: str) -> ServiceResult:
@@ -164,11 +182,11 @@ def delete_agent(agent_id: str) -> ServiceResult:
         response = wait_for_response(request_id, timeout_seconds=5)
     except TimeoutError:
         return ServiceResult(ok=False, message="删除失败：Hub 响应超时")
-    if response.get("ok"):
+    if response.ok:
         message = f"已删除 Agent：{cleaned_id}"
         notice = broadcast_weixin_notice_by_kind("config", "删除 Agent", message)
         return ServiceResult(ok=True, message=f"{message} | {notice.summary}")
-    return ServiceResult(ok=False, message=f"删除失败：{response.get('error') or 'unknown error'}")
+    return ServiceResult(ok=False, message=f"删除失败：{response.error or 'unknown error'}")
 
 
 def switch_bridge_agent(agent_id: str, restart_if_running: bool = True) -> ServiceResult:
@@ -180,10 +198,10 @@ def switch_bridge_agent(agent_id: str, restart_if_running: bool = True) -> Servi
     try:
         response = wait_for_response(request_id, timeout_seconds=5)
     except TimeoutError:
-        response = {"ok": False}
-    if response.get("ok"):
-        agents = response.get("agents") or []
-        known_ids = {str(item.get("id") or "") for item in agents}
+        response = None
+    if response and response.ok:
+        agents = _parse_hub_agents(response.payload.get("agents"))
+        known_ids = {agent.id for agent in agents}
         if known_ids and cleaned_id not in known_ids:
             return ServiceResult(ok=False, message=f"切换失败：未找到 Agent {cleaned_id}")
 
@@ -195,10 +213,10 @@ def switch_bridge_agent(agent_id: str, restart_if_running: bool = True) -> Servi
     if restart_if_running and snapshot.bridge_running:
         messages = restart_bridge()
         message = f"已切换微信桥默认 Agent：{cleaned_id} | {' | '.join(messages)}"
-        notice = broadcast_weixin_notice_by_kind("config", "切换微信桥默认 Agent", message, config=BridgeConfig.load())
+        notice = broadcast_weixin_notice_by_kind("config", "切换微信桥默认 Agent", message, config=config)
         return ServiceResult(ok=True, message=f"{message} | {notice.summary}")
     message = f"已切换微信桥默认 Agent：{cleaned_id}"
-    notice = broadcast_weixin_notice_by_kind("config", "切换微信桥默认 Agent", message, config=BridgeConfig.load())
+    notice = broadcast_weixin_notice_by_kind("config", "切换微信桥默认 Agent", message, config=config)
     return ServiceResult(ok=True, message=f"{message} | {notice.summary}")
 
 
@@ -233,23 +251,19 @@ def switch_weixin_session_backend(sender_id: str, backend: str) -> ServiceResult
     if cleaned_backend not in set(supported_backend_keys()):
         return ServiceResult(ok=False, message=f"切换失败：不支持的后端 {cleaned_backend}")
 
-    payload = _read_conversations_file(BRIDGE_CONVERSATIONS_PATH)
-    binding = payload.get(cleaned_sender_id)
-    if not isinstance(binding, dict):
+    config = BridgeConfig.load()
+    bindings = _read_conversation_bindings(BRIDGE_CONVERSATIONS_PATH, config)
+    binding = bindings.get(cleaned_sender_id)
+    if binding is None:
         return ServiceResult(ok=False, message=f"切换失败：未找到发送方 {cleaned_sender_id}")
-    current_session = str(binding.get("current_session") or "default")
-    sessions = binding.get("sessions") or {}
-    if not isinstance(sessions, dict):
-        return ServiceResult(ok=False, message=f"切换失败：发送方 {cleaned_sender_id} 的会话状态损坏")
-    current_meta = sessions.get(current_session)
-    if not isinstance(current_meta, dict):
-        return ServiceResult(ok=False, message=f"切换失败：未找到当前会话 {current_session}")
-    current_meta["backend"] = cleaned_backend
-    sessions[current_session] = current_meta
-    binding["sessions"] = sessions
-    payload[cleaned_sender_id] = binding
-    BRIDGE_CONVERSATIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    BRIDGE_CONVERSATIONS_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _, current_meta = binding.get_current_session(
+        default_backend=config.default_backend,
+        now=_state_now(),
+        normalize_backend=normalize_backend,
+    )
+    current_meta.backend = cleaned_backend
+    bindings[cleaned_sender_id] = binding
+    _save_conversation_bindings(BRIDGE_CONVERSATIONS_PATH, bindings)
 
     snapshot = get_runtime_snapshot()
     message = f"已切换发送方 {cleaned_sender_id} 的当前会话后端为 {cleaned_backend}"
@@ -265,13 +279,12 @@ def reset_weixin_conversation(sender_id: str) -> ServiceResult:
     if not cleaned_sender_id:
         return ServiceResult(ok=False, message="重置失败：sender_id 不能为空")
 
-    payload = _read_conversations_file(BRIDGE_CONVERSATIONS_PATH)
-    if cleaned_sender_id not in payload:
+    bindings = _read_conversation_bindings(BRIDGE_CONVERSATIONS_PATH)
+    if cleaned_sender_id not in bindings:
         return ServiceResult(ok=False, message=f"重置失败：未找到发送方 {cleaned_sender_id}")
 
-    payload.pop(cleaned_sender_id, None)
-    BRIDGE_CONVERSATIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    BRIDGE_CONVERSATIONS_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    bindings.pop(cleaned_sender_id, None)
+    _save_conversation_bindings(BRIDGE_CONVERSATIONS_PATH, bindings)
 
     snapshot = get_runtime_snapshot()
     message = f"已重置发送方 {cleaned_sender_id} 的微信会话状态"
@@ -282,10 +295,36 @@ def reset_weixin_conversation(sender_id: str) -> ServiceResult:
     return ServiceResult(ok=True, message=f"{message} | {notice.summary}")
 
 
-def _read_conversations_file(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+def _read_conversations_file(path: Path) -> JsonObject:
+    data = load_json(path, {}, expect_type=dict)
+    return data if isinstance(data, dict) else {}
+
+
+def _read_conversation_bindings(path: Path, config: BridgeConfig | None = None) -> dict[str, WeixinConversationBinding]:
+    payload = _read_conversations_file(path)
+    resolved_config = config or BridgeConfig.load()
+    bindings: dict[str, WeixinConversationBinding] = {}
+    for sender_id, raw_binding in payload.items():
+        cleaned_sender_id = str(sender_id or "").strip()
+        if not cleaned_sender_id:
+            continue
+        bindings[cleaned_sender_id] = WeixinConversationBinding.from_dict(
+            raw_binding,
+            default_backend=resolved_config.default_backend,
+            now=_state_now(),
+            normalize_backend=normalize_backend,
+        )
+    return bindings
+
+
+def _save_conversation_bindings(path: Path, bindings: dict[str, WeixinConversationBinding]) -> None:
+    save_json(
+        path,
+        {sender_id: binding.to_dict() for sender_id, binding in bindings.items()},
+    )
+
+
+def _state_now() -> str:
+    from datetime import datetime
+
+    return datetime.now().isoformat(timespec="seconds")

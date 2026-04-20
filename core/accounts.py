@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Callable
 
 from bridge_config import APP_DIR, BridgeConfig, WeixinAccountProfile
+from core.json_store import load_json, save_json
+from core.state_models import JsonObject
 
 
 DEFAULT_ILINK_BASE_URL = "https://ilinkai.weixin.qq.com"
@@ -26,18 +28,57 @@ class SavedAccount:
     sync_file: Path
 
 
+@dataclass
+class AccountFilePayload:
+    token: str = ""
+    base_url: str = ""
+    name: str = ""
+
+    @classmethod
+    def from_dict(cls, raw: object) -> "AccountFilePayload":
+        if not isinstance(raw, dict):
+            return cls()
+        return cls(
+            token=str(raw.get("token") or "").strip(),
+            base_url=str(raw.get("baseUrl") or "").strip(),
+            name=str(raw.get("name") or "").strip(),
+        )
+
+    def to_dict(self) -> JsonObject:
+        return {
+            "token": self.token,
+            "baseUrl": self.base_url,
+            "name": self.name,
+        }
+
+
+@dataclass
+class QRConfirmedPayload:
+    account_id: str
+    base_url: str
+    bot_token: str
+
+    @classmethod
+    def from_dict(cls, raw: object, *, fallback_base_url: str = "") -> "QRConfirmedPayload":
+        if not isinstance(raw, dict):
+            return cls(account_id="", base_url=(fallback_base_url or DEFAULT_ILINK_BASE_URL).strip(), bot_token="")
+        account_id = str(raw.get("ilink_bot_id") or f"wechat-{datetime.now().strftime('%Y%m%d%H%M%S')}").strip()
+        base_url = str(raw.get("baseurl") or fallback_base_url or DEFAULT_ILINK_BASE_URL).strip() or DEFAULT_ILINK_BASE_URL
+        bot_token = str(raw.get("bot_token") or "").strip()
+        return cls(account_id=account_id, base_url=base_url, bot_token=bot_token)
+
+
+def load_account_file_payload(account_path: Path) -> AccountFilePayload:
+    data = load_json(account_path, {}, expect_type=dict)
+    return AccountFilePayload.from_dict(data)
+
+
 def resolve_ilink_base_url(config: BridgeConfig | None = None) -> str:
-    try:
-        config = config or BridgeConfig.load()
-        if config.accounts:
-            first_account = config.accounts[0]
-            if first_account.account_path.exists():
-                data = json.loads(first_account.account_path.read_text(encoding="utf-8"))
-                base_url = str(data.get("baseUrl") or "").strip()
-                if base_url:
-                    return base_url
-    except Exception:
-        pass
+    resolved_config = config or BridgeConfig.load()
+    active_account = resolved_config.get_active_account()
+    payload = load_account_file_payload(active_account.account_path)
+    if payload.base_url:
+        return payload.base_url
     return DEFAULT_ILINK_BASE_URL
 
 
@@ -66,42 +107,36 @@ def build_account_options(config: BridgeConfig, t: Callable[[str], str] | Callab
     return options, current_index
 
 
-def save_account_from_qr_payload(data: dict, base_url: str = "") -> SavedAccount | None:
-    account_id = str(data.get("ilink_bot_id") or f"wechat-{datetime.now().strftime('%Y%m%d%H%M%S')}").strip()
-    resolved_base_url = str(data.get("baseurl") or base_url or DEFAULT_ILINK_BASE_URL).strip()
-    bot_token = str(data.get("bot_token") or "").strip()
-    if not bot_token:
+def save_account_from_qr_payload(data: object, base_url: str = "", config: BridgeConfig | None = None) -> SavedAccount | None:
+    payload = QRConfirmedPayload.from_dict(data, fallback_base_url=base_url)
+    if not payload.bot_token:
         return None
 
-    account_file = APP_DIR / "accounts" / f"{account_id}.json"
-    sync_file = APP_DIR / "accounts" / f"{account_id}.sync.json"
+    account_file = APP_DIR / "accounts" / f"{payload.account_id}.json"
+    sync_file = APP_DIR / "accounts" / f"{payload.account_id}.sync.json"
     account_file.parent.mkdir(parents=True, exist_ok=True)
 
-    account_file.write_text(
-        json.dumps(
-            {
-                "token": bot_token,
-                "baseUrl": resolved_base_url,
-                "name": account_id,
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
+    save_json(
+        account_file,
+        AccountFilePayload(
+            token=payload.bot_token,
+            base_url=payload.base_url,
+            name=payload.account_id,
+        ).to_dict(),
     )
-    sync_file.write_text(json.dumps({"get_updates_buf": ""}, ensure_ascii=False), encoding="utf-8")
+    save_json(sync_file, {"get_updates_buf": ""})
 
-    config = BridgeConfig.load()
-    new_profile = config.add_account(account_id, str(account_file), str(sync_file))
+    resolved_config = config or BridgeConfig.load()
+    new_profile = resolved_config.add_account(payload.account_id, str(account_file), str(sync_file))
     if new_profile is None:
         return None
-    config.set_active_account(new_profile.account_id)
-    config.save()
-    return SavedAccount(account_id=account_id, account_file=account_file, sync_file=sync_file)
+    resolved_config.set_active_account(new_profile.account_id)
+    resolved_config.save()
+    return SavedAccount(account_id=payload.account_id, account_file=account_file, sync_file=sync_file)
 
 
-def activate_account(account_id: str) -> BridgeConfig:
-    config = BridgeConfig.load()
-    config.set_active_account(account_id)
-    config.save()
-    return config
+def activate_account(account_id: str, config: BridgeConfig | None = None) -> BridgeConfig:
+    resolved_config = config or BridgeConfig.load()
+    resolved_config.set_active_account(account_id)
+    resolved_config.save()
+    return resolved_config

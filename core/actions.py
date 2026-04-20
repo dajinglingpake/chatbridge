@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 from env_tools import build_nvm_node_command
 from core.platform_compat import IS_WINDOWS, resolve_command
+from core.state_models import CheckSnapshot
 
 
-def is_missing(checks: dict[str, Any], key: str) -> bool:
+def is_missing(checks: dict[str, CheckSnapshot], key: str) -> bool:
     item = checks.get(key)
-    return bool(item and not getattr(item, "ok", False))
+    return bool(item and not item.ok)
 
 
 @dataclass
@@ -28,7 +28,7 @@ def is_runnable_command(command: str) -> bool:
     return True
 
 
-def build_repair_commands(checks: dict[str, Any], translate=None) -> list[tuple[str, str]]:
+def build_repair_commands(checks: dict[str, CheckSnapshot], translate=None) -> list[tuple[str, str]]:
     commands: list[tuple[str, str]] = []
     npm_command = resolve_command("npm")
     will_have_node = not (is_missing(checks, "node") or is_missing(checks, "npm"))
@@ -61,7 +61,7 @@ def build_repair_commands(checks: dict[str, Any], translate=None) -> list[tuple[
     return commands
 
 
-def build_repair_command_models(checks: dict[str, Any], translate=None) -> list[RepairCommand]:
+def build_repair_command_models(checks: dict[str, CheckSnapshot], translate=None) -> list[RepairCommand]:
     return [
         RepairCommand(label=label, command=command, runnable=is_runnable_command(command))
         for label, command in build_repair_commands(checks, translate)

@@ -6,6 +6,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from core.json_store import load_json, save_json
+from core.state_models import IpcRequestEnvelope, IpcResponseEnvelope
+
 
 APP_DIR = Path(__file__).resolve().parent
 RUNTIME_DIR = APP_DIR / ".runtime"
@@ -24,31 +27,42 @@ def create_request(action: str, payload: dict[str, Any]) -> str:
     ensure_ipc_dirs()
     request_id = f"req-{uuid.uuid4().hex}"
     request_path = REQUEST_DIR / f"{request_id}.json"
-    request_path.write_text(
-        json.dumps({"id": request_id, "action": action, "payload": payload}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    save_json(
+        request_path,
+        IpcRequestEnvelope(id=request_id, action=action, payload=payload).to_dict(),
     )
     return request_id
 
 
-def read_request(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
+def read_request(path: Path) -> IpcRequestEnvelope:
+    data = load_json(path, {}, expect_type=dict)
+    request = IpcRequestEnvelope.from_dict(data)
+    if request is None:
+        raise ValueError(f"invalid ipc request payload: {path.name}")
+    return request
 
 
-def write_response(request_id: str, payload: dict[str, Any]) -> None:
+def write_response(request_id: str, payload: IpcResponseEnvelope) -> None:
     ensure_ipc_dirs()
     response_path = RESPONSE_DIR / f"{request_id}.json"
-    response_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    save_json(response_path, payload.to_dict())
 
 
-def wait_for_response(request_id: str, timeout_seconds: float) -> dict[str, Any]:
+def wait_for_response(request_id: str, timeout_seconds: float) -> IpcResponseEnvelope:
     deadline = time.time() + timeout_seconds
     response_path = RESPONSE_DIR / f"{request_id}.json"
     while time.time() < deadline:
         if response_path.exists():
-            data = json.loads(response_path.read_text(encoding="utf-8"))
+            data = load_json(response_path, None, expect_type=dict)
+            if data is None:
+                time.sleep(0.05)
+                continue
+            response = IpcResponseEnvelope.from_dict(data)
+            if response is None:
+                time.sleep(0.05)
+                continue
             response_path.unlink(missing_ok=True)
-            return data
+            return response
         time.sleep(0.25)
     raise TimeoutError(f"ipc request timed out: {request_id}")
 

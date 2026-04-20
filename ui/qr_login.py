@@ -6,13 +6,14 @@ import io
 import queue
 import threading
 import urllib.parse
-from typing import Any
+from typing import Callable
 
 import qrcode
 import qrcode.image.svg
 
+from bridge_config import BridgeConfig
 from core.accounts import resolve_ilink_base_url, save_account_from_qr_payload
-from core.qr_login import iter_qr_login_events
+from core.qr_login import QRLoginEvent, iter_qr_login_events
 
 
 def _detect_image_mime(image_bytes: bytes) -> str:
@@ -27,7 +28,7 @@ def _detect_image_mime(image_bytes: bytes) -> str:
     return "image/png"
 
 
-def _normalize_qr_image_source(content: Any) -> str:
+def _normalize_qr_image_source(content: object) -> str:
     if content is None:
         return ""
 
@@ -56,7 +57,7 @@ def _normalize_qr_image_source(content: Any) -> str:
     return f"data:{_detect_image_mime(image_bytes)};base64,{encoded}"
 
 
-def _build_qr_data_uri(content: Any) -> str:
+def _build_qr_data_uri(content: object) -> str:
     if content is None:
         return ""
 
@@ -79,7 +80,7 @@ def _build_qr_data_uri(content: Any) -> str:
     return f"data:image/svg+xml;utf8,{urllib.parse.quote(svg)}"
 
 
-def install_qr_login_dialog(ui, notify, refresh_view) -> callable:
+def install_qr_login_dialog(ui, notify: Callable[[str], None], refresh_view: Callable[[], None]) -> Callable[[], None]:
     def open_qr_login_dialog() -> None:
         dialog = ui.dialog()
         with dialog, ui.card().classes("cb-card cb-hero w-[30rem] max-w-full p-6"):
@@ -92,7 +93,7 @@ def install_qr_login_dialog(ui, notify, refresh_view) -> callable:
                 hint = ui.label("请使用微信扫码并在手机上确认授权。").classes("text-sm cb-muted")
                 close_button = ui.button("关闭").props("outline")
 
-        event_queue: queue.SimpleQueue[tuple[str, Any]] = queue.SimpleQueue()
+        event_queue: queue.SimpleQueue[tuple[str, QRLoginEvent | Exception]] = queue.SimpleQueue()
         stop_event = threading.Event()
 
         def close_dialog() -> None:
@@ -102,9 +103,9 @@ def install_qr_login_dialog(ui, notify, refresh_view) -> callable:
 
         close_button.on_click(close_dialog)
 
-        def apply_login_event(event: Any) -> None:
+        def apply_login_event(event: QRLoginEvent) -> None:
             if event.type == "qr_code":
-                qr_source = _build_qr_data_uri(event.payload.get("qrcode_img_content"))
+                qr_source = _build_qr_data_uri(event.image_content)
                 if not qr_source:
                     status.text = "二维码登录失败"
                     status.classes(replace="cb-chip cb-chip-danger w-fit")
@@ -124,7 +125,7 @@ def install_qr_login_dialog(ui, notify, refresh_view) -> callable:
                 return
 
             if event.type == "redirect":
-                hint.text = f"登录节点切换到 {event.payload.get('base_url')}"
+                hint.text = f"登录节点切换到 {event.base_url}"
                 return
 
             if event.type == "expired":
@@ -136,7 +137,12 @@ def install_qr_login_dialog(ui, notify, refresh_view) -> callable:
                 return
 
             if event.type == "confirmed":
-                saved = save_account_from_qr_payload(event.payload, resolve_ilink_base_url())
+                config = BridgeConfig.load()
+                saved = save_account_from_qr_payload(
+                    event.payload,
+                    resolve_ilink_base_url(config),
+                    config=config,
+                )
                 if saved is None:
                     status.text = "账号保存失败"
                     status.classes(replace="cb-chip cb-chip-danger w-fit")
@@ -154,7 +160,7 @@ def install_qr_login_dialog(ui, notify, refresh_view) -> callable:
             if event.type == "error":
                 status.text = "二维码登录失败"
                 status.classes(replace="cb-chip cb-chip-danger w-fit")
-                hint.text = str(event.payload.get("message") or "未知错误")
+                hint.text = event.message or "未知错误"
                 notify(f"二维码登录失败：{hint.text}")
 
         def drain_events() -> None:
@@ -165,7 +171,8 @@ def install_qr_login_dialog(ui, notify, refresh_view) -> callable:
                     return
 
                 if event_kind == "event":
-                    apply_login_event(payload)
+                    if isinstance(payload, QRLoginEvent):
+                        apply_login_event(payload)
                     continue
 
                 status.text = "二维码登录失败"
@@ -177,7 +184,8 @@ def install_qr_login_dialog(ui, notify, refresh_view) -> callable:
 
         def worker() -> None:
             try:
-                for event in iter_qr_login_events(resolve_ilink_base_url()):
+                config = BridgeConfig.load()
+                for event in iter_qr_login_events(resolve_ilink_base_url(config)):
                     if stop_event.is_set():
                         return
                     event_queue.put(("event", event))

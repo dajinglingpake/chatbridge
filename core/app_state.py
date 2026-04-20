@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 from agent_backends import supported_backend_keys
+from core.state_models import CheckSnapshot, RuntimeSnapshot, WeixinBridgeRuntimeState
 
 Translator = Callable[[str], str]
 
@@ -85,21 +86,21 @@ def _t(translator: Callable[..., str] | None, key: str, **kwargs: object) -> str
         return translator(key)
 
 
-def _check_ok(checks: dict[str, Any], key: str) -> bool:
+def _check_ok(checks: dict[str, CheckSnapshot], key: str) -> bool:
     item = checks.get(key)
-    return bool(item and getattr(item, "ok", False))
+    return bool(item and item.ok)
 
 
-def _check_missing(checks: dict[str, Any], key: str) -> bool:
+def _check_missing(checks: dict[str, CheckSnapshot], key: str) -> bool:
     item = checks.get(key)
-    return bool(item and not getattr(item, "ok", False))
+    return bool(item and not item.ok)
 
 
 def pid_text(pid: int | None) -> str:
     return f"(PID {pid})" if pid else ""
 
 
-def build_badge(snapshot: Any, translator: Callable[..., str] | None = None) -> BadgeState:
+def build_badge(snapshot: RuntimeSnapshot, translator: Callable[..., str] | None = None) -> BadgeState:
     if snapshot.hub_running and snapshot.bridge_running:
         return BadgeState(
             text=_t(translator, "ui.status.running"),
@@ -116,7 +117,12 @@ def build_badge(snapshot: Any, translator: Callable[..., str] | None = None) -> 
     )
 
 
-def build_overview_lines(snapshot: Any, bridge_state: dict[str, Any], active_account_id: str, translator: Callable[..., str] | None = None) -> list[str]:
+def build_overview_lines(
+    snapshot: RuntimeSnapshot,
+    bridge_state: WeixinBridgeRuntimeState,
+    active_account_id: str,
+    translator: Callable[..., str] | None = None,
+) -> list[str]:
     lines = [
         _t(translator, "ui.overview.hub", status=_t(translator, "ui.status.running") if snapshot.hub_running else _t(translator, "ui.status.stopped"), pid=pid_text(snapshot.hub_pid)),
         _t(translator, "ui.overview.bridge", status=_t(translator, "ui.status.running") if snapshot.bridge_running else _t(translator, "ui.status.stopped"), pid=pid_text(snapshot.bridge_pid)),
@@ -128,13 +134,18 @@ def build_overview_lines(snapshot: Any, bridge_state: dict[str, Any], active_acc
         lines.extend(snapshot.codex_processes[:8])
     else:
         lines.append(_t(translator, "ui.overview.none_agents"))
-    if bridge_state:
+    bridge_state_items = list(bridge_state.to_dict().items())
+    if bridge_state_items:
         lines.extend(["", _t(translator, "ui.overview.bridge_state")])
-        lines.extend(f"{key}: {value}" for key, value in list(bridge_state.items())[:8])
+        lines.extend(f"{key}: {value}" for key, value in bridge_state_items[:8])
     return lines
 
 
-def decide_primary_action(snapshot: Any, checks: dict[str, Any], translator: Callable[..., str] | None = None) -> tuple[str, str, str]:
+def decide_primary_action(
+    snapshot: RuntimeSnapshot,
+    checks: dict[str, CheckSnapshot],
+    translator: Callable[..., str] | None = None,
+) -> tuple[str, str, str]:
     if snapshot.hub_running or snapshot.bridge_running:
         return "stop", _t(translator, "ui.primary.stop.label"), _t(translator, "ui.primary.stop.hint")
 
@@ -158,8 +169,12 @@ def decide_primary_action(snapshot: Any, checks: dict[str, Any], translator: Cal
     return "start", _t(translator, "ui.primary.start.label"), _t(translator, "ui.primary.start.hint")
 
 
-def build_summary_text(snapshot: Any, checks: dict[str, Any], translator: Callable[..., str] | None = None) -> str:
-    missing = [getattr(item, "label", "") for item in checks.values() if not getattr(item, "ok", False)]
+def build_summary_text(
+    snapshot: RuntimeSnapshot,
+    checks: dict[str, CheckSnapshot],
+    translator: Callable[..., str] | None = None,
+) -> str:
+    missing = [item.label for item in checks.values() if not item.ok]
     if missing:
         return _t(translator, "ui.summary.missing", count=len(missing), items="、".join(missing[:4]))
     if snapshot.hub_running and snapshot.bridge_running:
@@ -167,7 +182,12 @@ def build_summary_text(snapshot: Any, checks: dict[str, Any], translator: Callab
     return _t(translator, "ui.summary.ready_waiting")
 
 
-def build_quickstart_lines(snapshot: Any, checks: dict[str, Any], accounts_dir: Path, translator: Callable[..., str] | None = None) -> tuple[list[str], str]:
+def build_quickstart_lines(
+    snapshot: RuntimeSnapshot,
+    checks: dict[str, CheckSnapshot],
+    accounts_dir: Path,
+    translator: Callable[..., str] | None = None,
+) -> tuple[list[str], str]:
     backend_choices = "|".join(supported_backend_keys())
     stage_lines = [
         step_line(_t(translator, "ui.quickstart.step.desktop"), _check_ok(checks, "psutil"), translator),
@@ -201,7 +221,12 @@ def build_quickstart_lines(snapshot: Any, checks: dict[str, Any], accounts_dir: 
     return body, status_map.get(action_key, _t(translator, "ui.quickstart.manual"))
 
 
-def build_issues(snapshot: Any, bridge_state: dict[str, Any], checks: dict[str, Any], translator: Callable[..., str] | None = None) -> list[IssueItem]:
+def build_issues(
+    snapshot: RuntimeSnapshot,
+    bridge_state: WeixinBridgeRuntimeState,
+    checks: dict[str, CheckSnapshot],
+    translator: Callable[..., str] | None = None,
+) -> list[IssueItem]:
     issues: list[IssueItem] = []
     if any(_check_missing(checks, key) for key in ["psutil", "nvm", "node", "npm", "codex", "claude", "opencode"]):
         issues.append(
@@ -227,12 +252,12 @@ def build_issues(snapshot: Any, bridge_state: dict[str, Any], checks: dict[str, 
                 detail=_t(translator, "ui.issue.process_mismatch.detail"),
             )
         )
-    if bridge_state.get("last_error"):
+    if bridge_state.last_error:
         issues.append(
             IssueItem(
                 kind="logs",
                 title=_t(translator, "ui.issue.logs.title"),
-                detail=str(bridge_state.get("last_error") or "").strip(),
+                detail=bridge_state.last_error.strip(),
             )
         )
     if snapshot.codex_processes and not (snapshot.hub_running or snapshot.bridge_running):

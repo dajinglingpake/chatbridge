@@ -6,7 +6,6 @@ import json
 import random
 import time
 import unicodedata
-import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +14,9 @@ from typing import Any
 from agent_backends import supported_backend_keys
 from agent_hub import HubConfig
 from bridge_config import APP_DIR, CONFIG_PATH, WEIXIN_ACCOUNTS_DIR, BridgeConfig, normalize_backend
+from core.http_json import request_json
+from core.json_store import load_json, save_json
+from core.state_models import HubTask, IpcResponseEnvelope, WeixinBridgeRuntimeState, WeixinConversationBinding, WeixinSessionMeta
 from local_ipc import create_request, wait_for_response
 from localization import Localizer
 
@@ -42,19 +44,12 @@ class WeixinBridge:
         self._ensure_local_account_storage()
         self.conversations = self._load_conversations()
         self._recent_message_keys: list[str] = []
-        self.state: dict[str, Any] = {
-            "started_at": now_iso(),
-            "last_poll_at": "",
-            "last_message_at": "",
-            "last_sender_id": "",
-            "last_error": "",
-            "handled_messages": 0,
-            "failed_messages": 0,
-            "managed_conversations": len(self.conversations),
-            "account_file": str(self.account_path),
-            "sync_file": str(self.sync_path),
-            "using_local_account_storage": True,
-        }
+        self.state = WeixinBridgeRuntimeState.create(
+            now=now_iso(),
+            managed_conversations=len(self.conversations),
+            account_file=str(self.account_path),
+            sync_file=str(self.sync_path),
+        )
 
     def run(self) -> None:
         print(f"Weixin Hub Bridge started at {now_iso()}")
@@ -63,9 +58,9 @@ class WeixinBridge:
         while True:
             try:
                 self.poll_once()
-                self.state["last_error"] = ""
+                self.state.clear_error()
             except Exception as exc:  # noqa: BLE001
-                self.state["last_error"] = str(exc)
+                self.state.set_error(str(exc))
                 self._save_state()
                 print(f"[bridge] poll error: {exc}")
                 time.sleep(3)
@@ -80,7 +75,7 @@ class WeixinBridge:
 
         payload = {"get_updates_buf": buf, "base_info": {"channel_version": "2.1.1"}}
         response = self._post_json(f"{base_url}/ilink/bot/getupdates", payload, token=token, timeout_ms=self.config.poll_timeout_ms)
-        self.state["last_poll_at"] = now_iso()
+        self.state.mark_poll(now=now_iso())
         if response.get("ret") not in (None, 0):
             raise RuntimeError(f"weixin getupdates failed: ret={response.get('ret')} errcode={response.get('errcode')} errmsg={response.get('errmsg')}")
 
@@ -114,19 +109,21 @@ class WeixinBridge:
         if handled:
             if reply:
                 self._send_text(base_url, token, sender_id, msg.get("context_token"), reply)
-                self.state["handled_messages"] += 1
+                self.state.record_handled()
             self._save_state()
             return
 
         binding = self._ensure_conversation(sender_id)
-        session_name = str(binding.get("current_session") or "default")
-        session_meta = (binding.get("sessions") or {}).get(session_name) or self._new_session_meta()
+        session_name, session_meta = binding.get_current_session(
+            default_backend=self.config.default_backend,
+            now=now_iso(),
+            normalize_backend=normalize_backend,
+        )
         prompt = text.strip()
         if not prompt:
             return
 
-        self.state["last_message_at"] = now_iso()
-        self.state["last_sender_id"] = sender_id
+        self.state.mark_message(now=now_iso(), sender_id=sender_id)
 
         response = self._ipc_request(
             "submit_task",
@@ -136,24 +133,24 @@ class WeixinBridge:
                 "source": "wechat",
                 "sender_id": sender_id,
                 "session_name": session_name,
-                "backend": normalize_backend(str(session_meta.get("backend") or self.config.default_backend)),
+                "backend": session_meta.backend,
             },
             timeout_seconds=15,
         )
-        if not response.get("ok"):
-            raise RuntimeError(str(response.get("error") or "submit_task failed"))
-        task = response["task"]
+        if not response.ok:
+            raise RuntimeError(str(response.error or "submit_task failed"))
+        task = response.payload.get("task") or {}
 
-        result = self._wait_for_task(task["id"])
-        if result["status"] == "succeeded":
-            reply = str(result.get("output") or "").strip()
+        result = self._wait_for_task(str(task["id"]))
+        if result.status == "succeeded":
+            reply = result.output.strip()
             if self.config.auto_reply_prefix:
                 reply = f"{self.config.auto_reply_prefix}{reply}"
             self._send_text(base_url, token, sender_id, msg.get("context_token"), reply)
-            self.state["handled_messages"] += 1
+            self.state.record_handled()
         else:
-            backend_name = str(result.get("backend") or session_meta.get("backend") or self.config.default_backend).strip()
-            error_text = str(result.get("error") or "task failed").strip()
+            backend_name = str(result.backend or session_meta.backend or self.config.default_backend).strip()
+            error_text = str(result.error or "task failed").strip()
             self._send_text(
                 base_url,
                 token,
@@ -161,16 +158,18 @@ class WeixinBridge:
                 msg.get("context_token"),
                 self._t("bridge.task.failed", backend=backend_name, error=error_text),
             )
-            self.state["failed_messages"] += 1
+            self.state.record_failed()
 
-    def _wait_for_task(self, task_id: str) -> dict[str, Any]:
+    def _wait_for_task(self, task_id: str) -> HubTask:
         deadline = time.time() + max(self.config.hub_task_timeout_seconds, 10)
         while time.time() < deadline:
             data = self._ipc_request("get_task", {"task_id": task_id}, timeout_seconds=5)
-            if not data.get("ok"):
-                raise RuntimeError(str(data.get("error") or "get_task failed"))
-            task = data["task"]
-            if task["status"] in {"succeeded", "failed"}:
+            if not data.ok:
+                raise RuntimeError(str(data.error or "get_task failed"))
+            task = HubTask.from_dict(data.payload.get("task"), default_backend=self.config.default_backend)
+            if task is None:
+                raise RuntimeError("get_task returned invalid task payload")
+            if task.status in {"succeeded", "failed"}:
                 return task
             time.sleep(2)
         raise TimeoutError(f"task timed out: {task_id}")
@@ -233,9 +232,12 @@ class WeixinBridge:
             return "", False
 
         binding = self._ensure_conversation(sender_id)
-        current_session = str(binding.get("current_session") or "default")
-        sessions = binding.setdefault("sessions", {})
-        current_meta = sessions.setdefault(current_session, self._new_session_meta())
+        current_session, current_meta = binding.get_current_session(
+            default_backend=self.config.default_backend,
+            now=now_iso(),
+            normalize_backend=normalize_backend,
+        )
+        sessions = binding.sessions
 
         parts = raw.split(maxsplit=2)
         command = parts[0].lower()
@@ -267,16 +269,16 @@ class WeixinBridge:
         if command == "/new":
             requested = parts[1].strip() if len(parts) >= 2 else ""
             session_name = self._allocate_session_name(binding, requested or "session")
-            sessions[session_name] = self._new_session_meta(current_meta.get("backend"))
-            binding["current_session"] = session_name
+            sessions[session_name] = self._new_session_meta(current_meta.backend)
+            binding.current_session = session_name
             self._save_conversations()
-            return self._t("bridge.session.created", session=session_name, backend=sessions[session_name]["backend"]), True
+            return self._t("bridge.session.created", session=session_name, backend=sessions[session_name].backend), True
 
         if command == "/list":
             lines = [self._t("bridge.session.list.title")]
             for name in sorted(sessions):
-                marker = "*" if name == binding.get("current_session") else "-"
-                backend = normalize_backend(str((sessions.get(name) or {}).get("backend") or self.config.default_backend))
+                marker = "*" if name == binding.current_session else "-"
+                backend = sessions[name].backend
                 lines.append(self._t("bridge.list.item", marker=marker, name=name, backend=backend))
             return "\n".join(lines), True
 
@@ -287,9 +289,11 @@ class WeixinBridge:
             if not task_id:
                 return self._t("bridge.task.lookup.usage"), True
             lookup = self._ipc_request("get_task", {"task_id": task_id}, timeout_seconds=5)
-            if not lookup.get("ok"):
+            if not lookup.ok:
                 return self._t("bridge.task.lookup.not_found", task_id=task_id), True
-            task = lookup.get("task") or {}
+            task = HubTask.from_dict(lookup.payload.get("task"), default_backend=self.config.default_backend)
+            if task is None:
+                return self._t("bridge.task.lookup.not_found", task_id=task_id), True
             return self._render_task_summary(task), True
 
         if command == "/last":
@@ -304,20 +308,19 @@ class WeixinBridge:
             session_name = parts[1].strip()
             if session_name not in sessions:
                 return self._t("bridge.session.not_found", session=session_name), True
-            binding["current_session"] = session_name
+            binding.current_session = session_name
             self._save_conversations()
-            backend = normalize_backend(str((sessions.get(session_name) or {}).get("backend") or self.config.default_backend))
+            backend = sessions[session_name].backend
             return self._t("bridge.session.switched", session=session_name, backend=backend), True
 
         if command == "/backend":
             if len(parts) < 2:
-                backend = normalize_backend(str(current_meta.get("backend") or self.config.default_backend))
+                backend = current_meta.backend
                 return self._t("bridge.backend.current", session=current_session, backend=backend), True
             requested_backend = parts[1].strip().lower()
             if requested_backend not in SUPPORTED_BACKENDS:
                 return self._t("bridge.backend.usage"), True
-            current_meta["backend"] = requested_backend
-            current_meta["updated_at"] = now_iso()
+            current_meta.touch(now_iso(), backend=requested_backend)
             sessions[current_session] = current_meta
             self._save_conversations()
             return self._t("bridge.backend.switched", backend=requested_backend, session=current_session), True
@@ -376,43 +379,49 @@ class WeixinBridge:
             if current_session == "default":
                 return self._t("bridge.session.default_close_blocked"), True
             sessions.pop(current_session, None)
-            binding["current_session"] = "default"
+            binding.current_session = "default"
             sessions.setdefault("default", self._new_session_meta())
             self._save_conversations()
             return self._t("bridge.session.closed", session=current_session), True
 
         if command == "/status":
-            backend = normalize_backend(str(current_meta.get("backend") or self.config.default_backend))
-            return self._t("bridge.status", agent=self.config.backend_id, session=binding.get("current_session"), backend=backend, count=len(sessions)), True
+            backend = current_meta.backend
+            return self._t("bridge.status", agent=self.config.backend_id, session=binding.current_session, backend=backend, count=len(sessions)), True
 
         if command == "/reset":
             self.conversations.pop(sender_id, None)
             self._save_conversations()
             reset = self._ensure_conversation(sender_id)
-            reset_meta = (reset.get("sessions") or {}).get(str(reset.get("current_session") or "default")) or {}
-            backend = normalize_backend(str(reset_meta.get("backend") or self.config.default_backend))
-            return self._t("bridge.session.reset", session=reset.get("current_session"), backend=backend), True
+            reset_session, reset_meta = reset.get_current_session(
+                default_backend=self.config.default_backend,
+                now=now_iso(),
+                normalize_backend=normalize_backend,
+            )
+            return self._t("bridge.session.reset", session=reset_session, backend=reset_meta.backend), True
 
         return self._t("bridge.command.unknown"), True
 
-    def _find_latest_sender_task(self, sender_id: str) -> dict[str, Any] | None:
+    def _find_latest_sender_task(self, sender_id: str) -> HubTask | None:
         state = self._ipc_request("state", {}, timeout_seconds=5)
-        if not state.get("ok"):
+        if not state.ok:
             return None
-        tasks = state.get("tasks") or []
-        for task in tasks:
-            if str(task.get("sender_id") or "").strip() == sender_id:
+        tasks = state.payload.get("tasks") or []
+        for raw_task in tasks:
+            task = HubTask.from_dict(raw_task, default_backend=self.config.default_backend)
+            if task is None:
+                continue
+            if task.sender_id == sender_id:
                 return task
         return None
 
-    def _render_task_summary(self, task: dict[str, Any]) -> str:
-        task_id = str(task.get("id") or "")
-        session_name = str(task.get("session_name") or "default")
-        status = str(task.get("status") or "")
-        agent_name = str(task.get("agent_name") or task.get("agent_id") or "")
-        backend = str(task.get("backend") or self.config.default_backend)
-        prompt = str(task.get("prompt") or "").strip()[:400] or "(empty)"
-        result = str(task.get("output") or task.get("error") or "").strip()[:800] or "(empty)"
+    def _render_task_summary(self, task: HubTask) -> str:
+        task_id = task.id
+        session_name = task.session_name or "default"
+        status = task.status
+        agent_name = task.agent_name or task.agent_id
+        backend = task.backend or self.config.default_backend
+        prompt = task.prompt.strip()[:400] or "(empty)"
+        result = (task.output or task.error).strip()[:800] or "(empty)"
         return self._t(
             "bridge.task.lookup.summary",
             task_id=task_id,
@@ -433,39 +442,28 @@ class WeixinBridge:
             return ""
         return lines[0]
 
-    def _ensure_conversation(self, sender_id: str) -> dict[str, Any]:
+    def _ensure_conversation(self, sender_id: str) -> WeixinConversationBinding:
         existing = self.conversations.get(sender_id)
         if existing:
-            existing.setdefault("current_session", "default")
-            existing.setdefault("sessions", {})
-            existing.pop("current_agent_id", None)
-            for meta in (existing.get("sessions") or {}).values():
-                if isinstance(meta, dict):
-                    meta.pop("agent_id", None)
-                    meta["backend"] = normalize_backend(str(meta.get("backend") or self.config.default_backend))
-                    meta.setdefault("created_at", now_iso())
-                    meta.setdefault("updated_at", now_iso())
-            if existing["current_session"] not in existing["sessions"]:
-                existing["sessions"][existing["current_session"]] = self._new_session_meta()
             return existing
 
-        created = {
-            "current_session": "default",
-            "sessions": {"default": self._new_session_meta()},
-        }
+        created = WeixinConversationBinding.create(
+            default_backend=normalize_backend(self.config.default_backend),
+            now=now_iso(),
+        )
         self.conversations[sender_id] = created
         self._save_conversations()
         return created
 
-    def _new_session_meta(self, backend: Any = "") -> dict[str, Any]:
-        return {
-            "backend": normalize_backend(str(backend or self.config.default_backend)),
-            "created_at": now_iso(),
-            "updated_at": now_iso(),
-        }
+    def _new_session_meta(self, backend: Any = "") -> WeixinSessionMeta:
+        return WeixinSessionMeta(
+            backend=normalize_backend(str(backend or self.config.default_backend)),
+            created_at=now_iso(),
+            updated_at=now_iso(),
+        )
 
-    def _allocate_session_name(self, binding: dict[str, Any], requested: str) -> str:
-        sessions = binding.setdefault("sessions", {})
+    def _allocate_session_name(self, binding: WeixinConversationBinding, requested: str) -> str:
+        sessions = binding.sessions
         base = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in requested).strip("-_") or "session"
         if base not in sessions:
             return base
@@ -478,21 +476,19 @@ class WeixinBridge:
         self._ensure_local_account_storage()
         if not self.account_path.exists():
             raise FileNotFoundError(f"account file not found: {self.account_path}")
-        return json.loads(self.account_path.read_text(encoding="utf-8"))
+        data = load_json(self.account_path, None, expect_type=dict)
+        if data is None:
+            raise RuntimeError(f"account file is invalid: {self.account_path}")
+        return data
 
     def _load_sync_buf(self) -> str:
         self._ensure_local_account_storage()
-        try:
-            data = json.loads(self.sync_path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return ""
-        except json.JSONDecodeError:
-            return ""
+        data = load_json(self.sync_path, {}, expect_type=dict)
         return str(data.get("get_updates_buf") or "")
 
     def _save_sync_buf(self, buf: str) -> None:
         self.sync_path.parent.mkdir(parents=True, exist_ok=True)
-        self.sync_path.write_text(json.dumps({"get_updates_buf": buf}, ensure_ascii=False), encoding="utf-8")
+        save_json(self.sync_path, {"get_updates_buf": buf})
 
     def _ensure_local_account_storage(self) -> None:
         self.account_path.parent.mkdir(parents=True, exist_ok=True)
@@ -512,36 +508,50 @@ class WeixinBridge:
             headers["Content-Type"] = "application/json"
             headers["Content-Length"] = str(len(payload))
         req = urllib.request.Request(url=url, data=payload, headers=headers, method=method)
-        with urllib.request.urlopen(req, timeout=timeout_ms / 1000) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        return request_json(req, timeout=timeout_ms / 1000)
 
     def _post_json(self, url: str, body: dict[str, Any], token: str = "", timeout_ms: int = 15000) -> dict[str, Any]:
         try:
             return self._request("POST", url, body=body, token=token, timeout_ms=timeout_ms)
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"POST {url} failed: {exc.code} {detail}") from exc
+        except RuntimeError as exc:
+            raise RuntimeError(f"POST {url} failed: {exc}") from exc
 
-    def _ipc_request(self, action: str, payload: dict[str, Any], timeout_seconds: float) -> dict[str, Any]:
+    def _ipc_request(self, action: str, payload: dict[str, Any], timeout_seconds: float) -> IpcResponseEnvelope:
         request_id = create_request(action, payload)
         return wait_for_response(request_id, timeout_seconds)
 
     def _save_state(self) -> None:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        self.state["managed_conversations"] = len(self.conversations)
-        self.state["account_file"] = str(self.account_path)
-        self.state["sync_file"] = str(self.sync_path)
-        STATE_PATH.write_text(json.dumps(self.state, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.state.sync_files(
+            managed_conversations=len(self.conversations),
+            account_file=str(self.account_path),
+            sync_file=str(self.sync_path),
+        )
+        save_json(STATE_PATH, self.state.to_dict())
 
     def _load_conversations(self) -> dict[str, Any]:
-        try:
-            return json.loads(CONVERSATION_PATH.read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError):
+        data = load_json(CONVERSATION_PATH, {}, expect_type=dict)
+        if not isinstance(data, dict):
             return {}
+        conversations: dict[str, WeixinConversationBinding] = {}
+        for sender_id, binding in data.items():
+            cleaned_sender_id = str(sender_id or "").strip()
+            if not cleaned_sender_id:
+                continue
+            conversations[cleaned_sender_id] = WeixinConversationBinding.from_dict(
+                binding,
+                default_backend=self.config.default_backend,
+                now=now_iso(),
+                normalize_backend=normalize_backend,
+            )
+        return conversations
 
     def _save_conversations(self) -> None:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        CONVERSATION_PATH.write_text(json.dumps(self.conversations, ensure_ascii=False, indent=2), encoding="utf-8")
+        save_json(
+            CONVERSATION_PATH,
+            {sender_id: binding.to_dict() for sender_id, binding in self.conversations.items()},
+        )
 
     def _t(self, key: str, **kwargs: Any) -> str:
         return self.localizer.translate(key, **kwargs)
