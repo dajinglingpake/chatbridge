@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from bridge_config import BridgeConfig
-from core.accounts import AccountFilePayload, DEFAULT_ILINK_BASE_URL, load_account_file_payload
+from core.accounts import AccountFilePayload, DEFAULT_ILINK_BASE_URL, load_account_context_tokens, load_account_file_payload
 from core.http_json import request_json
 from core.json_store import load_json
 from runtime_stack import BRIDGE_CONVERSATIONS_PATH
@@ -38,6 +38,12 @@ class NoticeResult:
         return f"微信通知发送失败：{self.error or 'unknown error'}"
 
 
+@dataclass(frozen=True)
+class NoticeRecipient:
+    sender_id: str
+    context_token: str = ""
+
+
 def broadcast_weixin_notice(title: str, detail: str, config: BridgeConfig | None = None) -> NoticeResult:
     return broadcast_weixin_notice_by_kind("config", title, detail, config=config)
 
@@ -50,7 +56,7 @@ def broadcast_weixin_notice_by_kind(kind: str, title: str, detail: str, config: 
         return NoticeResult(sent_count=0, recipient_count=0, error="disabled")
     if kind not in {"service", "task"} and not cfg.config_notice_enabled:
         return NoticeResult(sent_count=0, recipient_count=0, error="disabled")
-    recipients = _load_recipient_ids()
+    recipients = _load_recipients(Path(cfg.account_file))
     if not recipients:
         return NoticeResult(sent_count=0, recipient_count=0)
     account = _load_account_payload(Path(cfg.account_file))
@@ -60,13 +66,20 @@ def broadcast_weixin_notice_by_kind(kind: str, title: str, detail: str, config: 
     base_url = account.base_url or DEFAULT_ILINK_BASE_URL
     message = _build_notice_text(title, detail)
     sent_count = 0
+    skipped_missing_context = 0
     last_error = ""
-    for sender_id in recipients:
+    for recipient in recipients:
+        if not recipient.context_token:
+            skipped_missing_context += 1
+            continue
         try:
-            _send_text(base_url, token, sender_id, message)
+            _send_text(base_url, token, recipient.sender_id, recipient.context_token, message)
             sent_count += 1
         except Exception as exc:  # noqa: BLE001
             last_error = str(exc)
+    if skipped_missing_context > 0:
+        context_error = f"missing context token for {skipped_missing_context} recipient(s)"
+        last_error = context_error if not last_error else f"{last_error}; {context_error}"
     return NoticeResult(sent_count=sent_count, recipient_count=len(recipients), error=last_error)
 
 
@@ -103,7 +116,26 @@ def _load_recipient_ids() -> list[str]:
     return [str(sender_id).strip() for sender_id in payload.keys() if str(sender_id).strip()]
 
 
-def _send_text(base_url: str, token: str, to_user_id: str, text: str) -> None:
+def _load_recipients(account_path: Path | None) -> list[NoticeRecipient]:
+    payload = load_json(BRIDGE_CONVERSATIONS_PATH, {}, expect_type=dict)
+    if not isinstance(payload, dict):
+        return []
+    context_tokens = load_account_context_tokens(account_path) if account_path is not None else {}
+    recipients: list[NoticeRecipient] = []
+    for sender_id in payload.keys():
+        cleaned_sender_id = str(sender_id).strip()
+        if not cleaned_sender_id:
+            continue
+        recipients.append(
+            NoticeRecipient(
+                sender_id=cleaned_sender_id,
+                context_token=context_tokens.get(cleaned_sender_id, ""),
+            )
+        )
+    return recipients
+
+
+def _send_text(base_url: str, token: str, to_user_id: str, context_token: str, text: str) -> None:
     body = {
         "msg": {
             "from_user_id": "",
@@ -112,7 +144,7 @@ def _send_text(base_url: str, token: str, to_user_id: str, text: str) -> None:
             "message_type": 2,
             "message_state": 2,
             "item_list": [{"type": 1, "text_item": {"text": text[:4000]}}],
-            "context_token": None,
+            "context_token": context_token or None,
         },
         "base_info": {"channel_version": "2.1.1"},
     }

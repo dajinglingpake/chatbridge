@@ -467,6 +467,40 @@ class WeixinBridgeRuntimeState:
 
 
 @dataclass
+class WeixinPendingTaskState:
+    task_id: str
+    sender_id: str
+    session_name: str
+    backend: str
+    model: str = ""
+    workdir: str = ""
+    context_token: str = ""
+    last_status: str = "queued"
+
+    @classmethod
+    def from_dict(cls, raw: object) -> "WeixinPendingTaskState | None":
+        if not isinstance(raw, dict):
+            return None
+        task_id = str(raw.get("task_id") or "").strip()
+        sender_id = str(raw.get("sender_id") or "").strip()
+        if not task_id or not sender_id:
+            return None
+        return cls(
+            task_id=task_id,
+            sender_id=sender_id,
+            session_name=str(raw.get("session_name") or "default").strip() or "default",
+            backend=str(raw.get("backend") or "").strip(),
+            model=str(raw.get("model") or "").strip(),
+            workdir=str(raw.get("workdir") or "").strip(),
+            context_token=str(raw.get("context_token") or "").strip(),
+            last_status=str(raw.get("last_status") or "queued").strip() or "queued",
+        )
+
+    def to_dict(self) -> JsonObject:
+        return asdict(self)
+
+
+@dataclass
 class IpcRequestEnvelope:
     id: str
     action: str

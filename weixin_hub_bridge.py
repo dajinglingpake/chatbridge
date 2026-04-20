@@ -14,10 +14,18 @@ from typing import Any
 from agent_backends import get_backend_command_guide, supported_backend_keys
 from agent_hub import HubConfig
 from bridge_config import APP_DIR, CONFIG_PATH, WEIXIN_ACCOUNTS_DIR, BridgeConfig, normalize_backend
+from core.accounts import load_account_context_tokens, save_account_context_tokens
 from core.context_relations import build_context_relation_lines
 from core.http_json import request_json
 from core.json_store import load_json, save_json
-from core.state_models import HubTask, IpcResponseEnvelope, WeixinBridgeRuntimeState, WeixinConversationBinding, WeixinSessionMeta
+from core.state_models import (
+    HubTask,
+    IpcResponseEnvelope,
+    WeixinBridgeRuntimeState,
+    WeixinConversationBinding,
+    WeixinPendingTaskState,
+    WeixinSessionMeta,
+)
 from core.weixin_notifier import build_task_followup_hint
 from local_ipc import create_request, wait_for_response
 from localization import Localizer
@@ -28,11 +36,13 @@ STATE_DIR = RUNTIME_DIR / "state"
 EXPORT_DIR = RUNTIME_DIR / "exports"
 STATE_PATH = STATE_DIR / "weixin_hub_bridge_state.json"
 CONVERSATION_PATH = STATE_DIR / "weixin_conversations.json"
+PENDING_TASKS_PATH = STATE_DIR / "weixin_pending_tasks.json"
 DEFAULT_WEIXIN_BASE_URL = "https://ilinkai.weixin.qq.com"
 ILINK_APP_ID = "bot"
 ILINK_APP_CLIENT_VERSION = (2 << 16) | (1 << 8) | 1
 SUPPORTED_BACKENDS = set(supported_backend_keys())
 SESSION_PAGE_SIZE = 5
+ACTIVE_TASK_POLL_TIMEOUT_MS = 1000
 
 
 def now_iso() -> str:
@@ -47,6 +57,8 @@ class WeixinBridge:
         self.sync_path = Path(config.sync_file)
         self._ensure_local_account_storage()
         self.conversations = self._load_conversations()
+        self.context_tokens = load_account_context_tokens(self.account_path)
+        self.pending_tasks = self._load_pending_tasks()
         self._recent_message_keys: list[str] = []
         self.state = WeixinBridgeRuntimeState.create(
             now=now_iso(),
@@ -75,10 +87,12 @@ class WeixinBridge:
         if not token:
             raise RuntimeError("weixin account token is missing; please log in first")
         base_url = (account.get("baseUrl") or DEFAULT_WEIXIN_BASE_URL).strip()
+        self._poll_pending_tasks(base_url, token)
         buf = self._load_sync_buf()
 
         payload = {"get_updates_buf": buf, "base_info": {"channel_version": "2.1.1"}}
-        response = self._post_json(f"{base_url}/ilink/bot/getupdates", payload, token=token, timeout_ms=self.config.poll_timeout_ms)
+        timeout_ms = ACTIVE_TASK_POLL_TIMEOUT_MS if self.pending_tasks else self.config.poll_timeout_ms
+        response = self._post_json(f"{base_url}/ilink/bot/getupdates", payload, token=token, timeout_ms=timeout_ms)
         self.state.mark_poll(now=now_iso())
         if response.get("ret") not in (None, 0):
             raise RuntimeError(f"weixin getupdates failed: ret={response.get('ret')} errcode={response.get('errcode')} errmsg={response.get('errmsg')}")
@@ -90,6 +104,7 @@ class WeixinBridge:
         for msg in response.get("msgs") or []:
             self._handle_message(base_url, token, msg)
 
+        self._poll_pending_tasks(base_url, token)
         self._save_state()
 
     def _handle_message(self, base_url: str, token: str, msg: dict[str, Any]) -> None:
@@ -99,6 +114,7 @@ class WeixinBridge:
         sender_id = str(msg.get("from_user_id") or "").strip()
         if not sender_id:
             return
+        self._remember_context_token(sender_id, msg.get("context_token"))
 
         text = self._extract_text(msg)
         if not text:
@@ -150,6 +166,8 @@ class WeixinBridge:
             raise RuntimeError(str(response.error or "submit_task failed"))
         task = response.payload.get("task") or {}
         task_id = str(task.get("id") or "")
+        if not task_id:
+            raise RuntimeError("submit_task returned invalid task payload")
         self._send_text(
             base_url,
             token,
@@ -157,93 +175,29 @@ class WeixinBridge:
             msg.get("context_token"),
             self._t(
                 "bridge.task.accepted",
-                task_id=task_id or "-",
+                task_id=task_id,
                 session=session_name or "default",
                 backend=session_meta.backend,
                 model=self._resolve_session_model(session_meta),
             ),
         )
-
-        result = self._wait_for_task(
-            str(task["id"]),
-            on_status_change=lambda status_task: self._notify_task_progress(
-                base_url,
-                token,
-                sender_id,
-                msg.get("context_token"),
-                status_task,
-            ),
+        tracked_task = WeixinPendingTaskState(
+            task_id=task_id,
+            sender_id=sender_id,
+            session_name=session_name or "default",
+            backend=session_meta.backend,
+            model=self._resolve_session_model(session_meta),
+            workdir=self._resolve_session_workdir(session_meta),
+            context_token=str(msg.get("context_token") or "").strip(),
         )
-        if result.status == "succeeded":
-            reply = result.output.strip()
-            if self.config.auto_reply_prefix:
-                reply = f"{self.config.auto_reply_prefix}{reply}"
-            self._send_text(base_url, token, sender_id, msg.get("context_token"), reply)
-            self.state.record_handled()
-        elif result.status == "canceled":
-            backend_name = str(result.backend or session_meta.backend or self.config.default_backend).strip()
-            self._send_text(
-                base_url,
-                token,
-                sender_id,
-                msg.get("context_token"),
-                self._t(
-                    "bridge.task.canceled",
-                    backend=backend_name,
-                    error=str(result.error or "task canceled").strip(),
-                    hint=build_task_followup_hint(
-                        task_id=result.id,
-                        session_name=result.session_name or "default",
-                        allow_retry=True,
-                    ),
-                ),
-            )
-        else:
-            backend_name = str(result.backend or session_meta.backend or self.config.default_backend).strip()
-            error_text = str(result.error or "task failed").strip()
-            self._send_text(
-                base_url,
-                token,
-                sender_id,
-                msg.get("context_token"),
-                self._t(
-                    "bridge.task.failed",
-                    backend=backend_name,
-                    error=error_text,
-                    hint=build_task_followup_hint(
-                        task_id=result.id,
-                        session_name=result.session_name or "default",
-                        allow_retry=True,
-                    ),
-                ),
-            )
-            self.state.record_failed()
-
-    def _wait_for_task(self, task_id: str, on_status_change=None) -> HubTask:
-        deadline = time.time() + max(self.config.hub_task_timeout_seconds, 10)
-        last_status = ""
-        while time.time() < deadline:
-            data = self._ipc_request("get_task", {"task_id": task_id}, timeout_seconds=5)
-            if not data.ok:
-                raise RuntimeError(str(data.error or "get_task failed"))
-            task = HubTask.from_dict(data.payload.get("task"), default_backend=self.config.default_backend)
-            if task is None:
-                raise RuntimeError("get_task returned invalid task payload")
-            if task.status != last_status:
-                last_status = task.status
-                if on_status_change is not None and task.status in {"running"}:
-                    on_status_change(task)
-            if task.status in {"succeeded", "failed", "canceled"}:
-                return task
-            time.sleep(2)
-        raise TimeoutError(f"task timed out: {task_id}")
+        self.pending_tasks[tracked_task.task_id] = tracked_task
+        self._save_pending_tasks()
 
     def _notify_task_progress(
         self,
         base_url: str,
         token: str,
-        sender_id: str,
-        context_token: Any,
+        tracked: WeixinPendingTaskState,
         task: HubTask,
     ) -> None:
         if task.status != "running":
@@ -251,15 +205,106 @@ class WeixinBridge:
         self._send_text(
             base_url,
             token,
-            sender_id,
-            context_token,
+            tracked.sender_id,
+            self._resolve_context_token_for_sender(tracked),
             self._t(
                 "bridge.task.running",
                 task_id=task.id,
                 session=task.session_name or "default",
                 backend=task.backend or self.config.default_backend,
+                model=task.model.strip() or tracked.model or "-",
+                workdir=task.workdir.strip() or tracked.workdir or "-",
             ),
         )
+
+    def _poll_pending_tasks(self, base_url: str, token: str) -> None:
+        if not self.pending_tasks:
+            return
+        for task_id, tracked in list(self.pending_tasks.items()):
+            try:
+                data = self._ipc_request("get_task", {"task_id": task_id}, timeout_seconds=5)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[bridge] pending task poll failed for {task_id}: {exc}")
+                continue
+            if not data.ok:
+                print(f"[bridge] pending task poll failed for {task_id}: {data.error or 'unknown error'}")
+                continue
+            task = HubTask.from_dict(data.payload.get("task"), default_backend=self.config.default_backend)
+            if task is None:
+                print(f"[bridge] pending task payload invalid for {task_id}")
+                continue
+            if task.status == "running" and tracked.last_status != "running":
+                self._notify_task_progress(base_url, token, tracked, task)
+                tracked.last_status = "running"
+                self._save_pending_tasks()
+            if task.status in {"succeeded", "failed", "canceled"}:
+                self._notify_task_terminal(base_url, token, tracked, task)
+                self.pending_tasks.pop(task_id, None)
+                self._save_pending_tasks()
+
+    def _notify_task_terminal(
+        self,
+        base_url: str,
+        token: str,
+        tracked: WeixinPendingTaskState,
+        task: HubTask,
+    ) -> None:
+        context_token = self._resolve_context_token_for_sender(tracked)
+        if task.status == "succeeded":
+            reply = self._t(
+                "bridge.task.succeeded",
+                task_id=task.id,
+                session=task.session_name or tracked.session_name or "default",
+                session_id=task.session_id or "-",
+                backend=task.backend or tracked.backend or self.config.default_backend,
+                model=task.model.strip() or tracked.model or "-",
+                workdir=task.workdir.strip() or tracked.workdir or "-",
+                result=(f"{self.config.auto_reply_prefix}{task.output.strip()}" if self.config.auto_reply_prefix else task.output.strip()) or "(empty)",
+            )
+            self._send_text(base_url, token, tracked.sender_id, context_token, reply)
+            self.state.record_handled()
+            return
+        if task.status == "canceled":
+            self._send_text(
+                base_url,
+                token,
+                tracked.sender_id,
+                context_token,
+                self._t(
+                    "bridge.task.canceled",
+                    task_id=task.id,
+                    session=task.session_name or tracked.session_name or "default",
+                    session_id=task.session_id or "-",
+                    backend=task.backend or tracked.backend or self.config.default_backend,
+                    error=str(task.error or "task canceled").strip(),
+                    hint=build_task_followup_hint(
+                        task_id=task.id,
+                        session_name=task.session_name or tracked.session_name or "default",
+                        allow_retry=True,
+                    ),
+                ),
+            )
+            return
+        self._send_text(
+            base_url,
+            token,
+            tracked.sender_id,
+            context_token,
+            self._t(
+                "bridge.task.failed",
+                task_id=task.id,
+                session=task.session_name or tracked.session_name or "default",
+                session_id=task.session_id or "-",
+                backend=task.backend or tracked.backend or self.config.default_backend,
+                error=str(task.error or "task failed").strip(),
+                hint=build_task_followup_hint(
+                    task_id=task.id,
+                    session_name=task.session_name or tracked.session_name or "default",
+                    allow_retry=True,
+                ),
+            ),
+        )
+        self.state.record_failed()
 
     def _send_text(self, base_url: str, token: str, to_user_id: str, context_token: Any, text: str) -> None:
         text = (text or "").strip()
@@ -283,6 +328,19 @@ class WeixinBridge:
             "base_info": {"channel_version": "2.1.1"},
         }
         self._post_json(f"{base_url}/ilink/bot/sendmessage", body, token=token, timeout_ms=15000)
+
+    def _remember_context_token(self, sender_id: str, context_token: Any) -> None:
+        cleaned_sender_id = str(sender_id or "").strip()
+        cleaned_context_token = str(context_token or "").strip()
+        if not cleaned_sender_id or not cleaned_context_token:
+            return
+        if self.context_tokens.get(cleaned_sender_id) == cleaned_context_token:
+            return
+        self.context_tokens[cleaned_sender_id] = cleaned_context_token
+        save_account_context_tokens(self.account_path, self.context_tokens)
+
+    def _resolve_context_token_for_sender(self, tracked: WeixinPendingTaskState) -> str:
+        return self.context_tokens.get(tracked.sender_id, "") or tracked.context_token
 
     def _extract_text(self, msg: dict[str, Any]) -> str:
         parts = []
@@ -1325,6 +1383,25 @@ class WeixinBridge:
             sync_file=str(self.sync_path),
         )
         save_json(STATE_PATH, self.state.to_dict())
+
+    def _load_pending_tasks(self) -> dict[str, WeixinPendingTaskState]:
+        data = load_json(PENDING_TASKS_PATH, {}, expect_type=dict)
+        if not isinstance(data, dict):
+            return {}
+        pending_tasks: dict[str, WeixinPendingTaskState] = {}
+        for task_id, raw_task in data.items():
+            tracked = WeixinPendingTaskState.from_dict(raw_task)
+            if tracked is None:
+                continue
+            pending_tasks[str(task_id)] = tracked
+        return pending_tasks
+
+    def _save_pending_tasks(self) -> None:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        save_json(
+            PENDING_TASKS_PATH,
+            {task_id: tracked.to_dict() for task_id, tracked in self.pending_tasks.items()},
+        )
 
     def _load_conversations(self) -> dict[str, Any]:
         data = load_json(CONVERSATION_PATH, {}, expect_type=dict)

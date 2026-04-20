@@ -132,6 +132,9 @@ class FeedbackBridge(FakeBridge):
     def _send_text(self, base_url: str, token: str, to_user_id: str, context_token, text: str) -> None:
         self.sent_texts.append(text)
 
+    def poll_pending(self) -> None:
+        self._poll_pending_tasks("https://example.com", "token")
+
 
 def _fake_agent(
     agent_id: str,
@@ -228,9 +231,14 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                 "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
             },
         )
+        self.assertEqual(1, len(bridge.sent_texts))
         self.assertIn("Task accepted", bridge.sent_texts[0])
+        bridge.poll_pending()
+        bridge.poll_pending()
         self.assertIn("Task is now running", bridge.sent_texts[1])
-        self.assertEqual("world", bridge.sent_texts[2])
+        self.assertIn("Task completed", bridge.sent_texts[2])
+        self.assertIn("Session ID: -", bridge.sent_texts[2])
+        self.assertIn("Result:\nworld", bridge.sent_texts[2])
 
     def test_handle_message_failure_includes_retry_hint(self) -> None:
         bridge = FeedbackBridge(
@@ -261,7 +269,9 @@ class WeixinBridgeCommandTests(unittest.TestCase):
             },
         )
         self.assertIn("Task accepted", bridge.sent_texts[0])
+        bridge.poll_pending()
         self.assertIn("/retry task-feedback-001", bridge.sent_texts[-1])
+        self.assertIn("Session ID: -", bridge.sent_texts[-1])
 
     def test_handle_message_canceled_includes_retry_hint(self) -> None:
         bridge = FeedbackBridge(
@@ -303,9 +313,47 @@ class WeixinBridgeCommandTests(unittest.TestCase):
             },
         )
         self.assertIn("Task accepted", bridge.sent_texts[0])
+        bridge.poll_pending()
+        bridge.poll_pending()
         self.assertIn("Task is now running", bridge.sent_texts[1])
         self.assertIn("task was canceled", bridge.sent_texts[-1])
         self.assertIn("/retry task-feedback-001", bridge.sent_texts[-1])
+
+    def test_task_result_keeps_original_session_after_switch(self) -> None:
+        bridge = FeedbackBridge(
+            BridgeConfig.load(),
+            [
+                {
+                    "id": "task-feedback-001",
+                    "sender_id": "sender-test",
+                    "session_name": "default",
+                    "session_id": "sess-001",
+                    "status": "succeeded",
+                    "agent_id": "main",
+                    "agent_name": "default",
+                    "backend": "codex",
+                    "prompt": "hello",
+                    "output": "world",
+                    "created_at": "2026-04-20T12:00:00",
+                }
+            ],
+        )
+        bridge._handle_message(
+            "https://example.com",
+            "token",
+            {
+                "message_type": 1,
+                "from_user_id": "sender-test",
+                "context_token": "ctx",
+                "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
+            },
+        )
+        reply, handled = bridge._handle_control_command("sender-test", "/new deep-dive")
+        self.assertTrue(handled)
+        self.assertIn("deep-dive", reply)
+        bridge.poll_pending()
+        self.assertIn("Session: default", bridge.sent_texts[-1])
+        self.assertIn("Session ID: sess-001", bridge.sent_texts[-1])
 
     def test_task_lookup_command_returns_summary(self) -> None:
         reply, handled = self.bridge._handle_control_command("sender-test", "/task task-test-001")

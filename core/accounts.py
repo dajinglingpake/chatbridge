@@ -73,6 +73,30 @@ def load_account_file_payload(account_path: Path) -> AccountFilePayload:
     return AccountFilePayload.from_dict(data)
 
 
+def context_tokens_path_for_account(account_path: Path) -> Path:
+    return account_path.with_name(f"{account_path.stem}.context-tokens.json")
+
+
+def load_account_context_tokens(account_path: Path) -> dict[str, str]:
+    payload = load_json(context_tokens_path_for_account(account_path), {}, expect_type=dict)
+    if not isinstance(payload, dict):
+        return {}
+    tokens: dict[str, str] = {}
+    for sender_id, context_token in payload.items():
+        cleaned_sender_id = str(sender_id or "").strip()
+        cleaned_context_token = str(context_token or "").strip()
+        if cleaned_sender_id and cleaned_context_token:
+            tokens[cleaned_sender_id] = cleaned_context_token
+    return tokens
+
+
+def save_account_context_tokens(account_path: Path, tokens: dict[str, str]) -> None:
+    save_json(
+        context_tokens_path_for_account(account_path),
+        {str(sender_id).strip(): str(context_token).strip() for sender_id, context_token in tokens.items() if str(sender_id).strip() and str(context_token).strip()},
+    )
+
+
 def resolve_ilink_base_url(config: BridgeConfig | None = None) -> str:
     resolved_config = config or BridgeConfig.load()
     active_account = resolved_config.get_active_account()
