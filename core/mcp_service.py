@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -13,7 +14,7 @@ from core.context_relations import build_context_relation_lines
 from core.dashboard import load_dashboard_state
 from core.json_store import load_json, save_json
 from core.state_models import HubTask, JsonObject, WeixinConversationBinding, WeixinSessionMeta
-from weixin_hub_bridge import WeixinBridge
+from weixin_hub_bridge import EVENT_LOG_PATH, WeixinBridge
 
 
 MANAGER_STATE_PATH = APP_DIR / ".runtime" / "state" / "chatbridge_manager_state.json"
@@ -207,6 +208,7 @@ def get_command_catalog() -> ManagerActionResult:
         {"command": "/model reset", "category": "session", "description": "恢复跟随 Agent 默认模型"},
         {"command": "/project <name|path>", "category": "session", "description": "切换当前会话工程目录"},
         {"command": "/project reset", "category": "session", "description": "恢复跟随 Agent 默认工程目录"},
+        {"command": "/events [count]", "category": "observe", "description": "查看最近异步回执事件"},
         {"command": "/agent", "category": "agent", "description": "查看当前微信桥默认 Agent"},
         {"command": "/agent list", "category": "agent", "description": "查看所有 Agent 摘要"},
         {"command": "/agent help", "category": "agent", "description": "查看当前 Agent CLI 能力说明"},
@@ -316,6 +318,7 @@ def get_management_snapshot(target_sender_id: str = "") -> ManagerActionResult:
             "running": len([task for task in dashboard.hub_state.tasks if task.status == "running"]),
             "failed": len([task for task in dashboard.hub_state.tasks if task.status == "failed"]),
         },
+        "recent_events": _load_recent_bridge_events(limit=5),
     }
     cleaned_sender_id = target_sender_id.strip()
     if cleaned_sender_id:
@@ -367,6 +370,7 @@ def get_management_snapshot(target_sender_id: str = "") -> ManagerActionResult:
                 session_model=_resolve_session_model(current_meta, bridge_agent_model),
                 session_workdir=_resolve_session_workdir(current_meta, bridge_agent_workdir),
             ),
+            "recent_events": _load_recent_bridge_events(limit=5, sender_id=cleaned_sender_id),
         }
         return ManagerActionResult(
             ok=True,
@@ -374,6 +378,30 @@ def get_management_snapshot(target_sender_id: str = "") -> ManagerActionResult:
             data=payload,
         )
     return ManagerActionResult(ok=True, summary="已返回 ChatBridge 总览快照。", data=payload)
+
+
+def _load_recent_bridge_events(*, limit: int = 5, sender_id: str = "") -> list[JsonObject]:
+    if not EVENT_LOG_PATH.exists():
+        return []
+    cleaned_sender_id = sender_id.strip()
+    entries: list[JsonObject] = []
+    for line in reversed(EVENT_LOG_PATH.read_text(encoding="utf-8", errors="replace").splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        raw_sender_id = str(parsed.get("sender_id") or "").strip()
+        if cleaned_sender_id and raw_sender_id != cleaned_sender_id:
+            continue
+        entries.append({str(key): value for key, value in parsed.items() if value is not None})
+        if len(entries) >= max(limit, 1):
+            break
+    return entries
 
 
 def _translate_context_key(key: str, **kwargs: object) -> str:

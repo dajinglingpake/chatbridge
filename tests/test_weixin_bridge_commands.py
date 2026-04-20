@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -215,85 +216,98 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         self.assertEqual("", bridge.state.last_error)
 
     def test_handle_message_sends_queued_and_running_feedback(self) -> None:
-        bridge = FeedbackBridge(
-            BridgeConfig.load(),
-            [
-                {
-                    "id": "task-feedback-001",
-                    "sender_id": "sender-test",
-                    "session_name": "default",
-                    "status": "running",
-                    "agent_id": "main",
-                    "agent_name": "default",
-                    "backend": "codex",
-                    "prompt": "hello",
-                    "created_at": "2026-04-20T12:00:00",
-                },
-                {
-                    "id": "task-feedback-001",
-                    "sender_id": "sender-test",
-                    "session_name": "default",
-                    "status": "succeeded",
-                    "agent_id": "main",
-                    "agent_name": "default",
-                    "backend": "codex",
-                    "prompt": "hello",
-                    "output": "world",
-                    "created_at": "2026-04-20T12:00:00",
-                },
-            ],
-        )
-        bridge._handle_message(
-            "https://example.com",
-            "token",
-            {
-                "message_type": 1,
-                "from_user_id": "sender-test",
-                "context_token": "ctx",
-                "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
-            },
-        )
-        self.assertEqual(1, len(bridge.sent_texts))
-        self.assertIn("Task accepted", bridge.sent_texts[0])
-        bridge.poll_pending()
-        bridge.poll_pending()
-        self.assertIn("Task is now running", bridge.sent_texts[1])
-        self.assertIn("Task completed", bridge.sent_texts[2])
-        self.assertIn("Session ID: -", bridge.sent_texts[2])
-        self.assertIn("Result:\nworld", bridge.sent_texts[2])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            event_log_path = Path(temp_dir) / "weixin_bridge_events.jsonl"
+            bridge = FeedbackBridge(
+                BridgeConfig.load(),
+                [
+                    {
+                        "id": "task-feedback-001",
+                        "sender_id": "sender-test",
+                        "session_name": "default",
+                        "status": "running",
+                        "agent_id": "main",
+                        "agent_name": "default",
+                        "backend": "codex",
+                        "prompt": "hello",
+                        "created_at": "2026-04-20T12:00:00",
+                    },
+                    {
+                        "id": "task-feedback-001",
+                        "sender_id": "sender-test",
+                        "session_name": "default",
+                        "status": "succeeded",
+                        "agent_id": "main",
+                        "agent_name": "default",
+                        "backend": "codex",
+                        "prompt": "hello",
+                        "output": "world",
+                        "created_at": "2026-04-20T12:00:00",
+                    },
+                ],
+            )
+            with patch("weixin_hub_bridge.EVENT_LOG_PATH", event_log_path):
+                bridge._handle_message(
+                    "https://example.com",
+                    "token",
+                    {
+                        "message_type": 1,
+                        "from_user_id": "sender-test",
+                        "context_token": "ctx",
+                        "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
+                    },
+                )
+                self.assertEqual(1, len(bridge.sent_texts))
+                self.assertIn("Task accepted", bridge.sent_texts[0])
+                bridge.poll_pending()
+                bridge.poll_pending()
+            self.assertIn("Task is now running", bridge.sent_texts[1])
+            self.assertIn("Task completed", bridge.sent_texts[2])
+            self.assertIn("Session ID: -", bridge.sent_texts[2])
+            self.assertIn("Result:\nworld", bridge.sent_texts[2])
+            entries = [json.loads(line) for line in event_log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            self.assertEqual(["accepted", "running", "succeeded"], [entry["event"] for entry in entries])
+            self.assertEqual("task-feedback-001", entries[-1]["task_id"])
+            self.assertEqual("default", entries[-1]["session_name"])
 
     def test_handle_message_failure_includes_retry_hint(self) -> None:
-        bridge = FeedbackBridge(
-            BridgeConfig.load(),
-            [
-                {
-                    "id": "task-feedback-001",
-                    "sender_id": "sender-test",
-                    "session_name": "default",
-                    "status": "failed",
-                    "agent_id": "main",
-                    "agent_name": "default",
-                    "backend": "codex",
-                    "prompt": "hello",
-                    "error": "boom",
-                    "created_at": "2026-04-20T12:00:00",
-                }
-            ],
-        )
-        bridge._handle_message(
-            "https://example.com",
-            "token",
-            {
-                "message_type": 1,
-                "from_user_id": "sender-test",
-                "context_token": "ctx",
-                "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
-            },
-        )
-        self.assertIn("Task accepted", bridge.sent_texts[0])
-        bridge.poll_pending()
-        self.assertIn("/retry task-feedback-001", bridge.sent_texts[-1])
-        self.assertIn("Session ID: -", bridge.sent_texts[-1])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            event_log_path = Path(temp_dir) / "weixin_bridge_events.jsonl"
+            bridge = FeedbackBridge(
+                BridgeConfig.load(),
+                [
+                    {
+                        "id": "task-feedback-001",
+                        "sender_id": "sender-test",
+                        "session_name": "default",
+                        "status": "failed",
+                        "agent_id": "main",
+                        "agent_name": "default",
+                        "backend": "codex",
+                        "prompt": "hello",
+                        "error": "boom",
+                        "created_at": "2026-04-20T12:00:00",
+                    }
+                ],
+            )
+            with patch("weixin_hub_bridge.EVENT_LOG_PATH", event_log_path):
+                bridge._handle_message(
+                    "https://example.com",
+                    "token",
+                    {
+                        "message_type": 1,
+                        "from_user_id": "sender-test",
+                        "context_token": "ctx",
+                        "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
+                    },
+                )
+                self.assertIn("Task accepted", bridge.sent_texts[0])
+                bridge.poll_pending()
+            self.assertIn("/retry task-feedback-001", bridge.sent_texts[-1])
+            self.assertIn("Session ID: -", bridge.sent_texts[-1])
+            entries = [json.loads(line) for line in event_log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            self.assertEqual("failed", entries[-1]["event"])
+            self.assertEqual("boom", entries[-1]["error"])
 
     def test_handle_message_canceled_includes_retry_hint(self) -> None:
         bridge = FeedbackBridge(
@@ -376,6 +390,48 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         bridge.poll_pending()
         self.assertIn("Session: default", bridge.sent_texts[-1])
         self.assertIn("Session ID: sess-001", bridge.sent_texts[-1])
+
+    def test_events_command_returns_recent_async_events(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            event_log_path = Path(temp_dir) / "weixin_bridge_events.jsonl"
+            event_log_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "at": "2026-04-20T12:00:00",
+                                "event": "accepted",
+                                "task_id": "task-a",
+                                "sender_id": "sender-test",
+                                "session_name": "default",
+                                "session_id": "",
+                                "backend": "codex",
+                            },
+                            ensure_ascii=False,
+                        ),
+                        json.dumps(
+                            {
+                                "at": "2026-04-20T12:00:05",
+                                "event": "succeeded",
+                                "task_id": "task-a",
+                                "sender_id": "sender-test",
+                                "session_name": "default",
+                                "session_id": "sess-123",
+                                "result_preview": "hello world",
+                            },
+                            ensure_ascii=False,
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with patch("weixin_hub_bridge.EVENT_LOG_PATH", event_log_path):
+                reply, handled = self.bridge._handle_control_command("sender-test", "/events 2")
+        self.assertTrue(handled)
+        self.assertIn("Recent async events: 2/2", reply)
+        self.assertIn("task-a", reply)
+        self.assertIn("sess-123", reply)
 
     def test_task_lookup_command_returns_summary(self) -> None:
         reply, handled = self.bridge._handle_control_command("sender-test", "/task task-test-001")

@@ -114,3 +114,34 @@ class McpServiceTests(unittest.TestCase):
         relation_lines = result.data["target_sender"]["relation_lines"]
         self.assertTrue(any("Agent main" in line for line in relation_lines))
         self.assertTrue(any("Session default" in line for line in relation_lines))
+
+    def test_management_snapshot_includes_recent_events(self) -> None:
+        fake_agent = SimpleNamespace(
+            id="main",
+            name="Main",
+            session_file=str(self.app_dir / "sessions" / "main.txt"),
+            workdir=str(self.app_dir / "workspace" / "main"),
+            backend="codex",
+            model="gpt-5.4",
+            enabled=True,
+        )
+        fake_dashboard = SimpleNamespace(
+            snapshot=SimpleNamespace(bridge_running=True, hub_running=True),
+            bridge_conversations={},
+            hub_state=SimpleNamespace(agents=[], tasks=[]),
+        )
+        fake_config = SimpleNamespace(backend_id="main", default_backend="codex", active_account_id="wechat-bot")
+        event_log_path = self.app_dir / ".runtime" / "logs" / "weixin_bridge_events.jsonl"
+        event_log_path.parent.mkdir(parents=True, exist_ok=True)
+        event_log_path.write_text(
+            '{"at":"2026-04-20T12:00:00","event":"accepted","task_id":"task-a","sender_id":"sender-a","session_name":"default"}\n',
+            encoding="utf-8",
+        )
+        with patch("core.mcp_service.EVENT_LOG_PATH", event_log_path):
+            with patch("core.mcp_service.BridgeConfig.load", return_value=fake_config):
+                with patch("core.mcp_service.HubConfig.load", return_value=SimpleNamespace(agents=[fake_agent])):
+                    with patch("core.mcp_service.load_dashboard_state", return_value=fake_dashboard):
+                        result = get_management_snapshot("sender-a")
+        self.assertTrue(result.ok)
+        self.assertEqual("accepted", result.data["recent_events"][0]["event"])
+        self.assertEqual("accepted", result.data["target_sender"]["recent_events"][0]["event"])

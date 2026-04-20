@@ -33,10 +33,12 @@ from localization import Localizer
 
 RUNTIME_DIR = APP_DIR / ".runtime"
 STATE_DIR = RUNTIME_DIR / "state"
+LOG_DIR = RUNTIME_DIR / "logs"
 EXPORT_DIR = RUNTIME_DIR / "exports"
 STATE_PATH = STATE_DIR / "weixin_hub_bridge_state.json"
 CONVERSATION_PATH = STATE_DIR / "weixin_conversations.json"
 PENDING_TASKS_PATH = STATE_DIR / "weixin_pending_tasks.json"
+EVENT_LOG_PATH = LOG_DIR / "weixin_bridge_events.jsonl"
 DEFAULT_WEIXIN_BASE_URL = "https://ilinkai.weixin.qq.com"
 ILINK_APP_ID = "bot"
 ILINK_APP_CLIENT_VERSION = (2 << 16) | (1 << 8) | 1
@@ -187,6 +189,15 @@ class WeixinBridge:
                 model=self._display_model(self._effective_session_model(session_meta)),
             ),
         )
+        self._append_event_log(
+            event="accepted",
+            task_id=task_id,
+            sender_id=sender_id,
+            session_name=session_name or "default",
+            backend=session_meta.backend,
+            model=self._display_model(self._effective_session_model(session_meta)),
+            workdir=self._resolve_session_workdir(session_meta),
+        )
         tracked_task = WeixinPendingTaskState(
             task_id=task_id,
             sender_id=sender_id,
@@ -221,6 +232,16 @@ class WeixinBridge:
                 model=self._display_model(task.model.strip() or tracked.model),
                 workdir=task.workdir.strip() or tracked.workdir or "-",
             ),
+        )
+        self._append_event_log(
+            event="running",
+            task_id=task.id,
+            sender_id=tracked.sender_id,
+            session_name=task.session_name or tracked.session_name or "default",
+            session_id=task.session_id or "",
+            backend=task.backend or self.config.default_backend,
+            model=self._display_model(task.model.strip() or tracked.model),
+            workdir=task.workdir.strip() or tracked.workdir or "-",
         )
 
     def _poll_pending_tasks(self, base_url: str, token: str) -> None:
@@ -268,6 +289,18 @@ class WeixinBridge:
                 result=(f"{self.config.auto_reply_prefix}{task.output.strip()}" if self.config.auto_reply_prefix else task.output.strip()) or "(empty)",
             )
             self._send_text(base_url, token, tracked.sender_id, context_token, reply)
+            self._append_event_log(
+                event="succeeded",
+                task_id=task.id,
+                sender_id=tracked.sender_id,
+                session_name=task.session_name or tracked.session_name or "default",
+                session_id=task.session_id or "",
+                backend=task.backend or tracked.backend or self.config.default_backend,
+                model=self._display_model(task.model.strip() or tracked.model),
+                workdir=task.workdir.strip() or tracked.workdir or "-",
+                status=task.status,
+                result_preview=(task.output or "").strip()[:240],
+            )
             self.state.record_handled()
             return
         if task.status == "canceled":
@@ -290,6 +323,18 @@ class WeixinBridge:
                     ),
                 ),
             )
+            self._append_event_log(
+                event="canceled",
+                task_id=task.id,
+                sender_id=tracked.sender_id,
+                session_name=task.session_name or tracked.session_name or "default",
+                session_id=task.session_id or "",
+                backend=task.backend or tracked.backend or self.config.default_backend,
+                model=self._display_model(task.model.strip() or tracked.model),
+                workdir=task.workdir.strip() or tracked.workdir or "-",
+                status=task.status,
+                error=(task.error or "").strip()[:240],
+            )
             return
         self._send_text(
             base_url,
@@ -309,6 +354,18 @@ class WeixinBridge:
                     allow_retry=True,
                 ),
             ),
+        )
+        self._append_event_log(
+            event="failed",
+            task_id=task.id,
+            sender_id=tracked.sender_id,
+            session_name=task.session_name or tracked.session_name or "default",
+            session_id=task.session_id or "",
+            backend=task.backend or tracked.backend or self.config.default_backend,
+            model=self._display_model(task.model.strip() or tracked.model),
+            workdir=task.workdir.strip() or tracked.workdir or "-",
+            status=task.status,
+            error=(task.error or "").strip()[:240],
         )
         self.state.record_failed()
 
@@ -347,6 +404,39 @@ class WeixinBridge:
 
     def _resolve_context_token_for_sender(self, tracked: WeixinPendingTaskState) -> str:
         return self.context_tokens.get(tracked.sender_id, "") or tracked.context_token
+
+    def _append_event_log(self, event: str, **payload: Any) -> None:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "at": now_iso(),
+            "event": event,
+            **payload,
+        }
+        with EVENT_LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    def _load_recent_events(self, *, sender_id: str = "", limit: int = 5) -> list[dict[str, str]]:
+        if not EVENT_LOG_PATH.exists():
+            return []
+        cleaned_sender_id = sender_id.strip()
+        entries: list[dict[str, str]] = []
+        for line in reversed(EVENT_LOG_PATH.read_text(encoding="utf-8", errors="replace").splitlines()):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                raw = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(raw, dict):
+                continue
+            raw_sender_id = str(raw.get("sender_id") or "").strip()
+            if cleaned_sender_id and raw_sender_id != cleaned_sender_id:
+                continue
+            entries.append({str(key): str(value) for key, value in raw.items() if value is not None})
+            if len(entries) >= max(limit, 1):
+                break
+        return entries
 
     def _extract_text(self, msg: dict[str, Any]) -> str:
         parts = []
@@ -408,6 +498,7 @@ class WeixinBridge:
                 self._t("bridge.help.preview"),
                 self._t("bridge.help.history"),
                 self._t("bridge.help.export"),
+                self._t("bridge.help.events"),
                 self._t("bridge.help.use"),
                 self._t("bridge.help.rename"),
                 self._t("bridge.help.delete"),
@@ -495,6 +586,14 @@ class WeixinBridge:
             if session_name not in sessions:
                 return self._t("bridge.session.preview.not_found", session=session_name), True
             return self._export_session_history(sender_id, session_name, binding)
+
+        if command == "/events":
+            raw_limit = parts[1].strip() if len(parts) >= 2 else ""
+            try:
+                limit = int(raw_limit) if raw_limit else 5
+            except ValueError:
+                return self._t("bridge.events.usage"), True
+            return self._render_recent_events(sender_id, limit=limit), True
 
         if command == "/task":
             if len(parts) < 2:
@@ -1298,6 +1397,27 @@ class WeixinBridge:
             prompt=prompt,
             result=result,
         )
+
+    def _render_recent_events(self, sender_id: str, *, limit: int) -> str:
+        bounded_limit = min(max(limit, 1), 20)
+        entries = self._load_recent_events(sender_id=sender_id, limit=bounded_limit)
+        lines = [self._t("bridge.events.title", count=len(entries), limit=bounded_limit)]
+        if not entries:
+            lines.append(self._t("bridge.events.empty"))
+            return "\n".join(lines)
+        for entry in entries:
+            lines.append(
+                self._t(
+                    "bridge.events.item",
+                    at=str(entry.get("at") or "-"),
+                    event=str(entry.get("event") or "unknown"),
+                    task_id=str(entry.get("task_id") or "-"),
+                    session=str(entry.get("session_name") or "default"),
+                    session_id=str(entry.get("session_id") or "-") or "-",
+                    detail=str(entry.get("result_preview") or entry.get("error") or entry.get("backend") or "-"),
+                )
+            )
+        return "\n".join(lines)
 
     @staticmethod
     def _normalize_command_text(text: str) -> str:
