@@ -135,6 +135,9 @@ class HubTask:
     session_name: str = ""
     workdir: str = ""
     model: str = ""
+    bridge_conversations_path: str = ""
+    bridge_event_log_path: str = ""
+    manager_state_path: str = ""
 
     @classmethod
     def from_dict(cls, raw: object, *, default_backend: str) -> "HubTask | None":
@@ -163,6 +166,9 @@ class HubTask:
             session_name=str(raw.get("session_name") or "").strip(),
             workdir=str(raw.get("workdir") or "").strip(),
             model=str(raw.get("model") or "").strip(),
+            bridge_conversations_path=str(raw.get("bridge_conversations_path") or "").strip(),
+            bridge_event_log_path=str(raw.get("bridge_event_log_path") or "").strip(),
+            manager_state_path=str(raw.get("manager_state_path") or "").strip(),
         )
 
     def to_dict(self) -> JsonObject:
@@ -301,12 +307,14 @@ class WeixinSessionMeta:
 @dataclass
 class WeixinConversationBinding:
     current_session: str = "default"
+    manager_mode: bool = True
     sessions: dict[str, WeixinSessionMeta] = field(default_factory=dict)
 
     @classmethod
     def create(cls, *, default_backend: str, now: str) -> "WeixinConversationBinding":
         return cls(
             current_session="default",
+            manager_mode=True,
             sessions={
                 "default": WeixinSessionMeta(
                     backend=default_backend,
@@ -353,7 +361,11 @@ class WeixinConversationBinding:
                 created_at=now,
                 updated_at=now,
             )
-        return cls(current_session=current_session, sessions=sessions)
+        return cls(
+            current_session=current_session,
+            manager_mode=bool(raw.get("manager_mode", True)),
+            sessions=sessions,
+        )
 
     def ensure_session(
         self,
@@ -393,6 +405,7 @@ class WeixinConversationBinding:
     def to_dict(self) -> JsonObject:
         return {
             "current_session": self.current_session,
+            "manager_mode": self.manager_mode,
             "sessions": {name: meta.to_dict() for name, meta in self.sessions.items()},
         }
 
@@ -472,6 +485,7 @@ class WeixinPendingTaskState:
     sender_id: str
     session_name: str
     backend: str
+    source: str = "wechat"
     model: str = ""
     workdir: str = ""
     context_token: str = ""
@@ -490,6 +504,7 @@ class WeixinPendingTaskState:
             sender_id=sender_id,
             session_name=str(raw.get("session_name") or "default").strip() or "default",
             backend=str(raw.get("backend") or "").strip(),
+            source=str(raw.get("source") or "wechat").strip() or "wechat",
             model=str(raw.get("model") or "").strip(),
             workdir=str(raw.get("workdir") or "").strip(),
             context_token=str(raw.get("context_token") or "").strip(),

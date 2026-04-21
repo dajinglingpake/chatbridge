@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import random
 import time
 import unicodedata
@@ -18,6 +19,17 @@ from core.accounts import load_account_context_tokens, save_account_context_toke
 from core.context_relations import build_context_relation_lines
 from core.http_json import request_json
 from core.json_store import load_json, save_json
+from core.manager_agent_runtime import DEFAULT_MANAGER_MODEL
+from core.runtime_paths import (
+    BRIDGE_EVENT_LOG_PATH,
+    BRIDGE_MESSAGE_AUDIT_LOG_PATH,
+    BRIDGE_PENDING_TASKS_PATH,
+    BRIDGE_STATE_PATH,
+    BRIDGE_CONVERSATIONS_PATH,
+    LOG_DIR,
+    RUNTIME_DIR,
+    STATE_DIR,
+)
 from core.state_models import (
     HubTask,
     IpcResponseEnvelope,
@@ -31,30 +43,40 @@ from local_ipc import create_request, wait_for_response
 from localization import Localizer
 
 
-RUNTIME_DIR = APP_DIR / ".runtime"
-STATE_DIR = RUNTIME_DIR / "state"
-LOG_DIR = RUNTIME_DIR / "logs"
 EXPORT_DIR = RUNTIME_DIR / "exports"
-STATE_PATH = STATE_DIR / "weixin_hub_bridge_state.json"
-CONVERSATION_PATH = STATE_DIR / "weixin_conversations.json"
-PENDING_TASKS_PATH = STATE_DIR / "weixin_pending_tasks.json"
-EVENT_LOG_PATH = LOG_DIR / "weixin_bridge_events.jsonl"
+STATE_PATH = BRIDGE_STATE_PATH
+CONVERSATION_PATH = BRIDGE_CONVERSATIONS_PATH
+PENDING_TASKS_PATH = BRIDGE_PENDING_TASKS_PATH
+EVENT_LOG_PATH = BRIDGE_EVENT_LOG_PATH
+MESSAGE_AUDIT_LOG_PATH = BRIDGE_MESSAGE_AUDIT_LOG_PATH
 DEFAULT_WEIXIN_BASE_URL = "https://ilinkai.weixin.qq.com"
 ILINK_APP_ID = "bot"
 ILINK_APP_CLIENT_VERSION = (2 << 16) | (1 << 8) | 1
 SUPPORTED_BACKENDS = set(supported_backend_keys())
 SESSION_PAGE_SIZE = 5
 ACTIVE_TASK_POLL_TIMEOUT_MS = 1000
+WECHAT_MANAGER_SOURCE = "wechat-manager"
+MANAGER_SESSION_PREFIX = "__manager__"
 
 
 def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def resolve_bridge_language(config_language: str) -> str:
+    cleaned = str(config_language or "").strip()
+    if cleaned and cleaned.lower() != "auto":
+        return cleaned
+    env_language = str(os.environ.get("CHATBRIDGE_LANG") or "").strip()
+    if env_language:
+        return env_language
+    return "zh-CN"
+
+
 class WeixinBridge:
     def __init__(self, config: BridgeConfig) -> None:
         self.config = config
-        self.localizer = Localizer(config.language)
+        self.localizer = Localizer(resolve_bridge_language(config.language))
         self.account_path = Path(config.account_file)
         self.sync_path = Path(config.sync_file)
         self._ensure_local_account_storage()
@@ -77,6 +99,7 @@ class WeixinBridge:
             try:
                 self.poll_once()
                 self.state.clear_error()
+                self._save_state()
             except Exception as exc:  # noqa: BLE001
                 self.state.set_error(str(exc))
                 self._save_state()
@@ -99,6 +122,7 @@ class WeixinBridge:
         except RuntimeError as exc:
             if self._is_expected_getupdates_timeout(exc):
                 self.state.mark_poll(now=now_iso())
+                self._save_state()
                 return
             raise
         self.state.mark_poll(now=now_iso())
@@ -128,9 +152,21 @@ class WeixinBridge:
         if not text:
             return
         if any(text.startswith(prefix) for prefix in self.config.ignore_prefixes):
+            self._append_message_audit(
+                sender_id=sender_id,
+                text=text,
+                route="ignored",
+                reason="ignore_prefix",
+            )
             return
         message_key = self._message_key(msg, text)
         if self._is_duplicate_message(message_key):
+            self._append_message_audit(
+                sender_id=sender_id,
+                text=text,
+                route="ignored",
+                reason="duplicate",
+            )
             return
 
         binding = self._ensure_conversation(sender_id)
@@ -143,6 +179,14 @@ class WeixinBridge:
         if passthrough_prompt is None:
             reply, handled = self._handle_control_command(sender_id, text)
             if handled:
+                self._append_message_audit(
+                    sender_id=sender_id,
+                    text=text,
+                    route="control_command",
+                    session_name=session_name or "default",
+                    manager_mode=binding.manager_mode,
+                    command=self._normalize_command_text(text).split(maxsplit=1)[0].lower(),
+                )
                 if reply:
                     self._send_text(base_url, token, sender_id, msg.get("context_token"), reply)
                     self.state.record_handled()
@@ -152,21 +196,80 @@ class WeixinBridge:
         else:
             prompt = passthrough_prompt
         if not prompt:
+            self._append_message_audit(
+                sender_id=sender_id,
+                text=text,
+                route="ignored",
+                reason="empty_prompt",
+            )
             return
 
         self.state.mark_message(now=now_iso(), sender_id=sender_id)
+        manager_mode = passthrough_prompt is None and binding.manager_mode
+        task_source = WECHAT_MANAGER_SOURCE if manager_mode else "wechat"
+        task_session_name = self._manager_session_name(sender_id) if manager_mode else session_name
+        task_backend = ""
+        task_workdir = ""
+        task_model = ""
+        accepted_message_key = "bridge.task.accepted"
+        accepted_message_kwargs: dict[str, str] = {
+            "task_id": "",
+            "session": session_name or "default",
+            "backend": session_meta.backend,
+            "model": self._display_model(self._effective_session_model(session_meta)),
+        }
+        accepted_backend = session_meta.backend
+        accepted_model = self._display_model(self._effective_session_model(session_meta))
+        accepted_workdir = self._resolve_session_workdir(session_meta)
+        if manager_mode:
+            manager_agent = self._find_agent_config(self.config.backend_id)
+            accepted_backend = "codex"
+            accepted_model = manager_agent.model.strip() if manager_agent is not None else ""
+            accepted_model = accepted_model or DEFAULT_MANAGER_MODEL
+            accepted_workdir = str(APP_DIR)
+            accepted_message_key = "bridge.manage.task.accepted"
+            accepted_message_kwargs = {
+                "task_id": "",
+                "session": session_name or "default",
+                "agent": self.config.backend_id,
+                "backend": accepted_backend,
+                "model": accepted_model,
+            }
+            task_backend = accepted_backend
+            task_model = accepted_model
+            task_workdir = str(APP_DIR)
+        else:
+            task_backend = session_meta.backend
+            task_workdir = self._resolve_session_workdir(session_meta)
+            task_model = self._effective_session_model(session_meta)
+
+        self._append_message_audit(
+            sender_id=sender_id,
+            text=text,
+            route="task_submission",
+            manager_mode=manager_mode,
+            passthrough=passthrough_prompt is not None,
+            session_name=task_session_name or "default",
+            source=task_source,
+            backend=task_backend or session_meta.backend,
+            model=self._display_model(task_model),
+            workdir=task_workdir or self._resolve_session_workdir(session_meta),
+        )
 
         response = self._ipc_request(
             "submit_task",
             {
                 "agent_id": self.config.backend_id,
                 "prompt": prompt,
-                "source": "wechat",
+                "source": task_source,
                 "sender_id": sender_id,
-                "session_name": session_name,
-                "backend": session_meta.backend,
-                "workdir": self._resolve_session_workdir(session_meta),
-                "model": self._effective_session_model(session_meta),
+                "session_name": task_session_name,
+                "backend": task_backend,
+                "workdir": task_workdir,
+                "model": task_model,
+                "bridge_conversations_path": str(CONVERSATION_PATH),
+                "bridge_event_log_path": str(EVENT_LOG_PATH),
+                "manager_state_path": str(CONVERSATION_PATH.parent / "chatbridge_manager_state.json"),
             },
             timeout_seconds=15,
         )
@@ -181,30 +284,26 @@ class WeixinBridge:
             token,
             sender_id,
             msg.get("context_token"),
-            self._t(
-                "bridge.task.accepted",
-                task_id=task_id,
-                session=session_name or "default",
-                backend=session_meta.backend,
-                model=self._display_model(self._effective_session_model(session_meta)),
-            ),
+            self._t(accepted_message_key, **{**accepted_message_kwargs, "task_id": task_id}),
         )
         self._append_event_log(
             event="accepted",
             task_id=task_id,
             sender_id=sender_id,
-            session_name=session_name or "default",
-            backend=session_meta.backend,
-            model=self._display_model(self._effective_session_model(session_meta)),
-            workdir=self._resolve_session_workdir(session_meta),
+            session_name=task_session_name or "default",
+            backend=accepted_backend,
+            model=accepted_model,
+            workdir=accepted_workdir,
+            source=task_source,
         )
         tracked_task = WeixinPendingTaskState(
             task_id=task_id,
             sender_id=sender_id,
-            session_name=session_name or "default",
-            backend=session_meta.backend,
-            model=self._effective_session_model(session_meta),
-            workdir=self._resolve_session_workdir(session_meta),
+            session_name=task_session_name or "default",
+            backend=accepted_backend,
+            source=task_source,
+            model=accepted_model,
+            workdir=accepted_workdir,
             context_token=str(msg.get("context_token") or "").strip(),
         )
         self.pending_tasks[tracked_task.task_id] = tracked_task
@@ -218,6 +317,31 @@ class WeixinBridge:
         task: HubTask,
     ) -> None:
         if task.status != "running":
+            return
+        if tracked.source == WECHAT_MANAGER_SOURCE:
+            self._send_text(
+                base_url,
+                token,
+                tracked.sender_id,
+                self._resolve_context_token_for_sender(tracked),
+                self._t(
+                    "bridge.manage.task.running",
+                    task_id=task.id,
+                    agent=self.config.backend_id,
+                    backend=task.backend or tracked.backend or self.config.default_backend,
+                ),
+            )
+            self._append_event_log(
+                event="running",
+                task_id=task.id,
+                sender_id=tracked.sender_id,
+                session_name=tracked.session_name or "default",
+                session_id=task.session_id or "",
+                backend=task.backend or tracked.backend or self.config.default_backend,
+                model=self._display_model(task.model.strip() or tracked.model),
+                workdir=task.workdir.strip() or tracked.workdir or "-",
+                source=tracked.source,
+            )
             return
         self._send_text(
             base_url,
@@ -242,6 +366,7 @@ class WeixinBridge:
             backend=task.backend or self.config.default_backend,
             model=self._display_model(task.model.strip() or tracked.model),
             workdir=task.workdir.strip() or tracked.workdir or "-",
+            source=tracked.source,
         )
 
     def _poll_pending_tasks(self, base_url: str, token: str) -> None:
@@ -277,6 +402,74 @@ class WeixinBridge:
         task: HubTask,
     ) -> None:
         context_token = self._resolve_context_token_for_sender(tracked)
+        if tracked.source == WECHAT_MANAGER_SOURCE:
+            if task.status == "succeeded":
+                self._send_text(
+                    base_url,
+                    token,
+                    tracked.sender_id,
+                    context_token,
+                    (task.output or "").strip() or self._t("bridge.manage.task.empty"),
+                )
+                self._append_event_log(
+                    event="succeeded",
+                    task_id=task.id,
+                    sender_id=tracked.sender_id,
+                    session_name=tracked.session_name or "default",
+                    session_id=task.session_id or "",
+                    backend=task.backend or tracked.backend or self.config.default_backend,
+                    model=self._display_model(task.model.strip() or tracked.model),
+                    workdir=task.workdir.strip() or tracked.workdir or "-",
+                    status=task.status,
+                    result_preview=(task.output or "").strip()[:240],
+                    source=tracked.source,
+                )
+                self.state.record_handled()
+                return
+            if task.status == "canceled":
+                self._send_text(
+                    base_url,
+                    token,
+                    tracked.sender_id,
+                    context_token,
+                    self._t("bridge.manage.task.canceled", task_id=task.id, error=str(task.error or "task canceled").strip()),
+                )
+                self._append_event_log(
+                    event="canceled",
+                    task_id=task.id,
+                    sender_id=tracked.sender_id,
+                    session_name=tracked.session_name or "default",
+                    session_id=task.session_id or "",
+                    backend=task.backend or tracked.backend or self.config.default_backend,
+                    model=self._display_model(task.model.strip() or tracked.model),
+                    workdir=task.workdir.strip() or tracked.workdir or "-",
+                    status=task.status,
+                    error=(task.error or "").strip()[:240],
+                    source=tracked.source,
+                )
+                return
+            self._send_text(
+                base_url,
+                token,
+                tracked.sender_id,
+                context_token,
+                self._t("bridge.manage.task.failed", task_id=task.id, error=str(task.error or "task failed").strip()),
+            )
+            self._append_event_log(
+                event="failed",
+                task_id=task.id,
+                sender_id=tracked.sender_id,
+                session_name=tracked.session_name or "default",
+                session_id=task.session_id or "",
+                backend=task.backend or tracked.backend or self.config.default_backend,
+                model=self._display_model(task.model.strip() or tracked.model),
+                workdir=task.workdir.strip() or tracked.workdir or "-",
+                status=task.status,
+                error=(task.error or "").strip()[:240],
+                source=tracked.source,
+            )
+            self.state.record_failed()
+            return
         if task.status == "succeeded":
             reply = self._t(
                 "bridge.task.succeeded",
@@ -300,6 +493,7 @@ class WeixinBridge:
                 workdir=task.workdir.strip() or tracked.workdir or "-",
                 status=task.status,
                 result_preview=(task.output or "").strip()[:240],
+                source=tracked.source,
             )
             self.state.record_handled()
             return
@@ -334,6 +528,7 @@ class WeixinBridge:
                 workdir=task.workdir.strip() or tracked.workdir or "-",
                 status=task.status,
                 error=(task.error or "").strip()[:240],
+                source=tracked.source,
             )
             return
         self._send_text(
@@ -366,6 +561,7 @@ class WeixinBridge:
             workdir=task.workdir.strip() or tracked.workdir or "-",
             status=task.status,
             error=(task.error or "").strip()[:240],
+            source=tracked.source,
         )
         self.state.record_failed()
 
@@ -415,6 +611,20 @@ class WeixinBridge:
         with EVENT_LOG_PATH.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
+    def _append_message_audit(self, *, sender_id: str, text: str, route: str, **payload: Any) -> None:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        preview = " ".join(str(text or "").split())[:240]
+        entry = {
+            "at": now_iso(),
+            "sender_id": sender_id,
+            "text": str(text or ""),
+            "text_preview": preview,
+            "route": route,
+            **payload,
+        }
+        with MESSAGE_AUDIT_LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
     def _load_recent_events(self, *, sender_id: str = "", limit: int = 5) -> list[dict[str, str]]:
         if not EVENT_LOG_PATH.exists():
             return []
@@ -433,10 +643,20 @@ class WeixinBridge:
             raw_sender_id = str(raw.get("sender_id") or "").strip()
             if cleaned_sender_id and raw_sender_id != cleaned_sender_id:
                 continue
+            if self._is_hidden_legacy_event(raw):
+                continue
             entries.append({str(key): str(value) for key, value in raw.items() if value is not None})
             if len(entries) >= max(limit, 1):
                 break
         return entries
+
+    @staticmethod
+    def _is_hidden_legacy_event(entry: dict[str, Any]) -> bool:
+        preview = str(entry.get("result_preview") or "")
+        if not preview:
+            return False
+        legacy_markers = ("发送方 2", "发送方 3", "其他联系人", "全局共有")
+        return any(marker in preview for marker in legacy_markers)
 
     def _extract_text(self, msg: dict[str, Any]) -> str:
         parts = []
@@ -486,6 +706,9 @@ class WeixinBridge:
         if command in {"/help", "/h", "/?"}:
             help_lines = [
                 self._t("bridge.help.title"),
+                self._t("bridge.help.manage.status"),
+                self._t("bridge.help.manage.on"),
+                self._t("bridge.help.manage.off"),
                 self._t("bridge.help.help"),
                 self._t("bridge.help.status"),
                 self._t("bridge.help.context"),
@@ -526,9 +749,29 @@ class WeixinBridge:
                 "",
                 self._t("bridge.help.normal"),
                 self._t("bridge.help.normal.detail"),
+                self._t(
+                    "bridge.help.manage.detail.on" if binding.manager_mode else "bridge.help.manage.detail.off"
+                ),
                 self._t("bridge.help.escape"),
             ]
-            return "\n".join(help_lines), True
+            blocks = [line for line in help_lines if line]
+            return "\n\n".join(blocks), True
+
+        if command == "/manage":
+            if len(parts) < 2:
+                return self._render_manage_status(binding), True
+            desired = parts[1].strip().lower()
+            if desired in {"on", "enter", "enable"}:
+                binding.manager_mode = True
+                self._save_conversations()
+                return self._t("bridge.manage.on", session=current_session, agent=self.config.backend_id), True
+            if desired in {"off", "exit", "disable"}:
+                binding.manager_mode = False
+                self._save_conversations()
+                return self._t("bridge.manage.off", session=current_session, backend=current_meta.backend), True
+            if desired in {"help", "?"}:
+                return self._render_manage_status(binding), True
+            return self._t("bridge.manage.usage"), True
 
         if command == "/new":
             requested = parts[1].strip() if len(parts) >= 2 else ""
@@ -889,7 +1132,7 @@ class WeixinBridge:
         sender_tasks: list[HubTask] = []
         for raw_task in state.payload.get("tasks") or []:
             task = HubTask.from_dict(raw_task, default_backend=self.config.default_backend)
-            if task is None or task.sender_id != sender_id:
+            if task is None or task.sender_id != sender_id or task.source.strip().lower() == WECHAT_MANAGER_SOURCE:
                 continue
             sender_tasks.append(task)
         return sorted(
@@ -897,6 +1140,10 @@ class WeixinBridge:
             key=lambda item: item.finished_at or item.started_at or item.created_at,
             reverse=True,
         )
+
+    def _manager_session_name(self, sender_id: str) -> str:
+        safe_sender = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in sender_id).strip("-_") or "sender"
+        return f"{MANAGER_SESSION_PREFIX}-{safe_sender}"
 
     def _render_session_list(self, sender_id: str, binding: WeixinConversationBinding, *, page: int = 1, query: str = "") -> str:
         sender_tasks = self._load_sender_tasks(sender_id)
@@ -1308,6 +1555,20 @@ class WeixinBridge:
             count=len(binding.sessions),
         ) + "\n" + self._t("bridge.status.relation")
 
+    def _render_manage_status(self, binding: WeixinConversationBinding) -> str:
+        current_session, current_meta = binding.get_current_session(
+            default_backend=self.config.default_backend,
+            now=now_iso(),
+            normalize_backend=normalize_backend,
+        )
+        return self._t(
+            "bridge.manage.status",
+            state=self._t("bridge.manage.state.on") if binding.manager_mode else self._t("bridge.manage.state.off"),
+            session=current_session,
+            backend=current_meta.backend,
+            agent=self.config.backend_id,
+        )
+
     def _render_context(self, session_name: str, session_meta: WeixinSessionMeta) -> str:
         agent = self._find_agent_config(self.config.backend_id)
         agent_backend = agent.backend if agent is not None and agent.backend else "-"
@@ -1381,7 +1642,7 @@ class WeixinBridge:
     def _render_task_summary(self, task: HubTask) -> str:
         task_id = task.id
         session_name = task.session_name or "default"
-        status = task.status
+        status = self._display_task_status(task.status)
         agent_name = task.agent_name or task.agent_id
         backend = task.backend or self.config.default_backend
         prompt = task.prompt.strip()[:400] or "(empty)"
@@ -1398,6 +1659,10 @@ class WeixinBridge:
             result=result,
         )
 
+    def _display_task_status(self, status: str) -> str:
+        cleaned = str(status or "").strip().lower()
+        return self._t(f"bridge.task.status.{cleaned}") if cleaned else self._t("bridge.task.status.unknown")
+
     def _render_recent_events(self, sender_id: str, *, limit: int) -> str:
         bounded_limit = min(max(limit, 1), 20)
         entries = self._load_recent_events(sender_id=sender_id, limit=bounded_limit)
@@ -1410,14 +1675,35 @@ class WeixinBridge:
                 self._t(
                     "bridge.events.item",
                     at=str(entry.get("at") or "-"),
-                    event=str(entry.get("event") or "unknown"),
+                    event=self._display_event_name(str(entry.get("event") or "unknown")),
                     task_id=str(entry.get("task_id") or "-"),
                     session=str(entry.get("session_name") or "default"),
                     session_id=str(entry.get("session_id") or "-") or "-",
-                    detail=str(entry.get("result_preview") or entry.get("error") or entry.get("backend") or "-"),
+                    detail=self._build_event_detail(entry),
                 )
             )
         return "\n".join(lines)
+
+    def _display_event_name(self, event: str) -> str:
+        cleaned = str(event or "").strip().lower()
+        return self._t(f"bridge.events.event.{cleaned}") if cleaned else self._t("bridge.events.event.unknown")
+
+    def _build_event_detail(self, entry: dict[str, str]) -> str:
+        event = str(entry.get("event") or "").strip().lower()
+        backend = str(entry.get("backend") or "-").strip() or "-"
+        result_preview = str(entry.get("result_preview") or "").strip()
+        error = str(entry.get("error") or "").strip()
+        if event == "accepted":
+            return self._t("bridge.events.detail.accepted", backend=backend)
+        if event == "running":
+            return self._t("bridge.events.detail.running", backend=backend)
+        if result_preview:
+            return result_preview
+        if error:
+            return error
+        if backend and backend != "-":
+            return self._t("bridge.events.detail.backend", backend=backend)
+        return "-"
 
     @staticmethod
     def _normalize_command_text(text: str) -> str:

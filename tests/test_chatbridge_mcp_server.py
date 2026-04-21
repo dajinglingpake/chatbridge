@@ -33,6 +33,7 @@ class ChatBridgeMcpServerTests(unittest.TestCase):
         self.assertIn("enter_control_mode", tool_names)
         self.assertIn("exit_control_mode", tool_names)
         self.assertIn("start_agent_session", tool_names)
+        self.assertIn("list_sender_conversations", tool_names)
 
     def test_tools_call_returns_text_content(self) -> None:
         response = handle_request(

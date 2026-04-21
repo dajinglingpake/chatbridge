@@ -10,13 +10,13 @@ from unittest.mock import patch
 
 from bridge_config import BridgeConfig
 from core.state_models import IpcResponseEnvelope
-from runtime_stack import BRIDGE_CONVERSATIONS_PATH
 from weixin_hub_bridge import WeixinBridge
 
 
 class FakeBridge(WeixinBridge):
     def __init__(self, config: BridgeConfig) -> None:
         super().__init__(config)
+        self.submit_payloads: list[dict[str, object]] = []
         self._state_payload = IpcResponseEnvelope(
             ok=True,
             payload={
@@ -107,6 +107,7 @@ class FakeBridge(WeixinBridge):
                 return IpcResponseEnvelope(ok=True, payload={"task": retried_task})
             return IpcResponseEnvelope(ok=False, error="task not found")
         if action == "submit_task":
+            self.submit_payloads.append(dict(payload))
             return IpcResponseEnvelope(ok=True, payload={"task": {"id": "task-forwarded-001"}})
         raise RuntimeError(f"unexpected action: {action}")
 
@@ -123,6 +124,7 @@ class FeedbackBridge(FakeBridge):
 
     def _ipc_request(self, action: str, payload: dict[str, object], timeout_seconds: float) -> IpcResponseEnvelope:
         if action == "submit_task":
+            self.submit_payloads.append(dict(payload))
             return IpcResponseEnvelope(ok=True, payload={"task": {"id": "task-feedback-001"}})
         if action == "get_task":
             index = min(self._task_poll_index, len(self._task_states) - 1)
@@ -174,14 +176,36 @@ def _fake_agent(
 
 class WeixinBridgeCommandTests(unittest.TestCase):
     def setUp(self) -> None:
+        self._tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tempdir.cleanup)
+        temp_root = Path(self._tempdir.name)
+        self.conversation_path = temp_root / ".runtime" / "state" / "weixin_conversations.json"
+        self.pending_tasks_path = temp_root / ".runtime" / "state" / "weixin_pending_tasks.json"
+        self.event_log_path = temp_root / ".runtime" / "logs" / "weixin_bridge_events.jsonl"
+        self.message_audit_log_path = temp_root / ".runtime" / "logs" / "weixin_bridge_message_audit.jsonl"
+        self.state_path = temp_root / ".runtime" / "state" / "weixin_hub_bridge_state.json"
+        self.conversation_path.parent.mkdir(parents=True, exist_ok=True)
+        self.event_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._patchers = [
+            patch("weixin_hub_bridge.CONVERSATION_PATH", self.conversation_path),
+            patch("weixin_hub_bridge.PENDING_TASKS_PATH", self.pending_tasks_path),
+            patch("weixin_hub_bridge.EVENT_LOG_PATH", self.event_log_path),
+            patch("weixin_hub_bridge.MESSAGE_AUDIT_LOG_PATH", self.message_audit_log_path),
+            patch("weixin_hub_bridge.STATE_PATH", self.state_path),
+            patch("weixin_hub_bridge.load_account_context_tokens", return_value={}),
+            patch("weixin_hub_bridge.save_account_context_tokens", return_value=None),
+        ]
+        for patcher in self._patchers:
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self._original_lang = os.environ.get("CHATBRIDGE_LANG")
         os.environ["CHATBRIDGE_LANG"] = "en-US"
-        BRIDGE_CONVERSATIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        BRIDGE_CONVERSATIONS_PATH.write_text(
+        self.conversation_path.write_text(
             json.dumps(
                 {
                     "sender-test": {
                         "current_session": "default",
+                        "manager_mode": False,
                         "sessions": {
                             "default": {"backend": "codex"},
                             "deep-dive": {"backend": "claude"},
@@ -209,11 +233,188 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         self.assertIn("Service lifecycle:", reply)
         self.assertNotIn("\\n", reply)
 
+    def test_help_command_uses_spaced_multiline_layout(self) -> None:
+        reply, handled = self.bridge._handle_control_command("sender-test", "/help")
+        self.assertTrue(handled)
+        self.assertIn("Available commands:", reply)
+        self.assertIn("\n\n/manage on", reply)
+        self.assertIn("\n\nNormal messages:", reply)
+
     def test_poll_once_ignores_expected_getupdates_timeout(self) -> None:
         bridge = TimeoutPollingBridge(BridgeConfig.load())
         bridge.poll_once()
         self.assertEqual(1, bridge.poll_calls)
         self.assertEqual("", bridge.state.last_error)
+
+    def test_run_clears_persisted_error_after_expected_timeout(self) -> None:
+        bridge = TimeoutPollingBridge(BridgeConfig.load())
+        bridge.state.set_error("stale error")
+
+        class _StopLoop(BaseException):
+            pass
+
+        original_save_state = bridge._save_state
+
+        def stop_after_clean_state() -> None:
+            original_save_state()
+            if bridge.state.last_error == "":
+                raise _StopLoop()
+
+        bridge._save_state = stop_after_clean_state  # type: ignore[method-assign]
+
+        with self.assertRaises(_StopLoop):
+            bridge.run()
+
+        self.assertEqual("", bridge.state.last_error)
+
+    def test_new_sender_defaults_to_manager_mode(self) -> None:
+        binding = self.bridge._ensure_conversation("sender-new")
+        self.assertTrue(binding.manager_mode)
+
+    def test_manage_command_toggles_manager_mode(self) -> None:
+        reply, handled = self.bridge._handle_control_command("sender-test", "/manage on")
+        self.assertTrue(handled)
+        self.assertIn("Management assistant entry enabled", reply)
+        self.assertTrue(self.bridge.conversations["sender-test"].manager_mode)
+
+        reply, handled = self.bridge._handle_control_command("sender-test", "/manage off")
+        self.assertTrue(handled)
+        self.assertIn("Direct session entry enabled", reply)
+        self.assertFalse(self.bridge.conversations["sender-test"].manager_mode)
+
+    def test_handle_message_routes_new_sender_to_management_agent(self) -> None:
+        bridge = FeedbackBridge(BridgeConfig.load(), [])
+        bridge._handle_message(
+            "https://example.com",
+            "token",
+            {
+                "message_type": 1,
+                "from_user_id": "sender-manager",
+                "context_token": "ctx",
+                "item_list": [{"type": 1, "text_item": {"text": "列出所有会话"}}],
+            },
+        )
+        self.assertEqual("wechat-manager", bridge.submit_payloads[-1]["source"])
+        self.assertTrue(str(bridge.submit_payloads[-1]["session_name"]).startswith("__manager__-"))
+        self.assertEqual(1, len(bridge.sent_texts))
+        self.assertIn("Got it, I'll take care of this", bridge.sent_texts[0])
+        audits = [json.loads(line) for line in self.message_audit_log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        self.assertEqual("task_submission", audits[-1]["route"])
+        self.assertTrue(audits[-1]["manager_mode"])
+        self.assertEqual("wechat-manager", audits[-1]["source"])
+
+    def test_bridge_defaults_management_feedback_to_chinese_when_auto_and_env_unset(self) -> None:
+        os.environ.pop("CHATBRIDGE_LANG", None)
+        bridge = FeedbackBridge(BridgeConfig.load(), [])
+        bridge._handle_message(
+            "https://example.com",
+            "token",
+            {
+                "message_type": 1,
+                "from_user_id": "sender-manager",
+                "context_token": "ctx",
+                "item_list": [{"type": 1, "text_item": {"text": "列出所有会话"}}],
+            },
+        )
+        self.assertEqual("zh-CN", bridge.localizer.language)
+        self.assertIn("收到，我先帮你处理这件事", bridge.sent_texts[0])
+
+    def test_handle_message_falls_back_to_management_agent_for_unknown_prompt(self) -> None:
+        bridge = FeedbackBridge(BridgeConfig.load(), [])
+        bridge._handle_message(
+            "https://example.com",
+            "token",
+            {
+                "message_type": 1,
+                "from_user_id": "sender-manager",
+                "context_token": "ctx",
+                "item_list": [{"type": 1, "text_item": {"text": "帮我梳理一下最近这几个会话的差异并给建议"}}],
+            },
+        )
+        self.assertEqual("wechat-manager", bridge.submit_payloads[-1]["source"])
+        self.assertTrue(str(bridge.submit_payloads[-1]["session_name"]).startswith("__manager__-"))
+
+    def test_handle_message_routes_natural_language_session_switch_to_management_agent(self) -> None:
+        bridge = FeedbackBridge(BridgeConfig.load(), [])
+        bridge._handle_control_command("sender-test", "/manage on")
+        bridge._handle_message(
+            "https://example.com",
+            "token",
+            {
+                "message_type": 1,
+                "from_user_id": "sender-test",
+                "context_token": "ctx",
+                "item_list": [{"type": 1, "text_item": {"text": "切换到 deep-dive 会话"}}],
+            },
+        )
+        self.assertEqual("wechat-manager", bridge.submit_payloads[-1]["source"])
+        self.assertEqual("__manager__-sender-test", bridge.submit_payloads[-1]["session_name"])
+        self.assertEqual("default", bridge.conversations["sender-test"].current_session)
+        self.assertIn("Got it, I'll take care of this", bridge.sent_texts[0])
+
+    def test_handle_message_audits_control_command_without_submitting_task(self) -> None:
+        bridge = FeedbackBridge(BridgeConfig.load(), [])
+        bridge._handle_message(
+            "https://example.com",
+            "token",
+            {
+                "message_type": 1,
+                "from_user_id": "sender-test",
+                "context_token": "ctx",
+                "item_list": [{"type": 1, "text_item": {"text": "/manage off"}}],
+            },
+        )
+        self.assertEqual([], bridge.submit_payloads)
+        audits = [json.loads(line) for line in self.message_audit_log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        self.assertEqual("control_command", audits[-1]["route"])
+        self.assertEqual("/manage", audits[-1]["command"])
+
+    def test_management_task_result_uses_plain_manager_reply(self) -> None:
+        bridge = FeedbackBridge(
+            BridgeConfig.load(),
+            [
+                {
+                    "id": "task-feedback-001",
+                    "sender_id": "sender-manager",
+                    "session_name": "__manager__-sender-manager",
+                    "status": "succeeded",
+                    "agent_id": "main",
+                    "agent_name": "default",
+                    "backend": "codex",
+                    "prompt": "列出所有会话",
+                    "output": "找到 2 个会话：default, deep-dive",
+                    "created_at": "2026-04-20T12:00:00",
+                }
+            ],
+        )
+        bridge._handle_message(
+            "https://example.com",
+            "token",
+            {
+                "message_type": 1,
+                "from_user_id": "sender-manager",
+                "context_token": "ctx",
+                "item_list": [{"type": 1, "text_item": {"text": "帮我梳理一下最近这几个会话的差异并给建议"}}],
+            },
+        )
+        self.assertIn("Got it, I'll take care of this", bridge.sent_texts[0])
+        bridge.poll_pending()
+        self.assertEqual("找到 2 个会话：default, deep-dive", bridge.sent_texts[-1])
+
+    def test_supported_management_prompt_still_uses_management_agent(self) -> None:
+        bridge = FeedbackBridge(BridgeConfig.load(), [])
+        bridge._handle_message(
+            "https://example.com",
+            "token",
+            {
+                "message_type": 1,
+                "from_user_id": "sender-manager",
+                "context_token": "ctx",
+                "item_list": [{"type": 1, "text_item": {"text": "列出所有会话"}}],
+            },
+        )
+        self.assertEqual("wechat-manager", bridge.submit_payloads[-1]["source"])
+        self.assertIn("Got it, I'll take care of this", bridge.sent_texts[0])
 
     def test_handle_message_sends_queued_and_running_feedback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -430,15 +631,114 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                 reply, handled = self.bridge._handle_control_command("sender-test", "/events 2")
         self.assertTrue(handled)
         self.assertIn("Recent async events: 2/2", reply)
+        self.assertIn("Completed", reply)
+        self.assertIn("Submitted to codex", reply)
         self.assertIn("task-a", reply)
         self.assertIn("sess-123", reply)
+
+    def test_events_command_defaults_to_chinese_event_names_when_auto_and_env_unset(self) -> None:
+        os.environ.pop("CHATBRIDGE_LANG", None)
+        bridge = FakeBridge(BridgeConfig.load())
+        with tempfile.TemporaryDirectory() as temp_dir:
+            event_log_path = Path(temp_dir) / "weixin_bridge_events.jsonl"
+            event_log_path.write_text(
+                json.dumps(
+                    {
+                        "at": "2026-04-20T12:00:00",
+                        "event": "succeeded",
+                        "task_id": "task-a",
+                        "sender_id": "sender-test",
+                        "session_name": "default",
+                        "session_id": "sess-123",
+                        "result_preview": "hello world",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with patch("weixin_hub_bridge.EVENT_LOG_PATH", event_log_path):
+                reply, handled = bridge._handle_control_command("sender-test", "/events 1")
+        self.assertTrue(handled)
+        self.assertIn("最近异步事件: 1/1", reply)
+        self.assertIn("已完成", reply)
+
+    def test_events_command_renders_human_detail_for_running_event(self) -> None:
+        os.environ.pop("CHATBRIDGE_LANG", None)
+        bridge = FakeBridge(BridgeConfig.load())
+        with tempfile.TemporaryDirectory() as temp_dir:
+            event_log_path = Path(temp_dir) / "weixin_bridge_events.jsonl"
+            event_log_path.write_text(
+                json.dumps(
+                    {
+                        "at": "2026-04-20T12:00:00",
+                        "event": "running",
+                        "task_id": "task-a",
+                        "sender_id": "sender-test",
+                        "session_name": "default",
+                        "session_id": "",
+                        "backend": "codex",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with patch("weixin_hub_bridge.EVENT_LOG_PATH", event_log_path):
+                reply, handled = bridge._handle_control_command("sender-test", "/events 1")
+        self.assertTrue(handled)
+        self.assertIn("处理中", reply)
+        self.assertIn("正在由 codex 处理", reply)
+
+    def test_events_command_hides_legacy_global_sender_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            event_log_path = Path(temp_dir) / "weixin_bridge_events.jsonl"
+            event_log_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "at": "2026-04-20T12:00:00",
+                                "event": "accepted",
+                                "task_id": "task-a",
+                                "sender_id": "sender-test",
+                                "session_name": "default",
+                                "session_id": "",
+                                "backend": "codex",
+                            },
+                            ensure_ascii=False,
+                        ),
+                        json.dumps(
+                            {
+                                "at": "2026-04-20T12:00:05",
+                                "event": "succeeded",
+                                "task_id": "task-a",
+                                "sender_id": "sender-test",
+                                "session_name": "__manager__-sender-test",
+                                "session_id": "sess-123",
+                                "result_preview": "会话总览：\n当前你: 当前会话 default\n\n发送方 2: 当前会话 deep-dive",
+                            },
+                            ensure_ascii=False,
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with patch("weixin_hub_bridge.EVENT_LOG_PATH", event_log_path):
+                reply, handled = self.bridge._handle_control_command("sender-test", "/events 5")
+        self.assertTrue(handled)
+        self.assertIn("Recent async events: 1/5", reply)
+        self.assertIn("task-a", reply)
+        self.assertNotIn("发送方 2", reply)
 
     def test_task_lookup_command_returns_summary(self) -> None:
         reply, handled = self.bridge._handle_control_command("sender-test", "/task task-test-001")
         self.assertTrue(handled)
+        self.assertIn("Task details", reply)
         self.assertIn("Task ID: task-test-001", reply)
         self.assertIn("Prompt summary:", reply)
-        self.assertIn("Output/Error summary:", reply)
+        self.assertIn("Result summary:", reply)
 
     def test_cancel_command_cancels_queued_task(self) -> None:
         reply, handled = self.bridge._handle_control_command("sender-test", "/cancel task-test-000")
@@ -478,7 +778,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         reply, handled = self.bridge._handle_control_command("sender-test", "/last")
         self.assertTrue(handled)
         self.assertIn("Task ID: task-test-002", reply)
-        self.assertIn("Status: failed", reply)
+        self.assertIn("Status: Failed", reply)
 
     def test_backend_switch_command_updates_current_session_backend(self) -> None:
         reply, handled = self.bridge._handle_control_command("sender-test", "/backend claude")
@@ -502,8 +802,8 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         with patch("weixin_hub_bridge.HubConfig.load", return_value=fake_hub_config):
             reply, handled = self.bridge._handle_control_command("sender-test", "/context")
         self.assertTrue(handled)
-        self.assertIn("Context relations:", reply)
-        self.assertIn("Agent main", reply)
+        self.assertIn("Current relation:", reply)
+        self.assertIn("Assistant main", reply)
         self.assertIn("Session default", reply)
 
     def test_model_status_uses_agent_default_model(self) -> None:
@@ -682,10 +982,11 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         with patch("weixin_hub_bridge.HubConfig.load", return_value=fake_hub_config):
             reply, handled = self.bridge._handle_control_command("sender-test", "/status")
         self.assertTrue(handled)
-        self.assertIn("Agent model: gpt-5.4", reply)
+        self.assertIn("Current setup", reply)
+        self.assertIn("Assistant default model: gpt-5.4", reply)
         self.assertIn("Current model: gpt-5.4", reply)
-        self.assertIn("Agent workdir: /tmp/project-alpha", reply)
-        self.assertIn("Relation: session backend/model/project overrides win", reply)
+        self.assertIn("Assistant default directory: /tmp/project-alpha", reply)
+        self.assertIn("Note: session backend/model/directory overrides win", reply)
 
     def test_status_command_prefers_session_model_override(self) -> None:
         self.bridge._handle_control_command("sender-test", "/model gpt-5.5")
@@ -715,9 +1016,9 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         with patch("weixin_hub_bridge.HubConfig.load", return_value=fake_hub_config):
             reply, handled = self.bridge._handle_control_command("sender-test", "/agent list")
         self.assertTrue(handled)
-        self.assertIn("Agents:", reply)
+        self.assertIn("Available assistants:", reply)
         self.assertIn("/tmp/project-alpha", reply)
-        self.assertIn("reviewer | Backend: claude", reply)
+        self.assertIn("reviewer | claude", reply)
 
     def test_agent_help_command_shows_codex_command_tree(self) -> None:
         fake_hub_config = SimpleNamespace(

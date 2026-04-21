@@ -18,27 +18,27 @@ except ImportError:  # pragma: no cover - optional dependency
 
 from core.json_store import load_json, save_json
 from core.platform_compat import IS_WINDOWS, creationflags
+from core.runtime_paths import (
+    APP_DIR,
+    BRIDGE_CONVERSATIONS_PATH,
+    BRIDGE_ERR_LOG,
+    BRIDGE_OUT_LOG,
+    BRIDGE_PID_FILE,
+    BRIDGE_STATE_PATH,
+    HUB_ERR_LOG,
+    HUB_OUT_LOG,
+    HUB_PID_FILE,
+    HUB_STATE_PATH,
+    LOG_DIR,
+    RUNTIME_DIR,
+    SESSION_DIR,
+    STATE_DIR,
+    WORKSPACE_DIR,
+)
 from core.state_models import ExternalAgentProcessState, RuntimeSnapshot
-
-
-APP_DIR = Path(__file__).resolve().parent
-RUNTIME_DIR = APP_DIR / ".runtime"
-STATE_DIR = RUNTIME_DIR / "state"
-LOG_DIR = RUNTIME_DIR / "logs"
-SESSION_DIR = APP_DIR / "sessions"
-WORKSPACE_DIR = APP_DIR / "workspace"
 
 HUB_SCRIPT = APP_DIR / "agent_hub.py"
 BRIDGE_SCRIPT = APP_DIR / "weixin_hub_bridge.py"
-HUB_PID_FILE = RUNTIME_DIR / "agent_hub.pid"
-BRIDGE_PID_FILE = RUNTIME_DIR / "weixin_hub_bridge.pid"
-HUB_OUT_LOG = LOG_DIR / "agent_hub.out.log"
-HUB_ERR_LOG = LOG_DIR / "agent_hub.err.log"
-BRIDGE_OUT_LOG = LOG_DIR / "weixin_hub_bridge.out.log"
-BRIDGE_ERR_LOG = LOG_DIR / "weixin_hub_bridge.err.log"
-HUB_STATE_PATH = STATE_DIR / "agent_hub_state.json"
-BRIDGE_STATE_PATH = STATE_DIR / "weixin_hub_bridge_state.json"
-BRIDGE_CONVERSATIONS_PATH = STATE_DIR / "weixin_conversations.json"
 
 @dataclass
 class ManagedStatus:

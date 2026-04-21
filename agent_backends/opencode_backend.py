@@ -19,6 +19,8 @@ class OpenCodeBackend(AgentBackend):
     key = "opencode"
 
     def invoke(self, agent: AgentLike, prompt: str, session_name: str, context: BackendContext) -> dict[str, str]:
+        if context.chatbridge_mcp is not None:
+            raise RuntimeError("OpenCode backend does not support ephemeral MCP injection yet")
         workdir = Path(agent.workdir)
         workdir.mkdir(parents=True, exist_ok=True)
         session_file = resolve_session_file(agent, session_name, context.session_dir)

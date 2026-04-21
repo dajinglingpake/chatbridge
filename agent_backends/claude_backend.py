@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from pathlib import Path
 
 from agent_backends.base import AgentBackend, AgentLike, BackendContext
@@ -23,8 +24,31 @@ class ClaudeBackend(AgentBackend):
             argv.extend(["--model", agent.model])
         if existing_session:
             argv.extend(["--resume", existing_session])
+        mcp_config_path = None
+        if context.chatbridge_mcp is not None:
+            config_file = tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False)
+            json.dump(
+                {
+                    "mcpServers": {
+                        context.chatbridge_mcp.name: {
+                            "command": context.chatbridge_mcp.command,
+                            "args": context.chatbridge_mcp.args,
+                        }
+                    }
+                },
+                config_file,
+                ensure_ascii=False,
+            )
+            config_file.flush()
+            config_file.close()
+            mcp_config_path = config_file.name
+            argv.extend(["--mcp-config", mcp_config_path, "--strict-mcp-config"])
 
-        completed = run_process(argv, workdir, context)
+        try:
+            completed = run_process(argv, workdir, context)
+        finally:
+            if mcp_config_path:
+                Path(mcp_config_path).unlink(missing_ok=True)
 
         output, session_id, error_message = self._parse_stdout(completed.stdout)
         if not session_id:

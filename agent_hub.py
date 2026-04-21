@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import queue
+import sys
 import threading
 import time
 import uuid
@@ -10,9 +11,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from agent_backends import DEFAULT_BACKEND_KEY, BackendContext, build_backend_registry, supported_backend_keys
+from agent_backends import DEFAULT_BACKEND_KEY, BackendContext, McpServerConfig, build_backend_registry, supported_backend_keys
 from bridge_config import BridgeConfig
 from core.json_store import load_json, save_json
+from core.manager_agent_runtime import ChatBridgeManagerRuntime
 from core.state_models import AgentRuntimeState, HubTask, IpcRequestEnvelope, IpcResponseEnvelope
 from core.weixin_notifier import broadcast_weixin_notice_by_kind, build_task_followup_hint
 from local_ipc import REQUEST_DIR, ensure_ipc_dirs, mark_processed, read_request, write_response
@@ -28,10 +30,49 @@ WORKSPACE_DIR = APP_DIR / "workspace"
 CONFIG_PATH = APP_DIR / "config" / "agent_hub.json"
 STATE_PATH = STATE_DIR / "agent_hub_state.json"
 SUPPORTED_BACKENDS = set(supported_backend_keys())
+WECHAT_SOURCE = "wechat"
+WECHAT_MANAGER_SOURCE = "wechat-manager"
+MANAGER_SESSION_PREFIX = "__manager__"
+CHATBRIDGE_MANAGER_MCP_NAME = "chatbridge_manager"
+CHATBRIDGE_MANAGER_TOOL_PATH = APP_DIR / "tools" / "chatbridge_mcp_server.py"
+PROMPTS_DIR = APP_DIR / "prompts"
+CHATBRIDGE_MANAGER_PROMPT_PATH = PROMPTS_DIR / "chatbridge_manager_prompt.txt"
+CHATBRIDGE_MANAGER_PROMPT_FALLBACK = """你是 ChatBridge 的管理 Agent。
+
+你的职责是通过 ChatBridge MCP 工具管理当前微信发送方，而不是直接假设结果。
+
+必须遵守：
+1. 优先使用结构化 MCP 工具，不要编造会话、任务、Agent、模型或工程目录状态。
+2. 只读查询优先用 get_management_snapshot、list_sender_conversations、list_agents、get_task、get_command_catalog。
+2.1 ChatBridge 管理能力通过 MCP tools 暴露，不通过 resources 或 resource templates 暴露；不要为了确认工具是否存在而调用 list_mcp_resources 或 list_mcp_resource_templates，直接按工具名调用即可。
+3. 你当前运行在 ChatBridge 内置管理 Agent 中。对当前发送方的写操作可以直接执行；只有在用户明确要求演示外部 MCP 控制流程时，才需要 enter_control_mode / exit_control_mode。
+4. 默认目标发送方固定为：{sender_id}。除非用户明确要求，否则不要对其他发送方执行写操作。
+5. 管理会话与普通业务会话隔离；你做的 /use、/agent、start_agent_session、delegate_task 等操作不会改变你自己的控制平面身份。
+6. 回答必须使用简体中文，简洁直接。默认只给用户结果、状态和下一步，不要主动罗列调用过的 MCP 工具。
+6.1 只有在用户明确问“你怎么做的/调用了什么/用了哪些工具/步骤是什么”，或者排障确实需要解释失败原因时，才展开 MCP 工具调用细节。
+7. 如果用户要求退出管理模式，明确告诉他发送 /manage off；如果要重新进入，发送 /manage on。
+8. 如果用户说“列出所有会话/全部会话/有哪些会话”，默认理解为“列出当前这个微信联系人的全部会话”，优先调用 get_management_snapshot(target_sender_id="{sender_id}")。
+9. 只有当用户明确说“所有发送方/所有来源/系统里所有人的会话”时，才调用 list_sender_conversations(focus_sender_id="{sender_id}")。
+10. 回答会话总览时，优先直接复述 MCP 返回里的 summary_lines，不要自行重算会话数量、当前会话或最近状态；不要默认输出 sender_id、task_count、model、workdir、latest_task_id 这类工程字段，除非用户明确要求。
+11. 如果用户的问题同时包含“所有会话”和“所有发送方”，先明确区分“你的会话”和“全局来源”，默认先回答“你的会话”。
+12. 不要把 MCP 快照里的 control_mode/manager_mode 字段误解成微信当前是否在管理 Agent。微信里的普通消息是否进入管理 Agent，由 /manage 控制；当前这条管理会话本身就是管理入口。
+13. 不要汇报与结果无关的工具探测、能力枚举或内部思考过程。默认不要出现“我调用了某某工具”这类句子，除非用户明确要求。
+14. 如果某个管理工具已经返回了适合直接展示的人类摘要，优先直接引用该摘要，不要再自行压缩、改写或补充未经工具确认的结论。
+15. 默认不要使用“发送方”“全局来源”“control_mode”“manager_mode”这类内部术语。面向用户时优先说“你这边”“当前会话”“全部会话”“其他人的会话”。
+16. 默认不要在结果末尾追加泛泛的教学式引导，例如“如果你要看系统里所有发送方……”。只有当用户明确表示还想继续看更大范围时，才补一句简短的下一步建议。
+"""
 
 
 def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def load_manager_prompt_template() -> str:
+    if CHATBRIDGE_MANAGER_PROMPT_PATH.exists():
+        text = CHATBRIDGE_MANAGER_PROMPT_PATH.read_text(encoding="utf-8").strip()
+        if text:
+            return text
+    return CHATBRIDGE_MANAGER_PROMPT_FALLBACK.strip()
 
 
 def _to_abs_path(value: str, default: Path) -> str:
@@ -148,6 +189,7 @@ class MultiCodexHub:
     def __init__(self, config: HubConfig) -> None:
         self.config = config
         self.backend_registry = build_backend_registry()
+        self.manager_runtime = ChatBridgeManagerRuntime(codex_command=self.config.codex_command)
         self.lock = threading.RLock()
         self.tasks: list[HubTask] = []
         self.runtimes: dict[str, AgentRuntimeState] = {}
@@ -278,6 +320,9 @@ class MultiCodexHub:
             backend,
             task.workdir,
             task.model,
+            task.bridge_conversations_path,
+            task.bridge_event_log_path,
+            task.manager_state_path,
         )
 
     def create_or_update_agent(self, payload: dict[str, Any]) -> AgentConfig:
@@ -348,6 +393,9 @@ class MultiCodexHub:
         backend: str = "",
         workdir: str = "",
         model: str = "",
+        bridge_conversations_path: str = "",
+        bridge_event_log_path: str = "",
+        manager_state_path: str = "",
     ) -> dict[str, Any]:
         prompt = (prompt or "").strip()
         if not prompt:
@@ -368,6 +416,9 @@ class MultiCodexHub:
             session_name=session_name.strip(),
             workdir=workdir.strip(),
             model=model.strip(),
+            bridge_conversations_path=bridge_conversations_path.strip(),
+            bridge_event_log_path=bridge_event_log_path.strip(),
+            manager_state_path=manager_state_path.strip(),
         )
         with self.lock:
             self.tasks.append(task)
@@ -485,7 +536,7 @@ class MultiCodexHub:
             return True
 
     def _notify_task_result(self, task: HubTask, succeeded: bool) -> None:
-        if task.source.strip().lower() == "wechat":
+        if task.source.strip().lower().startswith("wechat"):
             return
         task_id = task.id
         agent_name = task.agent_name or task.agent_id
@@ -517,7 +568,7 @@ class MultiCodexHub:
         broadcast_weixin_notice_by_kind("task", "任务执行失败", detail)
 
     def _notify_task_canceled(self, task: HubTask) -> None:
-        if task.source.strip().lower() == "wechat":
+        if task.source.strip().lower().startswith("wechat"):
             return
         task_id = task.id
         agent_name = task.agent_name or task.agent_id
@@ -535,18 +586,31 @@ class MultiCodexHub:
         broadcast_weixin_notice_by_kind("task", "任务已取消", detail)
 
     def _invoke_backend(self, agent: AgentConfig, task: HubTask) -> dict[str, str]:
+        manager_mcp = self._build_manager_mcp_config(task)
+        if task.source.strip().lower() == WECHAT_MANAGER_SOURCE:
+            if manager_mcp is None:
+                raise RuntimeError("manager runtime missing MCP configuration")
+            return self.manager_runtime.invoke(
+                sender_id=task.sender_id,
+                prompt=task.prompt,
+                instructions=self._resolve_task_prompt_prefix(agent, task),
+                model=task.model.strip() or agent.model,
+                mcp_config=manager_mcp,
+            )
         normalized_backend = normalize_backend(task.backend or agent.backend)
         backend = self.backend_registry.get(normalized_backend)
         if backend is None:
             raise ValueError(f"unsupported backend: {normalized_backend}")
+        if manager_mcp is not None and normalized_backend == "opencode":
+            raise RuntimeError("当前管理 Agent 暂不支持 opencode 后端，请改用 codex 或 claude")
         effective_agent = AgentConfig(
             id=agent.id,
             name=agent.name,
-            workdir=task.workdir.strip() or agent.workdir,
+            workdir=self._resolve_task_workdir(agent, task),
             session_file=agent.session_file,
             backend=agent.backend,
             model=task.model.strip() or agent.model,
-            prompt_prefix=agent.prompt_prefix,
+            prompt_prefix=self._resolve_task_prompt_prefix(agent, task),
             enabled=agent.enabled,
         )
         return backend.invoke(
@@ -561,7 +625,34 @@ class MultiCodexHub:
                 creationflags=creationflags(),
                 start_new_session=not IS_WINDOWS,
                 on_process_started=lambda pid: self._register_running_task_pid(task.id, pid),
+                chatbridge_mcp=manager_mcp,
             ),
+        )
+
+    def _resolve_task_workdir(self, agent: AgentConfig, task: HubTask) -> str:
+        if task.source.strip().lower() == WECHAT_MANAGER_SOURCE:
+            return str(APP_DIR)
+        return task.workdir.strip() or agent.workdir
+
+    def _resolve_task_prompt_prefix(self, agent: AgentConfig, task: HubTask) -> str:
+        if task.source.strip().lower() != WECHAT_MANAGER_SOURCE:
+            return agent.prompt_prefix
+        return load_manager_prompt_template().format(sender_id=task.sender_id or "(unknown sender)")
+
+    def _build_manager_mcp_config(self, task: HubTask) -> McpServerConfig | None:
+        if task.source.strip().lower() != WECHAT_MANAGER_SOURCE:
+            return None
+        args = [str(CHATBRIDGE_MANAGER_TOOL_PATH), "--trusted-internal-manager"]
+        if task.bridge_conversations_path.strip():
+            args.extend(["--bridge-conversations-path", task.bridge_conversations_path.strip()])
+        if task.bridge_event_log_path.strip():
+            args.extend(["--bridge-event-log-path", task.bridge_event_log_path.strip()])
+        if task.manager_state_path.strip():
+            args.extend(["--manager-state-path", task.manager_state_path.strip()])
+        return McpServerConfig(
+            name=CHATBRIDGE_MANAGER_MCP_NAME,
+            command=sys.executable,
+            args=args,
         )
 
     def _save_state(self) -> None:
@@ -604,15 +695,18 @@ class MultiCodexHub:
             return IpcResponseEnvelope(
                 ok=True,
                 payload={
-                        "task": self.submit_task(
-                    str(payload.get("agent_id") or ""),
-                    str(payload.get("prompt") or ""),
-                    str(payload.get("source") or "desktop"),
-                    str(payload.get("sender_id") or ""),
-                    str(payload.get("session_name") or ""),
-                    str(payload.get("backend") or ""),
-                    str(payload.get("workdir") or ""),
-                    str(payload.get("model") or ""),
+                    "task": self.submit_task(
+                        str(payload.get("agent_id") or ""),
+                        str(payload.get("prompt") or ""),
+                        str(payload.get("source") or "desktop"),
+                        str(payload.get("sender_id") or ""),
+                        str(payload.get("session_name") or ""),
+                        str(payload.get("backend") or ""),
+                        str(payload.get("workdir") or ""),
+                        str(payload.get("model") or ""),
+                        str(payload.get("bridge_conversations_path") or ""),
+                        str(payload.get("bridge_event_log_path") or ""),
+                        str(payload.get("manager_state_path") or ""),
                     ),
                 },
             )

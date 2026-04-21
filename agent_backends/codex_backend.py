@@ -24,6 +24,15 @@ class CodexBackend(AgentBackend):
         options = ["--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "--json", "-o", str(output_path)]
         if agent.model:
             options.extend(["-m", agent.model])
+        if context.chatbridge_mcp is not None:
+            options.extend(
+                [
+                    "-c",
+                    f'mcp_servers.{context.chatbridge_mcp.name}.command="{context.chatbridge_mcp.command}"',
+                    "-c",
+                    f"mcp_servers.{context.chatbridge_mcp.name}.args={json.dumps(context.chatbridge_mcp.args, ensure_ascii=False)}",
+                ]
+            )
         if existing_session:
             argv = [context.codex_command, "exec", "resume", *options, existing_session, final_prompt]
         else:

@@ -16,6 +16,13 @@ class AgentLike(Protocol):
 
 
 @dataclass(frozen=True)
+class McpServerConfig:
+    name: str
+    command: str
+    args: list[str]
+
+
+@dataclass(frozen=True)
 class BackendContext:
     codex_command: str
     claude_command: str
@@ -24,6 +31,7 @@ class BackendContext:
     creationflags: int
     start_new_session: bool = False
     on_process_started: Callable[[int], None] | None = None
+    chatbridge_mcp: McpServerConfig | None = None
 
 
 class AgentBackend(Protocol):

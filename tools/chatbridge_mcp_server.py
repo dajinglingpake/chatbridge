@@ -1,9 +1,38 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
+
+
+def _apply_path_overrides_from_argv(argv: list[str]) -> None:
+    path_flags = {
+        "--bridge-conversations-path": "CHATBRIDGE_BRIDGE_CONVERSATIONS_PATH",
+        "--bridge-event-log-path": "CHATBRIDGE_BRIDGE_EVENT_LOG_PATH",
+        "--manager-state-path": "CHATBRIDGE_MANAGER_STATE_PATH",
+    }
+    index = 0
+    while index < len(argv):
+        flag = argv[index]
+        env_key = path_flags.get(flag)
+        if env_key is None:
+            index += 1
+            continue
+        if index + 1 < len(argv):
+            value = str(argv[index + 1] or "").strip()
+            if value:
+                os.environ[env_key] = value
+        index += 2
+
+
+_apply_path_overrides_from_argv(sys.argv[1:])
+
+APP_DIR = Path(__file__).resolve().parent.parent
+if str(APP_DIR) not in sys.path:
+    sys.path.insert(0, str(APP_DIR))
 
 from core.mcp_service import (
     ManagerActionResult,
@@ -15,6 +44,7 @@ from core.mcp_service import (
     get_management_snapshot,
     get_manager_guide,
     get_task,
+    list_sender_conversations,
     list_agents,
     run_sender_command,
     start_agent_session,
@@ -31,6 +61,7 @@ SUPPORTED_PROTOCOL_VERSIONS = {
     "2025-06-18",
     "2025-11-25",
 }
+TRUSTED_INTERNAL_MANAGER = "--trusted-internal-manager" in sys.argv
 
 
 @dataclass(frozen=True)
@@ -49,9 +80,7 @@ class ToolSpec:
 
 
 def _tool_result_text(result: ManagerActionResult) -> str:
-    if not result.data:
-        return result.summary
-    return f"{result.summary}\n\n{json.dumps(result.data, ensure_ascii=False, indent=2, sort_keys=True)}"
+    return result.summary
 
 
 def _jsonrpc_result(message_id: object, result: JsonObject) -> JsonObject:
@@ -64,6 +93,12 @@ def _jsonrpc_error(message_id: object, code: int, message: str) -> JsonObject:
 
 def _args_as_dict(raw: object) -> JsonObject:
     return raw if isinstance(raw, dict) else {}
+
+
+def _server_instructions() -> str:
+    if TRUSTED_INTERNAL_MANAGER:
+        return "This server exposes ChatBridge management tools. Trusted internal manager mode is enabled for the embedded ChatBridge manager agent."
+    return "This server exposes ChatBridge management tools. Use enter_control_mode before mutating sender state, starting new agent sessions, or delegating tasks."
 
 
 def _build_tool_specs() -> dict[str, ToolSpec]:
@@ -123,6 +158,17 @@ def _build_tool_specs() -> dict[str, ToolSpec]:
             input_schema={"type": "object", "properties": {}},
             handler=no_args(list_agents),
         ),
+        "list_sender_conversations": ToolSpec(
+            name="list_sender_conversations",
+            description="列出全局所有发送方及其会话摘要。适合处理“列出所有会话/全部会话”这类全局问题，而不是只看当前发送方。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "focus_sender_id": {"type": "string", "description": "可选，用于把某个发送方标记为“当前你”，便于自然语言总结。"},
+                },
+            },
+            handler=lambda args: list_sender_conversations(focus_sender_id=str(args.get("focus_sender_id") or "")),
+        ),
         "get_task": ToolSpec(
             name="get_task",
             description="按 task_id 查询单个任务详情，包括输入摘要、结果摘要和所属 Agent/会话。",
@@ -149,6 +195,7 @@ def _build_tool_specs() -> dict[str, ToolSpec]:
             handler=lambda args: run_sender_command(
                 str(args.get("target_sender_id") or ""),
                 str(args.get("command") or ""),
+                require_control_mode=not TRUSTED_INTERNAL_MANAGER,
             ),
         ),
         "start_agent_session": ToolSpec(
@@ -175,6 +222,7 @@ def _build_tool_specs() -> dict[str, ToolSpec]:
                 target_sender_id=str(args.get("target_sender_id") or ""),
                 workdir=str(args.get("workdir") or ""),
                 model=str(args.get("model") or ""),
+                require_control_mode=not TRUSTED_INTERNAL_MANAGER,
             ),
         ),
         "delegate_task": ToolSpec(
@@ -201,6 +249,7 @@ def _build_tool_specs() -> dict[str, ToolSpec]:
                 target_sender_id=str(args.get("target_sender_id") or ""),
                 workdir=str(args.get("workdir") or ""),
                 model=str(args.get("model") or ""),
+                require_control_mode=not TRUSTED_INTERNAL_MANAGER,
             ),
         ),
     }
@@ -223,10 +272,7 @@ def handle_request(message: JsonObject) -> JsonObject | None:
                 "protocolVersion": protocol_version,
                 "capabilities": {"tools": {"listChanged": False}},
                 "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
-                "instructions": (
-                    "This server exposes ChatBridge management tools. "
-                    "Use enter_control_mode before mutating sender state, starting new agent sessions, or delegating tasks."
-                ),
+                "instructions": _server_instructions(),
             },
         )
     if method == "notifications/initialized":
@@ -246,6 +292,7 @@ def handle_request(message: JsonObject) -> JsonObject | None:
             message_id,
             {
                 "content": [{"type": "text", "text": _tool_result_text(result)}],
+                "structuredContent": result.data,
                 "isError": not result.ok,
             },
         )

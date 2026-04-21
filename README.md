@@ -77,6 +77,8 @@ Recommended local regression checks:
 ```powershell
 python -m unittest discover -s tests -p "test_*.py" -v
 python tools/smoke_weixin_bridge.py
+python tools/run_product_acceptance.py
+python tools/run_live_acceptance.py --send-notice
 ```
 
 ## Language

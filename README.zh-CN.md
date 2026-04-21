@@ -83,6 +83,8 @@ python -m pip install -r requirements.txt
 ```powershell
 python -m unittest discover -s tests -p "test_*.py" -v
 python tools/smoke_weixin_bridge.py
+python tools/run_product_acceptance.py
+python tools/run_live_acceptance.py --send-notice
 ```
 
 ## 语言

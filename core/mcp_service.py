@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -17,7 +18,14 @@ from core.state_models import HubTask, JsonObject, WeixinConversationBinding, We
 from weixin_hub_bridge import EVENT_LOG_PATH, WeixinBridge
 
 
-MANAGER_STATE_PATH = APP_DIR / ".runtime" / "state" / "chatbridge_manager_state.json"
+def _resolve_manager_state_path() -> Path:
+    raw = str(os.environ.get("CHATBRIDGE_MANAGER_STATE_PATH") or "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return APP_DIR / ".runtime" / "state" / "chatbridge_manager_state.json"
+
+
+MANAGER_STATE_PATH = _resolve_manager_state_path()
 
 
 def _state_now() -> str:
@@ -29,6 +37,52 @@ def _summarize_text(value: str, *, limit: int = 120) -> str:
     if not text:
         return ""
     return text[: limit - 1] + "..." if len(text) > limit else text
+
+
+def _build_latest_round_summary(session_tasks: list[HubTask]) -> str:
+    if not session_tasks:
+        return "暂无历史"
+    latest_task = max(session_tasks, key=lambda item: item.created_at)
+    if latest_task.error.strip():
+        error_text = _summarize_text(latest_task.error, limit=72) or "（空错误）"
+        return f"报错：{error_text}"
+    if latest_task.output.strip():
+        output_text = _summarize_text(latest_task.output, limit=72) or "（空回复）"
+        return f"结果：{output_text}"
+    if latest_task.status == "running":
+        prompt_text = _summarize_text(latest_task.prompt, limit=48) or "（空输入）"
+        return f"处理中：{prompt_text}"
+    if latest_task.status == "queued":
+        prompt_text = _summarize_text(latest_task.prompt, limit=48) or "（空输入）"
+        return f"排队中：{prompt_text}"
+    prompt_text = _summarize_text(latest_task.prompt, limit=48) or "（空输入）"
+    return f"请求：{prompt_text}"
+
+
+def _build_latest_manager_reply_summary(sender_tasks: list[HubTask]) -> str:
+    manager_tasks = [task for task in sender_tasks if str(getattr(task, "source", "") or "").strip() == "wechat-manager"]
+    if not manager_tasks:
+        return "暂无历史"
+    terminal_statuses = {"succeeded", "failed", "canceled"}
+    completed_tasks = [task for task in manager_tasks if str(getattr(task, "status", "") or "").strip() in terminal_statuses]
+    latest_task = max(completed_tasks or manager_tasks, key=lambda item: item.created_at)
+    if latest_task.error.strip():
+        error_text = _summarize_text(latest_task.error, limit=88) or "（空错误）"
+        return f"最近报错：{error_text}"
+    if latest_task.output.strip():
+        output = latest_task.output.strip()
+        if output.startswith("你的会话：") or output.startswith("你的业务会话（不含管理助手）："):
+            return "最近回复：已返回会话总览"
+        output_text = _summarize_text(latest_task.output, limit=88) or "（空回复）"
+        return f"最近回复：{output_text}"
+    if latest_task.status == "running":
+        prompt_text = _summarize_text(latest_task.prompt, limit=56) or "（空输入）"
+        return f"处理中：{prompt_text}"
+    if latest_task.status == "queued":
+        prompt_text = _summarize_text(latest_task.prompt, limit=56) or "（空输入）"
+        return f"排队中：{prompt_text}"
+    prompt_text = _summarize_text(latest_task.prompt, limit=56) or "（空输入）"
+    return f"最近请求：{prompt_text}"
 
 
 @dataclass
@@ -148,18 +202,25 @@ def _require_control_mode() -> ManagerActionResult | None:
     )
 
 
+def _require_control_mode_if_needed(require_control_mode: bool) -> ManagerActionResult | None:
+    if not require_control_mode:
+        return None
+    return _require_control_mode()
+
+
 def get_manager_guide() -> ManagerActionResult:
     backend_choices = ", ".join(sorted(supported_backend_keys()))
     lines = [
         "ChatBridge 管理助手工作在独立控制平面，不复用普通微信会话。",
-        "进入管理模式: 先调用 enter_control_mode。",
-        "退出管理模式: 调用 exit_control_mode。",
+        "外部 MCP 写操作安全门: enter_control_mode。",
+        "外部 MCP 恢复只读: exit_control_mode。",
         "只读查询: get_management_snapshot | list_agents | get_task | get_command_catalog。",
         "目标发送方操作: run_sender_command(target_sender_id, command)。",
         "新 Agent 会话: start_agent_session(agent_id, session_name, prompt, ...)。",
         "Agent 委派: delegate_task(agent_id, prompt, ...)。这不会隐式切换管理助手自己的上下文。",
         f"当前支持的会话后端: {backend_choices}",
-        "推荐流程: 先读取快照，再决定是否进入管理模式，然后显式指定目标发送方或 Agent。",
+        "推荐流程: 先读取快照，再决定是否打开外部写操作安全门，然后显式指定目标发送方或 Agent。",
+        "注意: control_mode 只服务外部 MCP 客户端，不等同于微信里的 /manage 入口开关。",
     ]
     lines.extend(
         [
@@ -181,8 +242,8 @@ def get_manager_guide() -> ManagerActionResult:
         ok=True,
         summary="\n".join(lines),
         data={
-            "enter_phrase": "进入管理模式",
-            "exit_phrase": "退出管理模式",
+            "enter_phrase": "打开外部写操作安全门",
+            "exit_phrase": "恢复外部只读",
             "mutating_tools": ["enter_control_mode", "run_sender_command", "start_agent_session", "delegate_task", "exit_control_mode"],
         },
     )
@@ -264,6 +325,122 @@ def list_agents() -> ManagerActionResult:
     )
 
 
+def _build_session_overview_line(
+    session_name: str,
+    *,
+    is_current: bool,
+    backend: str,
+    latest_status: str,
+    latest_summary: str,
+) -> str:
+    current_marker = " [当前]" if is_current else ""
+    summary = latest_summary.strip() or "暂无历史"
+    return f"- {session_name}{current_marker} | 后端 {backend} | 最近状态 {_display_task_status(latest_status)} | 该会话最后回复 {summary}"
+
+
+def _display_task_status(status: str) -> str:
+    mapping = {
+        "idle": "空闲",
+        "queued": "排队中",
+        "running": "处理中",
+        "succeeded": "已完成",
+        "failed": "失败",
+        "canceled": "已取消",
+    }
+    cleaned = str(status or "").strip().lower()
+    return mapping.get(cleaned, cleaned or "未知")
+
+
+def _build_sender_overview_header(
+    *,
+    current_session: str,
+    session_count: int,
+    focus_sender: bool,
+    sender_index: int,
+) -> str:
+    if focus_sender:
+        return f"你的业务会话（不含管理助手）：当前会话 {current_session}，共 {session_count} 个会话"
+    return f"其他会话来源 {sender_index} 的业务会话（不含管理助手）：当前会话 {current_session}，共 {session_count} 个会话"
+
+
+def list_sender_conversations(*, focus_sender_id: str = "") -> ManagerActionResult:
+    config = BridgeConfig.load()
+    dashboard = load_dashboard_state(APP_DIR, page_key="sessions")
+    hub_config = HubConfig.load()
+    bridge_agent = next((agent for agent in hub_config.agents if agent.id == config.backend_id), None)
+    bridge_agent_model = bridge_agent.model.strip() if bridge_agent is not None else ""
+    bridge_agent_workdir = bridge_agent.workdir if bridge_agent is not None else ""
+    cleaned_focus_sender_id = focus_sender_id.strip()
+
+    senders: list[JsonObject] = []
+    summary_lines: list[str] = []
+    for index, (sender_id, binding) in enumerate(sorted(dashboard.bridge_conversations.items()), start=1):
+        current_session, current_meta = binding.get_current_session(
+            default_backend=config.default_backend,
+            now=_state_now(),
+            normalize_backend=normalize_backend,
+        )
+        sender_tasks = [task for task in dashboard.hub_state.tasks if task.sender_id == sender_id]
+        sessions: list[JsonObject] = []
+        is_focus_sender = sender_id == cleaned_focus_sender_id
+        sender_label = "你的业务会话（不含管理助手）" if is_focus_sender else f"其他会话来源 {index} 的业务会话（不含管理助手）"
+        sender_summary_lines = [
+            _build_sender_overview_header(
+                current_session=current_session,
+                session_count=len(binding.sessions),
+                focus_sender=is_focus_sender,
+                sender_index=index,
+            ),
+        ]
+        for session_name, session_meta in sorted(binding.sessions.items()):
+            session_tasks = [task for task in sender_tasks if (task.session_name or "default") == session_name]
+            latest_task = max(session_tasks, key=lambda item: item.created_at, default=None)
+            latest_summary = _build_latest_round_summary(session_tasks)
+            overview_line = _build_session_overview_line(
+                session_name,
+                is_current=session_name == current_session,
+                backend=session_meta.backend,
+                latest_status=latest_task.status if latest_task is not None else "idle",
+                latest_summary=latest_summary,
+            )
+            sender_summary_lines.append(overview_line)
+            sessions.append(
+                {
+                    "name": session_name,
+                    "is_current": session_name == current_session,
+                    "backend": session_meta.backend,
+                    "model": _resolve_session_model(session_meta, bridge_agent_model),
+                    "workdir": _resolve_session_workdir(session_meta, bridge_agent_workdir),
+                    "task_count": len(session_tasks),
+                    "latest_task_id": latest_task.id if latest_task is not None else "",
+                    "latest_status": latest_task.status if latest_task is not None else "idle",
+                    "latest_summary": latest_summary,
+                    "overview_line": overview_line,
+                }
+            )
+        summary_lines.extend(sender_summary_lines)
+        senders.append(
+            {
+                "sender_id": sender_id,
+                "label": sender_label,
+                "current_session": current_session,
+                "session_count": len(binding.sessions),
+                "sessions": sessions,
+                "summary_lines": sender_summary_lines,
+                "latest_manager_reply_summary": _build_latest_manager_reply_summary(sender_tasks) if is_focus_sender else "",
+            }
+        )
+    return ManagerActionResult(
+        ok=True,
+        summary="\n".join(summary_lines) if summary_lines else f"已返回 {len(senders)} 个发送方的会话总览。",
+        data={
+            "conversation_count": len(dashboard.bridge_conversations),
+            "senders": senders,
+            "summary_lines": summary_lines,
+        },
+    )
+
+
 def get_task(task_id: str) -> ManagerActionResult:
     cleaned_task_id = task_id.strip()
     if not cleaned_task_id:
@@ -292,6 +469,7 @@ def get_management_snapshot(target_sender_id: str = "") -> ManagerActionResult:
     bridge_agent_workdir = bridge_agent.workdir if bridge_agent is not None else ""
     payload: JsonObject = {
         "manager_mode": manager_state.to_dict(),
+        "control_mode": manager_state.to_dict(),
         "bridge": {
             "agent_id": config.backend_id,
             "default_backend": config.default_backend,
@@ -330,11 +508,29 @@ def get_management_snapshot(target_sender_id: str = "") -> ManagerActionResult:
             now=_state_now(),
             normalize_backend=normalize_backend,
         )
+        wechat_manager_mode = bool(getattr(binding, "manager_mode", True))
         sender_tasks = [task for task in dashboard.hub_state.tasks if task.sender_id == cleaned_sender_id]
         session_summaries: list[dict[str, object]] = []
+        summary_lines = [
+            _build_sender_overview_header(
+                current_session=current_session,
+                session_count=len(binding.sessions),
+                focus_sender=True,
+                sender_index=1,
+            ),
+        ]
         for session_name, session_meta in sorted(binding.sessions.items()):
             session_tasks = [task for task in sender_tasks if (task.session_name or "default") == session_name]
             latest_task = max(session_tasks, key=lambda item: item.created_at, default=None)
+            latest_summary = _build_latest_round_summary(session_tasks)
+            overview_line = _build_session_overview_line(
+                session_name,
+                is_current=session_name == current_session,
+                backend=session_meta.backend,
+                latest_status=latest_task.status if latest_task is not None else "idle",
+                latest_summary=latest_summary,
+            )
+            summary_lines.append(overview_line)
             session_summaries.append(
                 {
                     "name": session_name,
@@ -345,10 +541,8 @@ def get_management_snapshot(target_sender_id: str = "") -> ManagerActionResult:
                     "task_count": len(session_tasks),
                     "latest_task_id": latest_task.id if latest_task is not None else "",
                     "latest_status": latest_task.status if latest_task is not None else "idle",
-                    "latest_summary": _summarize_text(
-                        (latest_task.output or latest_task.error or latest_task.prompt) if latest_task is not None else "暂无历史",
-                        limit=120,
-                    ),
+                    "latest_summary": latest_summary,
+                    "overview_line": overview_line,
                 }
             )
         payload["target_sender"] = {
@@ -357,8 +551,11 @@ def get_management_snapshot(target_sender_id: str = "") -> ManagerActionResult:
             "current_backend": current_meta.backend,
             "current_model": _resolve_session_model(current_meta, bridge_agent_model),
             "current_workdir": _resolve_session_workdir(current_meta, bridge_agent_workdir),
+            "wechat_manager_mode": wechat_manager_mode,
             "session_count": len(binding.sessions),
             "sessions": session_summaries,
+            "summary_lines": summary_lines,
+            "latest_manager_reply_summary": _build_latest_manager_reply_summary(sender_tasks),
             "relation_lines": build_context_relation_lines(
                 lambda key, **kwargs: _translate_context_key(key, **kwargs),
                 agent_id=config.backend_id,
@@ -374,7 +571,7 @@ def get_management_snapshot(target_sender_id: str = "") -> ManagerActionResult:
         }
         return ManagerActionResult(
             ok=True,
-            summary=f"已返回发送方 {cleaned_sender_id} 的管理快照。",
+            summary="\n".join(summary_lines),
             data=payload,
         )
     return ManagerActionResult(ok=True, summary="已返回 ChatBridge 总览快照。", data=payload)
@@ -418,8 +615,13 @@ def _translate_context_key(key: str, **kwargs: object) -> str:
     return templates.get(key, key).format(**kwargs)
 
 
-def run_sender_command(target_sender_id: str, command: str) -> ManagerActionResult:
-    gate = _require_control_mode()
+def run_sender_command(
+    target_sender_id: str,
+    command: str,
+    *,
+    require_control_mode: bool = True,
+) -> ManagerActionResult:
+    gate = _require_control_mode_if_needed(require_control_mode)
     if gate is not None:
         return gate
     cleaned_sender_id = target_sender_id.strip()
@@ -452,8 +654,9 @@ def delegate_task(
     target_sender_id: str = "",
     workdir: str = "",
     model: str = "",
+    require_control_mode: bool = True,
 ) -> ManagerActionResult:
-    gate = _require_control_mode()
+    gate = _require_control_mode_if_needed(require_control_mode)
     if gate is not None:
         return gate
     result = submit_hub_task(
@@ -489,8 +692,9 @@ def start_agent_session(
     target_sender_id: str = "",
     workdir: str = "",
     model: str = "",
+    require_control_mode: bool = True,
 ) -> ManagerActionResult:
-    gate = _require_control_mode()
+    gate = _require_control_mode_if_needed(require_control_mode)
     if gate is not None:
         return gate
     cleaned_agent_id = agent_id.strip()
