@@ -31,5 +31,6 @@ HUB_STATE_PATH = STATE_DIR / "agent_hub_state.json"
 BRIDGE_STATE_PATH = _resolve_path_override("CHATBRIDGE_BRIDGE_STATE_PATH", STATE_DIR / "weixin_hub_bridge_state.json")
 BRIDGE_CONVERSATIONS_PATH = _resolve_path_override("CHATBRIDGE_BRIDGE_CONVERSATIONS_PATH", STATE_DIR / "weixin_conversations.json")
 BRIDGE_PENDING_TASKS_PATH = _resolve_path_override("CHATBRIDGE_BRIDGE_PENDING_TASKS_PATH", STATE_DIR / "weixin_pending_tasks.json")
+PROJECT_SPACES_PATH = _resolve_path_override("CHATBRIDGE_PROJECT_SPACES_PATH", STATE_DIR / "project_spaces.json")
 BRIDGE_EVENT_LOG_PATH = _resolve_path_override("CHATBRIDGE_BRIDGE_EVENT_LOG_PATH", LOG_DIR / "weixin_bridge_events.jsonl")
 BRIDGE_MESSAGE_AUDIT_LOG_PATH = _resolve_path_override("CHATBRIDGE_BRIDGE_MESSAGE_AUDIT_LOG_PATH", LOG_DIR / "weixin_bridge_message_audit.jsonl")

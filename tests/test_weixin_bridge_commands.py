@@ -181,6 +181,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         temp_root = Path(self._tempdir.name)
         self.conversation_path = temp_root / ".runtime" / "state" / "weixin_conversations.json"
         self.pending_tasks_path = temp_root / ".runtime" / "state" / "weixin_pending_tasks.json"
+        self.project_spaces_path = temp_root / ".runtime" / "state" / "project_spaces.json"
         self.event_log_path = temp_root / ".runtime" / "logs" / "weixin_bridge_events.jsonl"
         self.message_audit_log_path = temp_root / ".runtime" / "logs" / "weixin_bridge_message_audit.jsonl"
         self.state_path = temp_root / ".runtime" / "state" / "weixin_hub_bridge_state.json"
@@ -189,6 +190,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         self._patchers = [
             patch("weixin_hub_bridge.CONVERSATION_PATH", self.conversation_path),
             patch("weixin_hub_bridge.PENDING_TASKS_PATH", self.pending_tasks_path),
+            patch("weixin_hub_bridge.PROJECT_SPACES_PATH", self.project_spaces_path),
             patch("weixin_hub_bridge.EVENT_LOG_PATH", self.event_log_path),
             patch("weixin_hub_bridge.MESSAGE_AUDIT_LOG_PATH", self.message_audit_log_path),
             patch("weixin_hub_bridge.STATE_PATH", self.state_path),
@@ -995,6 +997,16 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         binding = self.bridge.conversations["sender-test"]
         self.assertEqual(str(project_dir), binding.sessions["default"].workdir)
 
+    def test_new_session_inherits_current_project_directory(self) -> None:
+        project_dir = Path("/home/dajingling/PythonProjects/chatbridge/workspace/project-theta")
+        project_dir.mkdir(parents=True, exist_ok=True)
+        self.bridge._handle_control_command("sender-test", "/project project-theta")
+        reply, handled = self.bridge._handle_control_command("sender-test", "/new feature-a")
+        self.assertTrue(handled)
+        self.assertIn("feature-a", reply)
+        binding = self.bridge.conversations["sender-test"]
+        self.assertEqual(str(project_dir.resolve()), binding.sessions["feature-a"].workdir)
+
     def test_project_reset_clears_session_override(self) -> None:
         project_dir = Path("/home/dajingling/PythonProjects/chatbridge/workspace/project-epsilon")
         project_dir.mkdir(parents=True, exist_ok=True)
@@ -1022,17 +1034,78 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         self.assertIn("Available project directories:", reply)
         self.assertIn("project-delta", reply)
 
+    def test_project_add_registers_external_directory(self) -> None:
+        project_dir = Path(self._tempdir.name) / "external-project"
+        project_dir.mkdir(parents=True, exist_ok=True)
+        reply, handled = self.bridge._handle_control_command("sender-test", f"/project add external {project_dir}")
+        self.assertTrue(handled)
+        self.assertIn("Registered project", reply)
+        self.assertIn(str(project_dir.resolve()), reply)
+        saved = json.loads(self.project_spaces_path.read_text(encoding="utf-8"))
+        self.assertEqual(str(project_dir.resolve()), saved["projects"]["external"])
+
+    def test_project_remove_deletes_registered_directory(self) -> None:
+        project_dir = Path(self._tempdir.name) / "external-project"
+        project_dir.mkdir(parents=True, exist_ok=True)
+        self.project_spaces_path.write_text(
+            json.dumps({"projects": {"external": str(project_dir.resolve())}}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        reply, handled = self.bridge._handle_control_command("sender-test", "/project remove external")
+        self.assertTrue(handled)
+        self.assertIn("Removed project: external", reply)
+        saved = json.loads(self.project_spaces_path.read_text(encoding="utf-8"))
+        self.assertEqual({}, saved["projects"])
+
     def test_list_command_includes_session_summary(self) -> None:
         reply, handled = self.bridge._handle_control_command("sender-test", "/list")
         self.assertTrue(handled)
         self.assertIn("Sessions:", reply)
+        self.assertIn("current project:", reply)
         self.assertIn("page 1/1", reply)
         self.assertIn("deep-dive [claude]", reply)
         self.assertIn("stacktrace details", reply)
         lines = reply.splitlines()
-        self.assertIn("deep-dive [claude]", lines[1])
-        self.assertIn("default [codex]", lines[2])
-        self.assertIn("zzz-empty [opencode]", lines[3])
+        self.assertIn("deep-dive [claude]", lines[2])
+        self.assertIn("default [codex]", lines[3])
+        self.assertIn("zzz-empty [opencode]", lines[4])
+
+    def test_sessions_all_lists_every_project_scope(self) -> None:
+        self.bridge.conversations["sender-test"].sessions["api-project"] = self.bridge._new_session_meta(
+            "codex",
+            workdir=str((Path(self._tempdir.name) / "api-project").resolve()),
+        )
+        Path(self._tempdir.name, "api-project").mkdir(parents=True, exist_ok=True)
+        reply, handled = self.bridge._handle_control_command("sender-test", "/sessions all")
+        self.assertTrue(handled)
+        self.assertIn("all projects", reply)
+        self.assertIn("api-project [codex]", reply)
+
+    def test_project_sessions_lists_only_target_project_sessions(self) -> None:
+        shared_dir = Path(self._tempdir.name) / "project-omega"
+        other_dir = Path(self._tempdir.name) / "project-sigma"
+        shared_dir.mkdir(parents=True, exist_ok=True)
+        other_dir.mkdir(parents=True, exist_ok=True)
+        self.project_spaces_path.write_text(
+            json.dumps(
+                {
+                    "projects": {
+                        "omega": str(shared_dir.resolve()),
+                        "sigma": str(other_dir.resolve()),
+                    }
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        binding = self.bridge.conversations["sender-test"]
+        binding.sessions["deep-dive"].workdir = str(shared_dir.resolve())
+        binding.sessions["default"].workdir = str(other_dir.resolve())
+        reply, handled = self.bridge._handle_control_command("sender-test", "/project sessions omega")
+        self.assertTrue(handled)
+        self.assertIn("current project: omega", reply)
+        self.assertIn("deep-dive [claude]", reply)
+        self.assertNotIn("default [codex]", reply)
 
     def test_sessions_command_supports_pagination(self) -> None:
         for index in range(6):
@@ -1132,6 +1205,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         self.assertIn("Current setup", reply)
         self.assertIn("Assistant default model: gpt-5.4", reply)
         self.assertIn("Current model: gpt-5.4", reply)
+        self.assertIn("Current project: project-alpha", reply)
         self.assertIn("Assistant default directory: /tmp/project-alpha", reply)
         self.assertIn("Note: session backend/model/directory overrides win", reply)
 

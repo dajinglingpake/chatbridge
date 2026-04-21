@@ -55,6 +55,11 @@ class ManagementAgentHubTests(unittest.TestCase):
             with patch("agent_hub.CHATBRIDGE_MANAGER_PROMPT_PATH", prompt_path):
                 self.assertEqual("manager prompt for {sender_id}", load_manager_prompt_template())
 
+    def test_load_manager_prompt_template_includes_project_rules(self) -> None:
+        prompt = load_manager_prompt_template()
+        self.assertIn("切到 xxx 项目/进入 xxx 项目/把当前项目切到 xxx", prompt)
+        self.assertIn("列出这个项目里的会话/看看 xxx 项目的会话", prompt)
+
     def test_wechat_manager_task_builds_manager_prompt_and_mcp(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)

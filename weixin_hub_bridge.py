@@ -27,6 +27,7 @@ from core.runtime_paths import (
     BRIDGE_STATE_PATH,
     BRIDGE_CONVERSATIONS_PATH,
     LOG_DIR,
+    PROJECT_SPACES_PATH as BRIDGE_PROJECT_SPACES_PATH,
     RUNTIME_DIR,
     STATE_DIR,
 )
@@ -49,6 +50,7 @@ CONVERSATION_PATH = BRIDGE_CONVERSATIONS_PATH
 PENDING_TASKS_PATH = BRIDGE_PENDING_TASKS_PATH
 EVENT_LOG_PATH = BRIDGE_EVENT_LOG_PATH
 MESSAGE_AUDIT_LOG_PATH = BRIDGE_MESSAGE_AUDIT_LOG_PATH
+PROJECT_SPACES_PATH = BRIDGE_PROJECT_SPACES_PATH
 DEFAULT_WEIXIN_BASE_URL = "https://ilinkai.weixin.qq.com"
 ILINK_APP_ID = "bot"
 ILINK_APP_CLIENT_VERSION = (2 << 16) | (1 << 8) | 1
@@ -90,6 +92,27 @@ class WeixinBridge:
             account_file=str(self.account_path),
             sync_file=str(self.sync_path),
         )
+
+    def _load_registered_project_spaces(self) -> dict[str, str]:
+        raw = load_json(PROJECT_SPACES_PATH, {}, expect_type=dict)
+        payload = raw.get("projects") if isinstance(raw, dict) else {}
+        if not isinstance(payload, dict):
+            return {}
+        spaces: dict[str, str] = {}
+        for raw_name, raw_path in payload.items():
+            name = self._sanitize_project_name(str(raw_name))
+            if not name:
+                continue
+            candidate = Path(str(raw_path or "").strip()).expanduser()
+            if not candidate.exists() or not candidate.is_dir():
+                continue
+            spaces[name] = str(candidate.resolve())
+        return spaces
+
+    def _save_registered_project_spaces(self, spaces: dict[str, str]) -> None:
+        PROJECT_SPACES_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ordered = {name: spaces[name] for name in sorted(spaces)}
+        save_json(PROJECT_SPACES_PATH, {"projects": ordered})
 
     def run(self) -> None:
         print(f"Weixin Hub Bridge started at {now_iso()}")
@@ -753,7 +776,10 @@ class WeixinBridge:
                 self._t("bridge.help.model.switch"),
                 self._t("bridge.help.model.reset"),
                 self._t("bridge.help.project"),
+                self._t("bridge.help.project.add"),
+                self._t("bridge.help.project.remove"),
                 self._t("bridge.help.project.list"),
+                self._t("bridge.help.project.sessions"),
                 self._t("bridge.help.project.switch"),
                 self._t("bridge.help.project.reset"),
                 self._t("bridge.help.close"),
@@ -788,7 +814,11 @@ class WeixinBridge:
         if command == "/new":
             requested = parts[1].strip() if len(parts) >= 2 else ""
             session_name = self._allocate_session_name(binding, requested or "session")
-            sessions[session_name] = self._new_session_meta(current_meta.backend)
+            sessions[session_name] = self._new_session_meta(
+                current_meta.backend,
+                workdir=current_meta.workdir,
+                model=current_meta.model,
+            )
             binding.current_session = session_name
             self._save_conversations()
             return self._t("bridge.session.created", session=session_name, backend=sessions[session_name].backend), True
@@ -804,6 +834,8 @@ class WeixinBridge:
                 return self._render_session_list(sender_id, binding), True
             subcommand = parts[1].strip()
             lowered_subcommand = subcommand.lower()
+            if lowered_subcommand == "all":
+                return self._render_session_list(sender_id, binding, project_path=None, scope_label=self._t("bridge.session.list.scope.all")), True
             if lowered_subcommand in {"search", "find"}:
                 keyword = parts[2].strip() if len(parts) >= 3 else ""
                 return self._render_session_list(sender_id, binding, query=keyword), True
@@ -1004,8 +1036,39 @@ class WeixinBridge:
                 return self._render_project_status(current_session, current_meta), True
             project_arg = parts[1].strip()
             lowered_project_arg = project_arg.lower()
+            if lowered_project_arg == "add":
+                name, path_arg = self._split_named_path_args(parts[2].strip() if len(parts) >= 3 else "")
+                if not name or not path_arg:
+                    return self._t("bridge.project.add.usage"), True
+                project_name = self._sanitize_project_name(name)
+                if not project_name:
+                    return self._t("bridge.project.add.usage"), True
+                candidate = Path(path_arg).expanduser()
+                if not candidate.is_absolute():
+                    candidate = APP_DIR / candidate
+                if not candidate.exists() or not candidate.is_dir():
+                    return self._t("bridge.project.not_found", project=path_arg), True
+                spaces = self._load_registered_project_spaces()
+                resolved = str(candidate.resolve())
+                spaces[project_name] = resolved
+                self._save_registered_project_spaces(spaces)
+                return self._t("bridge.project.added", name=project_name, path=resolved), True
+            if lowered_project_arg in {"remove", "delete"}:
+                name = parts[2].strip() if len(parts) >= 3 else ""
+                project_name = self._sanitize_project_name(name)
+                if not project_name:
+                    return self._t("bridge.project.remove.usage"), True
+                spaces = self._load_registered_project_spaces()
+                removed_path = spaces.pop(project_name, "")
+                if not removed_path:
+                    return self._t("bridge.project.remove.not_found", name=project_name), True
+                self._save_registered_project_spaces(spaces)
+                return self._t("bridge.project.removed", name=project_name), True
             if lowered_project_arg == "list":
                 return self._render_project_list(current_meta), True
+            if lowered_project_arg == "sessions":
+                target_project = parts[2].strip() if len(parts) >= 3 else ""
+                return self._render_project_session_list(sender_id, binding, target_project)
             if lowered_project_arg == "reset":
                 current_meta.touch(now_iso(), workdir="")
                 sessions[current_session] = current_meta
@@ -1157,13 +1220,41 @@ class WeixinBridge:
         safe_sender = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in sender_id).strip("-_") or "sender"
         return f"{MANAGER_SESSION_PREFIX}-{safe_sender}"
 
-    def _render_session_list(self, sender_id: str, binding: WeixinConversationBinding, *, page: int = 1, query: str = "") -> str:
+    def _render_session_list(
+        self,
+        sender_id: str,
+        binding: WeixinConversationBinding,
+        *,
+        page: int = 1,
+        query: str = "",
+        project_path: str | None = "",
+        scope_label: str = "",
+    ) -> str:
         sender_tasks = self._load_sender_tasks(sender_id)
         tasks_by_session: dict[str, list[HubTask]] = {}
         for task in sender_tasks:
             tasks_by_session.setdefault(task.session_name or "default", []).append(task)
 
-        all_session_names = self._filtered_session_names(binding, tasks_by_session, query=query)
+        if project_path == "":
+            _, current_meta = binding.get_current_session(
+                default_backend=self.config.default_backend,
+                now=now_iso(),
+                normalize_backend=normalize_backend,
+            )
+            project_path = self._resolve_session_workdir(current_meta)
+            scope_label = scope_label or self._t(
+                "bridge.session.list.scope.project",
+                project=self._project_name_for_workdir(project_path),
+            )
+        elif project_path is None:
+            scope_label = scope_label or self._t("bridge.session.list.scope.all")
+        else:
+            scope_label = scope_label or self._t(
+                "bridge.session.list.scope.project",
+                project=self._project_name_for_workdir(project_path),
+            )
+
+        all_session_names = self._filtered_session_names(binding, tasks_by_session, query=query, project_path=project_path)
         total_count = len(all_session_names)
         total_pages = max(1, (total_count + SESSION_PAGE_SIZE - 1) // SESSION_PAGE_SIZE)
         current_page = min(max(page, 1), total_pages)
@@ -1177,6 +1268,7 @@ class WeixinBridge:
                 total_pages=total_pages,
                 count=total_count,
                 query=query.strip() or "-",
+                scope=scope_label,
             )
         ]
         if not paged_session_names:
@@ -1211,13 +1303,23 @@ class WeixinBridge:
         tasks_by_session: dict[str, list[HubTask]],
         *,
         query: str = "",
+        project_path: str | None = "",
     ) -> list[str]:
         ordered = self._ordered_session_names(binding, tasks_by_session)
         cleaned_query = query.strip().lower()
+        resolved_project_path = str(Path(project_path).expanduser().resolve()) if project_path else ""
         if not cleaned_query:
-            return ordered
+            if not resolved_project_path:
+                return ordered
+            return [
+                session_name
+                for session_name in ordered
+                if self._resolve_session_workdir(binding.sessions[session_name]) == resolved_project_path
+            ]
         matched: list[str] = []
         for session_name in ordered:
+            if resolved_project_path and self._resolve_session_workdir(binding.sessions[session_name]) != resolved_project_path:
+                continue
             if cleaned_query in session_name.lower():
                 matched.append(session_name)
                 continue
@@ -1452,15 +1554,15 @@ class WeixinBridge:
         )
 
     def _project_spaces(self) -> dict[str, str]:
-        spaces: dict[str, str] = {}
+        spaces = self._load_registered_project_spaces()
         agent = self._find_agent_config(self.config.backend_id)
         if agent is not None and agent.workdir:
             agent_path = Path(agent.workdir).resolve()
-            spaces[agent_path.name or "agent-default"] = str(agent_path)
+            spaces.setdefault(agent_path.name or "agent-default", str(agent_path))
         workspace_root = APP_DIR / "workspace"
         if workspace_root.exists():
             for project_dir in sorted(item for item in workspace_root.iterdir() if item.is_dir()):
-                spaces[project_dir.name] = str(project_dir.resolve())
+                spaces.setdefault(project_dir.name, str(project_dir.resolve()))
         return spaces
 
     def _resolve_project_workdir(self, project_arg: str) -> str | None:
@@ -1477,6 +1579,22 @@ class WeixinBridge:
         if candidate.exists() and candidate.is_dir():
             return str(candidate.resolve())
         return None
+
+    def _project_name_for_workdir(self, workdir: str) -> str:
+        resolved = str(Path(workdir).expanduser().resolve())
+        for name, path in self._project_spaces().items():
+            if path == resolved:
+                return name
+        return Path(resolved).name or resolved
+
+    def _resolve_project_scope(self, project_arg: str, current_meta: WeixinSessionMeta) -> tuple[str | None, str]:
+        if project_arg.strip():
+            resolved = self._resolve_project_workdir(project_arg)
+            if resolved is None:
+                return None, ""
+            return resolved, self._project_name_for_workdir(resolved)
+        current_workdir = self._resolve_session_workdir(current_meta)
+        return current_workdir, self._project_name_for_workdir(current_workdir)
 
     def _resolve_session_workdir(self, session_meta: WeixinSessionMeta) -> str:
         if session_meta.workdir.strip():
@@ -1538,6 +1656,30 @@ class WeixinBridge:
             lines.append(self._t("bridge.project.list.empty"))
         return "\n".join(lines)
 
+    def _render_project_session_list(
+        self,
+        sender_id: str,
+        binding: WeixinConversationBinding,
+        project_arg: str,
+    ) -> tuple[str, bool]:
+        _, current_meta = binding.get_current_session(
+            default_backend=self.config.default_backend,
+            now=now_iso(),
+            normalize_backend=normalize_backend,
+        )
+        project_path, project_name = self._resolve_project_scope(project_arg, current_meta)
+        if project_path is None:
+            return self._t("bridge.project.not_found", project=project_arg), True
+        return (
+            self._render_session_list(
+                sender_id,
+                binding,
+                project_path=project_path,
+                scope_label=self._t("bridge.session.list.scope.project", project=project_name),
+            ),
+            True,
+        )
+
     def _extract_passthrough_prompt(self, text: str) -> str | None:
         raw = self._normalize_command_text(text)
         if not raw.startswith("//"):
@@ -1554,6 +1696,7 @@ class WeixinBridge:
         model = agent.model.strip() if agent is not None and agent.model.strip() else "-"
         agent_backend = agent.backend if agent is not None else "-"
         current_meta = binding.sessions.get(current_session) or self._new_session_meta()
+        project_workdir = self._resolve_session_workdir(current_meta)
         return self._t(
             "bridge.status",
             agent=self.config.backend_id,
@@ -1563,7 +1706,8 @@ class WeixinBridge:
             session=current_session,
             backend=backend,
             current_model=self._resolve_session_model(current_meta),
-            project_workdir=self._resolve_session_workdir(current_meta),
+            current_project=self._project_name_for_workdir(project_workdir),
+            project_workdir=project_workdir,
             count=len(binding.sessions),
         ) + "\n" + self._t("bridge.status.relation")
 
@@ -1741,11 +1885,13 @@ class WeixinBridge:
         self._save_conversations()
         return created
 
-    def _new_session_meta(self, backend: Any = "") -> WeixinSessionMeta:
+    def _new_session_meta(self, backend: Any = "", *, workdir: str = "", model: str = "") -> WeixinSessionMeta:
         return WeixinSessionMeta(
             backend=normalize_backend(str(backend or self.config.default_backend)),
             created_at=now_iso(),
             updated_at=now_iso(),
+            workdir=workdir.strip(),
+            model=model.strip(),
         )
 
     def _allocate_session_name(self, binding: WeixinConversationBinding, requested: str) -> str:
@@ -1760,6 +1906,19 @@ class WeixinBridge:
 
     def _sanitize_session_name(self, requested: str, *, fallback: str) -> str:
         return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in requested).strip("-_") or fallback
+
+    def _sanitize_project_name(self, requested: str) -> str:
+        return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in requested).strip("-_")
+
+    @staticmethod
+    def _split_named_path_args(raw: str) -> tuple[str, str]:
+        cleaned = raw.strip()
+        if not cleaned:
+            return "", ""
+        parts = cleaned.split(maxsplit=1)
+        if len(parts) < 2:
+            return parts[0], ""
+        return parts[0].strip(), parts[1].strip()
 
     def _load_account(self) -> dict[str, Any]:
         self._ensure_local_account_storage()

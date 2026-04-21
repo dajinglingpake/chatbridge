@@ -14,6 +14,7 @@ from core.app_service import submit_hub_task
 from core.context_relations import build_context_relation_lines
 from core.dashboard import load_dashboard_state
 from core.json_store import load_json, save_json
+from core.runtime_paths import PROJECT_SPACES_PATH, WORKSPACE_DIR
 from core.state_models import HubTask, JsonObject, WeixinConversationBinding, WeixinSessionMeta
 from weixin_hub_bridge import EVENT_LOG_PATH, WeixinBridge
 
@@ -142,6 +143,27 @@ def _resolve_session_workdir(session_meta: WeixinSessionMeta, agent_workdir: str
     return agent_workdir.strip() or str((APP_DIR / "workspace").resolve())
 
 
+def _project_name_for_workdir(workdir: str) -> str:
+    resolved = str(Path(workdir).expanduser().resolve())
+    registered = load_json(PROJECT_SPACES_PATH, {}, expect_type=dict)
+    payload = registered.get("projects") if isinstance(registered, dict) else {}
+    if isinstance(payload, dict):
+        for raw_name, raw_path in payload.items():
+            candidate = Path(str(raw_path or "").strip()).expanduser()
+            if candidate.exists() and candidate.is_dir() and str(candidate.resolve()) == resolved:
+                return str(raw_name).strip()
+    if WORKSPACE_DIR.exists():
+        for project_dir in sorted(item for item in WORKSPACE_DIR.iterdir() if item.is_dir()):
+            if str(project_dir.resolve()) == resolved:
+                return project_dir.name
+    bridge_config = BridgeConfig.load()
+    hub_config = HubConfig.load()
+    bridge_agent = next((agent for agent in hub_config.agents if agent.id == bridge_config.backend_id), None)
+    if bridge_agent is not None and str(Path(bridge_agent.workdir).expanduser().resolve()) == resolved:
+        return Path(resolved).name or "agent-default"
+    return Path(resolved).name or resolved
+
+
 def _find_agent_config(agent_id: str):
     cleaned_agent_id = agent_id.strip()
     return next((agent for agent in HubConfig.load().agents if agent.id == cleaned_agent_id), None)
@@ -267,8 +289,12 @@ def get_command_catalog() -> ManagerActionResult:
         {"command": f"/backend <{backend_choices}>", "category": "session", "description": "切换当前会话后端"},
         {"command": "/model <name>", "category": "session", "description": "切换当前会话模型"},
         {"command": "/model reset", "category": "session", "description": "恢复跟随 Agent 默认模型"},
-        {"command": "/project <name|path>", "category": "session", "description": "切换当前会话工程目录"},
+        {"command": "/project <name|path>", "category": "session", "description": "切换当前项目；该项目会成为后续会话的工程目录"},
+        {"command": "/project add <name> <path>", "category": "session", "description": "注册项目路径"},
+        {"command": "/project remove <name>", "category": "session", "description": "删除已注册项目"},
+        {"command": "/project sessions [name]", "category": "session", "description": "列出当前或指定项目下的会话"},
         {"command": "/project reset", "category": "session", "description": "恢复跟随 Agent 默认工程目录"},
+        {"command": "/sessions all", "category": "session", "description": "列出全部项目下的会话"},
         {"command": "/events [count]", "category": "observe", "description": "查看最近异步回执事件"},
         {"command": "/agent", "category": "agent", "description": "查看当前微信桥默认 Agent"},
         {"command": "/agent list", "category": "agent", "description": "查看所有 Agent 摘要"},
@@ -355,12 +381,13 @@ def _build_sender_overview_header(
     *,
     current_session: str,
     session_count: int,
+    current_project: str,
     focus_sender: bool,
     sender_index: int,
 ) -> str:
     if focus_sender:
-        return f"你的业务会话（不含管理助手）：当前会话 {current_session}，共 {session_count} 个会话"
-    return f"其他会话来源 {sender_index} 的业务会话（不含管理助手）：当前会话 {current_session}，共 {session_count} 个会话"
+        return f"你的业务会话（不含管理助手）：当前项目 {current_project}，当前会话 {current_session}，共 {session_count} 个会话"
+    return f"其他会话来源 {sender_index} 的业务会话（不含管理助手）：当前项目 {current_project}，当前会话 {current_session}，共 {session_count} 个会话"
 
 
 def list_sender_conversations(*, focus_sender_id: str = "") -> ManagerActionResult:
@@ -388,6 +415,7 @@ def list_sender_conversations(*, focus_sender_id: str = "") -> ManagerActionResu
             _build_sender_overview_header(
                 current_session=current_session,
                 session_count=len(binding.sessions),
+                current_project=_project_name_for_workdir(_resolve_session_workdir(current_meta, bridge_agent_workdir)),
                 focus_sender=is_focus_sender,
                 sender_index=index,
             ),
@@ -515,6 +543,7 @@ def get_management_snapshot(target_sender_id: str = "") -> ManagerActionResult:
             _build_sender_overview_header(
                 current_session=current_session,
                 session_count=len(binding.sessions),
+                current_project=_project_name_for_workdir(_resolve_session_workdir(current_meta, bridge_agent_workdir)),
                 focus_sender=True,
                 sender_index=1,
             ),
