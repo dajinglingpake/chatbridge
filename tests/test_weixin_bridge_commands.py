@@ -296,8 +296,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         )
         self.assertEqual("wechat-manager", bridge.submit_payloads[-1]["source"])
         self.assertTrue(str(bridge.submit_payloads[-1]["session_name"]).startswith("__manager__-"))
-        self.assertEqual(1, len(bridge.sent_texts))
-        self.assertIn("Got it, I'll take care of this", bridge.sent_texts[0])
+        self.assertEqual([], bridge.sent_texts)
         audits = [json.loads(line) for line in self.message_audit_log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
         self.assertEqual("task_submission", audits[-1]["route"])
         self.assertTrue(audits[-1]["manager_mode"])
@@ -317,7 +316,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
             },
         )
         self.assertEqual("zh-CN", bridge.localizer.language)
-        self.assertIn("收到，我先帮你处理这件事", bridge.sent_texts[0])
+        self.assertEqual([], bridge.sent_texts)
 
     def test_handle_message_falls_back_to_management_agent_for_unknown_prompt(self) -> None:
         bridge = FeedbackBridge(BridgeConfig.load(), [])
@@ -350,7 +349,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         self.assertEqual("wechat-manager", bridge.submit_payloads[-1]["source"])
         self.assertEqual("__manager__-sender-test", bridge.submit_payloads[-1]["session_name"])
         self.assertEqual("default", bridge.conversations["sender-test"].current_session)
-        self.assertIn("Got it, I'll take care of this", bridge.sent_texts[0])
+        self.assertEqual([], bridge.sent_texts)
 
     def test_handle_message_audits_control_command_without_submitting_task(self) -> None:
         bridge = FeedbackBridge(BridgeConfig.load(), [])
@@ -397,7 +396,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                 "item_list": [{"type": 1, "text_item": {"text": "帮我梳理一下最近这几个会话的差异并给建议"}}],
             },
         )
-        self.assertIn("Got it, I'll take care of this", bridge.sent_texts[0])
+        self.assertEqual([], bridge.sent_texts)
         bridge.poll_pending()
         self.assertEqual("找到 2 个会话：default, deep-dive", bridge.sent_texts[-1])
 
@@ -414,7 +413,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
             },
         )
         self.assertEqual("wechat-manager", bridge.submit_payloads[-1]["source"])
-        self.assertIn("Got it, I'll take care of this", bridge.sent_texts[0])
+        self.assertEqual([], bridge.sent_texts)
 
     def test_handle_message_sends_queued_and_running_feedback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -458,18 +457,140 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                         "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
                     },
                 )
-                self.assertEqual(1, len(bridge.sent_texts))
-                self.assertIn("Task accepted", bridge.sent_texts[0])
+                self.assertEqual([], bridge.sent_texts)
                 bridge.poll_pending()
                 bridge.poll_pending()
-            self.assertIn("Task is now running", bridge.sent_texts[1])
-            self.assertIn("Task completed", bridge.sent_texts[2])
-            self.assertIn("Session ID: -", bridge.sent_texts[2])
-            self.assertIn("Result:\nworld", bridge.sent_texts[2])
+            self.assertEqual(1, len(bridge.sent_texts))
+            self.assertIn("Task completed", bridge.sent_texts[0])
+            self.assertIn("Session ID: -", bridge.sent_texts[0])
+            self.assertIn("Result:\nworld", bridge.sent_texts[0])
             entries = [json.loads(line) for line in event_log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
             self.assertEqual(["accepted", "running", "succeeded"], [entry["event"] for entry in entries])
             self.assertEqual("task-feedback-001", entries[-1]["task_id"])
             self.assertEqual("default", entries[-1]["session_name"])
+
+    def test_handle_message_sends_incremental_progress_feedback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            event_log_path = Path(temp_dir) / "weixin_bridge_events.jsonl"
+            bridge = FeedbackBridge(
+                BridgeConfig.load(),
+                [
+                    {
+                        "id": "task-feedback-001",
+                        "sender_id": "sender-test",
+                        "session_name": "default",
+                        "status": "running",
+                        "agent_id": "main",
+                        "agent_name": "default",
+                        "backend": "codex",
+                        "prompt": "hello",
+                        "progress_text": "正在分析仓库结构",
+                        "progress_seq": 1,
+                        "created_at": "2026-04-20T12:00:00",
+                    },
+                    {
+                        "id": "task-feedback-001",
+                        "sender_id": "sender-test",
+                        "session_name": "default",
+                        "status": "running",
+                        "agent_id": "main",
+                        "agent_name": "default",
+                        "backend": "codex",
+                        "prompt": "hello",
+                        "progress_text": "正在生成修复方案",
+                        "progress_seq": 2,
+                        "created_at": "2026-04-20T12:00:00",
+                    },
+                    {
+                        "id": "task-feedback-001",
+                        "sender_id": "sender-test",
+                        "session_name": "default",
+                        "status": "succeeded",
+                        "agent_id": "main",
+                        "agent_name": "default",
+                        "backend": "codex",
+                        "prompt": "hello",
+                        "output": "world",
+                        "created_at": "2026-04-20T12:00:00",
+                    },
+                ],
+            )
+            with patch("weixin_hub_bridge.EVENT_LOG_PATH", event_log_path):
+                bridge._handle_message(
+                    "https://example.com",
+                    "token",
+                    {
+                        "message_type": 1,
+                        "from_user_id": "sender-test",
+                        "context_token": "ctx",
+                        "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
+                    },
+                )
+                bridge.poll_pending()
+                bridge.poll_pending()
+                bridge.poll_pending()
+            self.assertIn("正在生成修复方案", bridge.sent_texts[0])
+            self.assertIn("Task completed", bridge.sent_texts[1])
+            entries = [json.loads(line) for line in event_log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            self.assertEqual(
+                ["accepted", "running", "progress", "progress", "succeeded"],
+                [entry["event"] for entry in entries],
+            )
+            self.assertEqual("正在生成修复方案", entries[-2]["result_preview"])
+
+    def test_management_task_sends_incremental_progress_feedback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            event_log_path = Path(temp_dir) / "weixin_bridge_events.jsonl"
+            bridge = FeedbackBridge(
+                BridgeConfig.load(),
+                [
+                    {
+                        "id": "task-feedback-001",
+                        "sender_id": "sender-manager",
+                        "session_name": "__manager__-sender-manager",
+                        "status": "running",
+                        "agent_id": "main",
+                        "agent_name": "default",
+                        "backend": "codex",
+                        "prompt": "列出所有会话",
+                        "progress_text": "正在调用 get_management_snapshot",
+                        "progress_seq": 1,
+                        "created_at": "2026-04-20T12:00:00",
+                    },
+                    {
+                        "id": "task-feedback-001",
+                        "sender_id": "sender-manager",
+                        "session_name": "__manager__-sender-manager",
+                        "status": "succeeded",
+                        "agent_id": "main",
+                        "agent_name": "default",
+                        "backend": "codex",
+                        "prompt": "列出所有会话",
+                        "output": "找到 2 个会话：default, deep-dive",
+                        "created_at": "2026-04-20T12:00:00",
+                    },
+                ],
+            )
+            with patch("weixin_hub_bridge.EVENT_LOG_PATH", event_log_path):
+                bridge._handle_message(
+                    "https://example.com",
+                    "token",
+                    {
+                        "message_type": 1,
+                        "from_user_id": "sender-manager",
+                        "context_token": "ctx",
+                        "item_list": [{"type": 1, "text_item": {"text": "列出所有会话"}}],
+                    },
+                )
+                bridge.poll_pending()
+                bridge.poll_pending()
+            self.assertEqual(["找到 2 个会话：default, deep-dive"], bridge.sent_texts)
+            entries = [json.loads(line) for line in event_log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            self.assertEqual(
+                ["accepted", "running", "progress", "succeeded"],
+                [entry["event"] for entry in entries],
+            )
+            self.assertEqual("正在调用 get_management_snapshot", entries[-2]["result_preview"])
 
     def test_handle_message_failure_includes_retry_hint(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -502,7 +623,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                         "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
                     },
                 )
-                self.assertIn("Task accepted", bridge.sent_texts[0])
+                self.assertEqual([], bridge.sent_texts)
                 bridge.poll_pending()
             self.assertIn("/retry task-feedback-001", bridge.sent_texts[-1])
             self.assertIn("Session ID: -", bridge.sent_texts[-1])
@@ -549,10 +670,9 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                 "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
             },
         )
-        self.assertIn("Task accepted", bridge.sent_texts[0])
+        self.assertEqual([], bridge.sent_texts)
         bridge.poll_pending()
         bridge.poll_pending()
-        self.assertIn("Task is now running", bridge.sent_texts[1])
         self.assertIn("task was canceled", bridge.sent_texts[-1])
         self.assertIn("/retry task-feedback-001", bridge.sent_texts[-1])
 
@@ -689,6 +809,33 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         self.assertTrue(handled)
         self.assertIn("处理中", reply)
         self.assertIn("正在由 codex 处理", reply)
+
+    def test_events_command_renders_progress_event_detail(self) -> None:
+        os.environ.pop("CHATBRIDGE_LANG", None)
+        bridge = FakeBridge(BridgeConfig.load())
+        with tempfile.TemporaryDirectory() as temp_dir:
+            event_log_path = Path(temp_dir) / "weixin_bridge_events.jsonl"
+            event_log_path.write_text(
+                json.dumps(
+                    {
+                        "at": "2026-04-20T12:00:00",
+                        "event": "progress",
+                        "task_id": "task-a",
+                        "sender_id": "sender-test",
+                        "session_name": "default",
+                        "session_id": "",
+                        "result_preview": "正在调用 get_management_snapshot",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with patch("weixin_hub_bridge.EVENT_LOG_PATH", event_log_path):
+                reply, handled = bridge._handle_control_command("sender-test", "/events 1")
+        self.assertTrue(handled)
+        self.assertIn("进度更新", reply)
+        self.assertIn("正在调用 get_management_snapshot", reply)
 
     def test_events_command_hides_legacy_global_sender_entries(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

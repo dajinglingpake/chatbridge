@@ -211,13 +211,6 @@ class WeixinBridge:
         task_backend = ""
         task_workdir = ""
         task_model = ""
-        accepted_message_key = "bridge.task.accepted"
-        accepted_message_kwargs: dict[str, str] = {
-            "task_id": "",
-            "session": session_name or "default",
-            "backend": session_meta.backend,
-            "model": self._display_model(self._effective_session_model(session_meta)),
-        }
         accepted_backend = session_meta.backend
         accepted_model = self._display_model(self._effective_session_model(session_meta))
         accepted_workdir = self._resolve_session_workdir(session_meta)
@@ -227,14 +220,6 @@ class WeixinBridge:
             accepted_model = manager_agent.model.strip() if manager_agent is not None else ""
             accepted_model = accepted_model or DEFAULT_MANAGER_MODEL
             accepted_workdir = str(APP_DIR)
-            accepted_message_key = "bridge.manage.task.accepted"
-            accepted_message_kwargs = {
-                "task_id": "",
-                "session": session_name or "default",
-                "agent": self.config.backend_id,
-                "backend": accepted_backend,
-                "model": accepted_model,
-            }
             task_backend = accepted_backend
             task_model = accepted_model
             task_workdir = str(APP_DIR)
@@ -279,13 +264,6 @@ class WeixinBridge:
         task_id = str(task.get("id") or "")
         if not task_id:
             raise RuntimeError("submit_task returned invalid task payload")
-        self._send_text(
-            base_url,
-            token,
-            sender_id,
-            msg.get("context_token"),
-            self._t(accepted_message_key, **{**accepted_message_kwargs, "task_id": task_id}),
-        )
         self._append_event_log(
             event="accepted",
             task_id=task_id,
@@ -318,45 +296,6 @@ class WeixinBridge:
     ) -> None:
         if task.status != "running":
             return
-        if tracked.source == WECHAT_MANAGER_SOURCE:
-            self._send_text(
-                base_url,
-                token,
-                tracked.sender_id,
-                self._resolve_context_token_for_sender(tracked),
-                self._t(
-                    "bridge.manage.task.running",
-                    task_id=task.id,
-                    agent=self.config.backend_id,
-                    backend=task.backend or tracked.backend or self.config.default_backend,
-                ),
-            )
-            self._append_event_log(
-                event="running",
-                task_id=task.id,
-                sender_id=tracked.sender_id,
-                session_name=tracked.session_name or "default",
-                session_id=task.session_id or "",
-                backend=task.backend or tracked.backend or self.config.default_backend,
-                model=self._display_model(task.model.strip() or tracked.model),
-                workdir=task.workdir.strip() or tracked.workdir or "-",
-                source=tracked.source,
-            )
-            return
-        self._send_text(
-            base_url,
-            token,
-            tracked.sender_id,
-            self._resolve_context_token_for_sender(tracked),
-            self._t(
-                "bridge.task.running",
-                task_id=task.id,
-                session=task.session_name or "default",
-                backend=task.backend or self.config.default_backend,
-                model=self._display_model(task.model.strip() or tracked.model),
-                workdir=task.workdir.strip() or tracked.workdir or "-",
-            ),
-        )
         self._append_event_log(
             event="running",
             task_id=task.id,
@@ -368,6 +307,72 @@ class WeixinBridge:
             workdir=task.workdir.strip() or tracked.workdir or "-",
             source=tracked.source,
         )
+
+    def _notify_task_progress_update(
+        self,
+        base_url: str,
+        token: str,
+        tracked: WeixinPendingTaskState,
+        task: HubTask,
+    ) -> None:
+        progress_text = task.progress_text.strip()
+        if not progress_text:
+            return
+        if self._should_emit_progress_to_wechat(progress_text):
+            context_token = self._resolve_context_token_for_sender(tracked)
+            if tracked.source == WECHAT_MANAGER_SOURCE:
+                self._send_text(
+                    base_url,
+                    token,
+                    tracked.sender_id,
+                    context_token,
+                    self._t(
+                        "bridge.manage.task.progress",
+                        task_id=task.id,
+                        session=tracked.session_name or "default",
+                        progress=progress_text,
+                    ),
+                )
+            else:
+                self._send_text(
+                    base_url,
+                    token,
+                    tracked.sender_id,
+                    context_token,
+                    self._t(
+                        "bridge.task.progress",
+                        task_id=task.id,
+                        session=task.session_name or tracked.session_name or "default",
+                        progress=progress_text,
+                    ),
+                )
+        self._append_event_log(
+            event="progress",
+            task_id=task.id,
+            sender_id=tracked.sender_id,
+            session_name=task.session_name or tracked.session_name or "default",
+            session_id=task.session_id or "",
+            backend=task.backend or tracked.backend or self.config.default_backend,
+            model=self._display_model(task.model.strip() or tracked.model),
+            workdir=task.workdir.strip() or tracked.workdir or "-",
+            result_preview=progress_text[:240],
+            source=tracked.source,
+        )
+
+    @staticmethod
+    def _should_emit_progress_to_wechat(progress_text: str) -> bool:
+        stripped = str(progress_text or "").strip()
+        if not stripped:
+            return False
+        hidden_prefixes = (
+            "正在调用 ",
+            "已收到 ",
+            "已建立 ",
+            "正在分析",
+            "正在整理回复",
+            "即将返回结果",
+        )
+        return not stripped.startswith(hidden_prefixes)
 
     def _poll_pending_tasks(self, base_url: str, token: str) -> None:
         if not self.pending_tasks:
@@ -385,9 +390,16 @@ class WeixinBridge:
             if task is None:
                 print(f"[bridge] pending task payload invalid for {task_id}")
                 continue
+            state_updated = False
             if task.status == "running" and tracked.last_status != "running":
                 self._notify_task_progress(base_url, token, tracked, task)
                 tracked.last_status = "running"
+                state_updated = True
+            if task.progress_seq > tracked.last_progress_seq and task.progress_text.strip():
+                self._notify_task_progress_update(base_url, token, tracked, task)
+                tracked.last_progress_seq = task.progress_seq
+                state_updated = True
+            if state_updated:
                 self._save_pending_tasks()
             if task.status in {"succeeded", "failed", "canceled"}:
                 self._notify_task_terminal(base_url, token, tracked, task)
@@ -1697,6 +1709,8 @@ class WeixinBridge:
             return self._t("bridge.events.detail.accepted", backend=backend)
         if event == "running":
             return self._t("bridge.events.detail.running", backend=backend)
+        if event == "progress" and result_preview:
+            return result_preview
         if result_preview:
             return result_preview
         if error:

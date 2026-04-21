@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from agent_backends import McpServerConfig
+from agent_backends.shared import collect_text_fragments
 from core.json_store import load_json, save_json
 from core.runtime_paths import APP_DIR, STATE_DIR
 from core.state_models import JsonObject
@@ -19,6 +20,7 @@ DEFAULT_MANAGER_MODEL = "gpt-5.4"
 REQUEST_TIMEOUT_SECONDS = 45.0
 TURN_TIMEOUT_SECONDS = 180.0
 MANAGER_SERVER_NAME = "chatbridge_manager"
+PROGRESS_PUSH_INTERVAL_SECONDS = 1.0
 
 
 def _now_iso() -> str:
@@ -84,6 +86,7 @@ class ChatBridgeManagerRuntime:
         instructions: str,
         model: str,
         mcp_config: McpServerConfig,
+        on_progress=None,
     ) -> dict[str, str]:
         cleaned_sender_id = sender_id.strip()
         if not cleaned_sender_id:
@@ -99,7 +102,7 @@ class ChatBridgeManagerRuntime:
                 instructions=instructions.strip(),
                 model=selected_model,
             )
-            output = self._run_turn(thread_id=thread_id, prompt=cleaned_prompt)
+            output = self._run_turn(thread_id=thread_id, prompt=cleaned_prompt, on_progress=on_progress)
             self._remember_thread(sender_id=cleaned_sender_id, thread_id=thread_id)
             return {
                 "output": output,
@@ -242,7 +245,7 @@ class ChatBridgeManagerRuntime:
         self._remember_thread(sender_id=sender_id, thread_id=thread_id)
         return thread_id
 
-    def _run_turn(self, *, thread_id: str, prompt: str) -> str:
+    def _run_turn(self, *, thread_id: str, prompt: str, on_progress=None) -> str:
         start_cursor = len(self._messages)
         response = self._request(
             "turn/start",
@@ -256,11 +259,11 @@ class ChatBridgeManagerRuntime:
         turn_id = str(turn.get("id") or "").strip()
         if not turn_id:
             raise RuntimeError("manager runtime failed to start turn")
-        completion = self._wait_for_notification(
-            lambda message: message.get("method") == "turn/completed"
-            and str((message.get("params") or {}).get("turn", {}).get("id") or "") == turn_id,
+        completion = self._wait_for_turn_completion(
+            turn_id=turn_id,
             start_cursor=start_cursor,
             timeout=TURN_TIMEOUT_SECONDS,
+            on_progress=on_progress,
         )
         completed_turn = ((completion.get("params") or {}).get("turn") or {})
         if str(completed_turn.get("status") or "") == "failed":
@@ -276,6 +279,97 @@ class ChatBridgeManagerRuntime:
         if final_text:
             return final_text
         raise RuntimeError("manager runtime returned no final agent message")
+
+    def _wait_for_turn_completion(
+        self,
+        *,
+        turn_id: str,
+        start_cursor: int,
+        timeout: float,
+        on_progress=None,
+    ) -> JsonObject:
+        deadline = time.time() + timeout
+        cursor = start_cursor
+        last_progress = ""
+        last_progress_at = 0.0
+        message_buffers: dict[str, str] = {}
+        with self._condition:
+            while True:
+                while cursor < len(self._messages):
+                    message = self._messages[cursor]
+                    cursor += 1
+                    progress_text = self._extract_progress_text(message, message_buffers=message_buffers)
+                    if on_progress is not None and progress_text:
+                        now = time.time()
+                        if progress_text == last_progress:
+                            continue
+                        if now - last_progress_at < PROGRESS_PUSH_INTERVAL_SECONDS:
+                            continue
+                        last_progress = progress_text
+                        last_progress_at = now
+                        on_progress(progress_text)
+                    if (
+                        message.get("method") == "turn/completed"
+                        and str((message.get("params") or {}).get("turn", {}).get("id") or "") == turn_id
+                    ):
+                        return message
+                if self._process is not None and self._process.poll() is not None:
+                    raise RuntimeError(self._process_error_message("manager runtime exited unexpectedly"))
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    raise RuntimeError(self._process_error_message("manager runtime request timed out"))
+                self._condition.wait(timeout=remaining)
+
+    def _extract_progress_text(self, message: JsonObject, *, message_buffers: dict[str, str] | None = None) -> str:
+        method = str(message.get("method") or "").strip()
+        params = message.get("params") or {}
+        if not isinstance(params, dict):
+            return ""
+        if method == "item/agentMessage/delta":
+            item_id = str(params.get("itemId") or "").strip()
+            delta = str(params.get("delta") or "")
+            if item_id and delta and message_buffers is not None:
+                current = message_buffers.get(item_id, "")
+                current += delta
+                message_buffers[item_id] = current
+                force_chunk = False
+                chunk, remainder = self._take_stream_chunk(current, force=force_chunk)
+                if chunk:
+                    message_buffers[item_id] = remainder
+                    return chunk
+            return ""
+        item = params.get("item") or {}
+        if not isinstance(item, dict):
+            item = {}
+        item_type = str(item.get("type") or "").strip().lower()
+        if item_type == "agentmessage":
+            item_id = str(item.get("id") or "").strip()
+            if item_id and message_buffers is not None:
+                trailing_chunk, remainder = self._take_stream_chunk(message_buffers.get(item_id, ""), force=True)
+                if trailing_chunk:
+                    message_buffers[item_id] = remainder
+                    return trailing_chunk
+            fragments = collect_text_fragments(item)
+            if fragments:
+                return fragments[-1][:120]
+        return ""
+
+    def _take_stream_chunk(self, buffer: str, *, force: bool) -> tuple[str, str]:
+        normalized = buffer.replace("\r", "")
+        if not normalized.strip():
+            return "", ""
+        if not force:
+            for separator in ("\n", "。", "！", "？", ". ", "! ", "? ", "；", ";"):
+                index = normalized.rfind(separator)
+                if index >= 0:
+                    cut = index + len(separator)
+                    chunk = normalized[:cut].strip()
+                    remainder = normalized[cut:]
+                    if chunk:
+                        return chunk, remainder
+            return "", buffer
+        chunk = normalized.strip()
+        return chunk, ""
 
     def _start_reader_threads(self) -> None:
         if self._process is None or self._reader_threads_started:

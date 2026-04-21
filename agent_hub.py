@@ -468,6 +468,9 @@ class MultiCodexHub:
         with self.lock:
             task.status = "running"
             task.started_at = now_iso()
+            task.progress_text = ""
+            task.progress_at = task.started_at
+            task.progress_seq = 0
             self.runtimes[agent_id].status = "running"
             self._save_state()
         try:
@@ -477,6 +480,7 @@ class MultiCodexHub:
             with self.lock:
                 runtime = self.runtimes[agent_id]
                 task.finished_at = now_iso()
+                task.progress_text = ""
                 runtime.status = "idle"
                 if canceled:
                     task.status = "canceled"
@@ -501,6 +505,7 @@ class MultiCodexHub:
             with self.lock:
                 runtime = self.runtimes[agent_id]
                 task.finished_at = now_iso()
+                task.progress_text = ""
                 if canceled:
                     task.status = "canceled"
                     task.error = "Task canceled during execution."
@@ -596,6 +601,7 @@ class MultiCodexHub:
                 instructions=self._resolve_task_prompt_prefix(agent, task),
                 model=task.model.strip() or agent.model,
                 mcp_config=manager_mcp,
+                on_progress=lambda text: self._update_task_progress(task.id, text),
             )
         normalized_backend = normalize_backend(task.backend or agent.backend)
         backend = self.backend_registry.get(normalized_backend)
@@ -625,9 +631,27 @@ class MultiCodexHub:
                 creationflags=creationflags(),
                 start_new_session=not IS_WINDOWS,
                 on_process_started=lambda pid: self._register_running_task_pid(task.id, pid),
+                on_progress=lambda text: self._update_task_progress(task.id, text),
                 chatbridge_mcp=manager_mcp,
             ),
         )
+
+    def _update_task_progress(self, task_id: str, text: str) -> None:
+        progress_text = str(text or "").strip()
+        if not progress_text:
+            return
+        with self.lock:
+            task = next((item for item in self.tasks if item.id == task_id), None)
+            if task is None:
+                return
+            if task.status not in {"running", "queued"}:
+                return
+            if task.progress_text == progress_text:
+                return
+            task.progress_text = progress_text
+            task.progress_at = now_iso()
+            task.progress_seq += 1
+            self._save_state()
 
     def _resolve_task_workdir(self, agent: AgentConfig, task: HubTask) -> str:
         if task.source.strip().lower() == WECHAT_MANAGER_SOURCE:

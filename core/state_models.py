@@ -138,6 +138,9 @@ class HubTask:
     bridge_conversations_path: str = ""
     bridge_event_log_path: str = ""
     manager_state_path: str = ""
+    progress_text: str = ""
+    progress_at: str = ""
+    progress_seq: int = 0
 
     @classmethod
     def from_dict(cls, raw: object, *, default_backend: str) -> "HubTask | None":
@@ -169,6 +172,9 @@ class HubTask:
             bridge_conversations_path=str(raw.get("bridge_conversations_path") or "").strip(),
             bridge_event_log_path=str(raw.get("bridge_event_log_path") or "").strip(),
             manager_state_path=str(raw.get("manager_state_path") or "").strip(),
+            progress_text=str(raw.get("progress_text") or ""),
+            progress_at=str(raw.get("progress_at") or "").strip(),
+            progress_seq=int(raw.get("progress_seq") or 0),
         )
 
     def to_dict(self) -> JsonObject:
@@ -490,6 +496,7 @@ class WeixinPendingTaskState:
     workdir: str = ""
     context_token: str = ""
     last_status: str = "queued"
+    last_progress_seq: int = 0
 
     @classmethod
     def from_dict(cls, raw: object) -> "WeixinPendingTaskState | None":
@@ -509,6 +516,7 @@ class WeixinPendingTaskState:
             workdir=str(raw.get("workdir") or "").strip(),
             context_token=str(raw.get("context_token") or "").strip(),
             last_status=str(raw.get("last_status") or "queued").strip() or "queued",
+            last_progress_seq=int(raw.get("last_progress_seq") or 0),
         )
 
     def to_dict(self) -> JsonObject:

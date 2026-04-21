@@ -31,6 +31,7 @@ class BackendContext:
     creationflags: int
     start_new_session: bool = False
     on_process_started: Callable[[int], None] | None = None
+    on_progress: Callable[[str], None] | None = None
     chatbridge_mcp: McpServerConfig | None = None
 
 

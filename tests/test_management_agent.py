@@ -8,8 +8,8 @@ from unittest.mock import patch
 
 from agent_backends.base import BackendContext, McpServerConfig
 from agent_backends.codex_backend import CodexBackend
-from agent_backends.shared import ProcessResult
 from agent_hub import APP_DIR, AgentConfig, HubConfig, MultiCodexHub, load_manager_prompt_template
+from core.manager_agent_runtime import ChatBridgeManagerRuntime
 from core.state_models import HubTask
 
 
@@ -38,7 +38,7 @@ class RecordingManagerRuntime:
         self.last_model = ""
         self.last_mcp = None
 
-    def invoke(self, *, sender_id: str, prompt: str, instructions: str, model: str, mcp_config) -> dict[str, str]:
+    def invoke(self, *, sender_id: str, prompt: str, instructions: str, model: str, mcp_config, on_progress=None) -> dict[str, str]:
         self.last_sender_id = sender_id
         self.last_prompt = prompt
         self.last_instructions = instructions
@@ -187,25 +187,88 @@ class ManagementAgentCodexBackendTests(unittest.TestCase):
             )
             backend = CodexBackend()
 
-            def fake_run_process(argv: list[str], cwd: Path, context: BackendContext) -> ProcessResult:
+            class FakeProcess:
+                def __init__(self, argv: list[str]) -> None:
+                    self.argv = argv
+                    self.pid = 4321
+                    self.stdout = iter(['{"type":"thread.started","thread_id":"thread-1"}\n'])
+                    self.stderr = iter([])
+
+                def wait(self) -> int:
+                    return 0
+
+            def fake_popen(argv: list[str], **kwargs):
                 output_path.write_text("ok", encoding="utf-8")
                 self.assertIn('mcp_servers.chatbridge_manager.command="python3"', argv)
                 self.assertIn('mcp_servers.chatbridge_manager.args=["/tmp/chatbridge_mcp_server.py", "--trusted-internal-manager"]', argv)
-                return ProcessResult(
-                    returncode=0,
-                    stdout='{"type":"thread.started","thread_id":"thread-1"}\n',
-                    stderr="",
-                )
+                return FakeProcess(argv)
 
             with (
                 patch("agent_backends.codex_backend.tempfile.gettempdir", return_value=str(temp_path)),
                 patch("agent_backends.codex_backend.uuid.uuid4", return_value=SimpleNamespace(hex="fixed")),
-                patch("agent_backends.codex_backend.run_process", side_effect=fake_run_process),
+                patch("agent_backends.codex_backend.subprocess.Popen", side_effect=fake_popen),
             ):
                 result = backend.invoke(agent, "hello", "", context)
 
             self.assertEqual("ok", result["output"])
             self.assertEqual("thread-1", result["session_id"])
+
+
+class ManagementAgentRuntimeTests(unittest.TestCase):
+    def test_extract_progress_text_ignores_real_mcp_tool_events(self) -> None:
+        runtime = ChatBridgeManagerRuntime(codex_command="codex")
+        started = runtime._extract_progress_text(
+            {
+                "method": "item/started",
+                "params": {
+                    "item": {
+                        "type": "mcpToolCall",
+                        "tool": "get_management_snapshot",
+                        "status": "inProgress",
+                    }
+                },
+            }
+        )
+        completed = runtime._extract_progress_text(
+            {
+                "method": "item/completed",
+                "params": {
+                    "item": {
+                        "type": "mcpToolCall",
+                        "tool": "get_management_snapshot",
+                        "status": "completed",
+                    }
+                },
+            }
+        )
+        self.assertEqual("", started)
+        self.assertEqual("", completed)
+
+    def test_extract_progress_text_accumulates_agent_message_delta(self) -> None:
+        runtime = ChatBridgeManagerRuntime(codex_command="codex")
+        buffers: dict[str, str] = {}
+        first = runtime._extract_progress_text(
+            {
+                "method": "item/agentMessage/delta",
+                "params": {
+                    "itemId": "msg-1",
+                    "delta": "正在",
+                },
+            },
+            message_buffers=buffers,
+        )
+        second = runtime._extract_progress_text(
+            {
+                "method": "item/agentMessage/delta",
+                "params": {
+                    "itemId": "msg-1",
+                    "delta": "整理会话列表。",
+                },
+            },
+            message_buffers=buffers,
+        )
+        self.assertEqual("", first)
+        self.assertEqual("正在整理会话列表。", second)
 
 
 if __name__ == "__main__":
