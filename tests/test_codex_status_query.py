@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -144,32 +146,27 @@ class CodexStatusQueryTests(unittest.TestCase):
         self.assertIn("1753473884@qq.com (Plus)", panel)
         self.assertIn("Rate limits: unavailable", panel)
 
-    def test_query_codex_context_left_percent_reads_resume_log(self) -> None:
+    def test_query_codex_context_left_percent_reads_local_codex_rollout(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             temp_path = Path(tempdir)
+            codex_home = temp_path / ".codex"
+            codex_home.mkdir(parents=True, exist_ok=True)
             session_file = temp_path / "session.txt"
             log_path = temp_path / "session.jsonl"
+            state_db_path = codex_home / "state_5.sqlite"
             session_file.write_text("thread-1", encoding="utf-8")
             log_path.write_text(
                 '{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":108000},"model_context_window":258400}}}\n',
                 encoding="utf-8",
             )
-
-            class _FakeClient:
-                def __init__(self, codex_command: str) -> None:
-                    self.codex_command = codex_command
-
-                def initialize(self) -> None:
-                    return None
-
-                def request(self, method: str, params: object) -> dict:
-                    self.last_request = (method, params)
-                    return {"thread": {"path": str(log_path)}}
-
-                def close(self) -> None:
-                    return None
-
-            with patch("agent_backends.codex_status_query._AppServerClient", _FakeClient):
+            with sqlite3.connect(str(state_db_path)) as connection:
+                connection.execute("create table threads (id text primary key, rollout_path text not null)")
+                connection.execute(
+                    "insert into threads (id, rollout_path) values (?, ?)",
+                    ("thread-1", str(log_path)),
+                )
+                connection.commit()
+            with patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
                 percent = query_codex_context_left_percent("codex", session_file, temp_path)
         self.assertEqual(58, percent)
 
