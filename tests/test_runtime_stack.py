@@ -83,3 +83,51 @@ class RuntimeStackTests(unittest.TestCase):
         self.assertFalse(current_child.terminated)
         self.assertTrue(other_child.terminated)
         self.assertTrue(proc.terminated)
+
+    def test_taskkill_ignores_oserror_from_psutil_wait(self) -> None:
+        class FakeChild:
+            pid = 999999
+
+            def __init__(self) -> None:
+                self.terminated = False
+                self.killed = False
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+            def wait(self, timeout: float | None = None) -> None:
+                raise OSError(22, "Invalid argument")
+
+            def kill(self) -> None:
+                self.killed = True
+
+        class FakeProc:
+            pid = 123
+
+            def __init__(self, child: FakeChild) -> None:
+                self.child = child
+                self.terminated = False
+                self.killed = False
+
+            def children(self, recursive: bool = False) -> list[FakeChild]:
+                return [self.child]
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+            def wait(self, timeout: float | None = None) -> None:
+                raise OSError(22, "Invalid argument")
+
+            def kill(self) -> None:
+                self.killed = True
+
+        child = FakeChild()
+        proc = FakeProc(child)
+        fake_psutil = SimpleNamespace(Error=Exception)
+        with patch("runtime_stack.psutil", fake_psutil):
+            with patch("runtime_stack._get_process", return_value=proc):
+                _taskkill(123)
+        self.assertTrue(proc.terminated)
+        self.assertTrue(proc.killed)
+        self.assertTrue(child.terminated)
+        self.assertTrue(child.killed)

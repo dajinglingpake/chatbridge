@@ -372,11 +372,57 @@ class WeixinBridgeCommandTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        bridge = FakeBridge(BridgeConfig.load())
+        bridge = FeedbackBridge(BridgeConfig.load(), [])
         bridge.pending_tasks = bridge._load_pending_tasks()
         with patch.object(bridge, "_ipc_request", return_value=IpcResponseEnvelope(ok=False, error="task not found")):
             bridge._poll_pending_tasks("https://example.com", "token")
         self.assertEqual({}, bridge.pending_tasks)
+
+    def test_poll_pending_tasks_clears_unknown_after_restart_task(self) -> None:
+        self.pending_tasks_path.write_text(
+            json.dumps(
+                {
+                    "task-restarted": {
+                        "task_id": "task-restarted",
+                        "sender_id": "sender-test",
+                        "session_name": "default",
+                        "backend": "codex",
+                        "source": "wechat",
+                        "model": "-",
+                        "workdir": "/tmp",
+                        "context_token": "ctx-restarted",
+                        "last_status": "running",
+                        "last_progress_seq": 1,
+                    }
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        bridge = FeedbackBridge(BridgeConfig.load(), [])
+        bridge.pending_tasks = bridge._load_pending_tasks()
+        response = IpcResponseEnvelope(
+            ok=True,
+            payload={
+                "task": {
+                    "id": "task-restarted",
+                    "sender_id": "sender-test",
+                    "session_name": "default",
+                    "status": "unknown_after_restart",
+                    "backend": "codex",
+                    "prompt": "restart",
+                    "error": "Hub restarted while this task was running.",
+                    "created_at": "2026-04-23T18:31:27",
+                    "started_at": "2026-04-23T18:31:49",
+                    "finished_at": "2026-04-23T18:37:36",
+                }
+            },
+        )
+        with patch.object(bridge, "_ipc_request", return_value=response):
+            bridge._poll_pending_tasks("https://example.com", "token")
+        self.assertEqual({}, bridge.pending_tasks)
+        self.assertTrue(bridge.sent_texts)
+        self.assertIn("Hub restarted while this task was running.", bridge.sent_texts[-1])
 
     def test_poll_once_ignores_expected_getupdates_timeout(self) -> None:
         bridge = TimeoutPollingBridge(BridgeConfig.load())
@@ -916,7 +962,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
             )
             self.assertEqual("正在生成修复方案", entries[-2]["result_preview"])
 
-    def test_handle_message_suppresses_duplicate_final_result_after_progress(self) -> None:
+    def test_handle_message_sends_completion_notice_for_duplicate_final_result_after_progress(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             event_log_path = Path(temp_dir) / "weixin_bridge_events.jsonl"
             bridge = FeedbackBridge(
@@ -962,9 +1008,12 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                 )
                 bridge.poll_pending()
                 bridge.poll_pending()
-            self.assertEqual(1, len(bridge.sent_texts))
+            self.assertEqual(2, len(bridge.sent_texts))
             self.assertTrue(bridge.sent_texts[0].startswith("running · "))
             self.assertIn("\n\n最终回答", bridge.sent_texts[0])
+            self.assertTrue(bridge.sent_texts[1].startswith("done · "))
+            self.assertIn("\n\nCompleted", bridge.sent_texts[1])
+            self.assertNotIn("\n\n最终回答", bridge.sent_texts[1])
             entries = [json.loads(line) for line in event_log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
             self.assertEqual(
                 ["accepted", "running", "progress", "succeeded"],

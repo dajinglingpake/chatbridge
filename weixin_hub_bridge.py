@@ -64,6 +64,7 @@ ILINK_APP_CLIENT_VERSION = (2 << 16) | (1 << 8) | 1
 SUPPORTED_BACKENDS = set(supported_backend_keys())
 SESSION_PAGE_SIZE = 5
 ACTIVE_TASK_POLL_TIMEOUT_MS = 1000
+TERMINAL_TASK_STATUSES = frozenset({"succeeded", "failed", "canceled", "unknown_after_restart"})
 PERMISSION_MODE_PRESETS: tuple[tuple[str, str], ...] = (
     ("default", "Default"),
     ("full-access", "Full Access"),
@@ -506,7 +507,7 @@ class WeixinBridge:
                 state_updated = True
             if state_updated:
                 self._save_pending_tasks()
-            if task.status in {"succeeded", "failed", "canceled"}:
+            if task.status in TERMINAL_TASK_STATUSES:
                 self._notify_task_terminal(base_url, token, tracked, task)
                 self.pending_tasks.pop(task_id, None)
                 self._save_pending_tasks()
@@ -522,6 +523,18 @@ class WeixinBridge:
         if task.status == "succeeded":
             output = task.output.strip()
             if output and _normalize_message_for_dedupe(output) == _normalize_message_for_dedupe(tracked.last_progress_text):
+                self._send_text(
+                    base_url,
+                    token,
+                    tracked.sender_id,
+                    context_token,
+                    prefix_weixin_output(
+                        "done",
+                        format_duration_since(task.started_at or task.created_at, ended_at=task.finished_at),
+                        self._t("bridge.task.duplicate_final_result"),
+                        at=task.finished_at or now_iso(),
+                    ),
+                )
                 self._append_event_log(
                     event="succeeded",
                     task_id=task.id,

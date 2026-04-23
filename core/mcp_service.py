@@ -29,12 +29,16 @@ def _summarize_text(value: str, *, limit: int = 120) -> str:
     return text[: limit - 1] + "..." if len(text) > limit else text
 
 
-def _build_latest_round_summary(session_tasks: list[HubTask]) -> str:
-    if not session_tasks:
-        return "暂无历史"
+def _select_latest_display_task(session_tasks: list[HubTask]) -> HubTask | None:
     terminal_statuses = {"succeeded", "failed", "canceled"}
     terminal_tasks = [task for task in session_tasks if str(getattr(task, "status", "") or "").strip() in terminal_statuses]
-    latest_task = max(terminal_tasks or session_tasks, key=lambda item: item.created_at)
+    return max(terminal_tasks or session_tasks, key=lambda item: item.created_at, default=None)
+
+
+def _build_latest_round_summary(session_tasks: list[HubTask]) -> str:
+    latest_task = _select_latest_display_task(session_tasks)
+    if latest_task is None:
+        return "暂无历史"
     if latest_task.error.strip():
         error_text = _summarize_text(latest_task.error, limit=72) or "（空错误）"
         return f"报错：{error_text}"
@@ -316,7 +320,7 @@ def list_senders(*, focus_sender_id: str = "") -> ToolActionResult:
         ]
         for session_name, session_meta in sorted(binding.sessions.items()):
             session_tasks = [task for task in sender_tasks if (task.session_name or "default") == session_name]
-            latest_task = max(session_tasks, key=lambda item: item.created_at, default=None)
+            latest_task = _select_latest_display_task(session_tasks)
             latest_summary = _build_latest_round_summary(session_tasks)
             overview_line = _build_session_overview_line(
                 session_name,
@@ -440,7 +444,7 @@ def get_sender_snapshot(target_sender_id: str = "") -> ToolActionResult:
         ]
         for session_name, session_meta in sorted(binding.sessions.items()):
             session_tasks = [task for task in sender_tasks if (task.session_name or "default") == session_name]
-            latest_task = max(session_tasks, key=lambda item: item.created_at, default=None)
+            latest_task = _select_latest_display_task(session_tasks)
             latest_summary = _build_latest_round_summary(session_tasks)
             overview_line = _build_session_overview_line(
                 session_name,
