@@ -15,7 +15,7 @@ from core.dashboard import load_dashboard_state
 from core.json_store import load_json
 from core.runtime_paths import PROJECT_SPACES_PATH, WORKSPACE_DIR
 from core.state_models import HubTask, JsonObject, WeixinConversationBinding, WeixinSessionMeta
-from weixin_hub_bridge import EVENT_LOG_PATH, WeixinBridge
+from weixin_hub_bridge import DEFAULT_WEIXIN_BASE_URL, EVENT_LOG_PATH, WeixinBridge
 
 
 def _state_now() -> str:
@@ -139,6 +139,7 @@ def get_tool_guide() -> ToolActionResult:
         "只读查询: get_sender_snapshot | list_agents | get_task | get_command_catalog。",
         "目标发送方操作: execute_sender_command(target_sender_id, command)。",
         "服务重启: restart_services(scope='all'|'bridge')，异步安排重启，避免工具调用过程中把当前进程杀掉。",
+        "微信媒体发送: send_weixin_media(target_sender_id, path)，发送项目内允许的图片或文件。",
         "新 Agent 会话: start_agent_session(agent_id, session_name, prompt, ...)。",
         "Agent 委派: delegate_task(agent_id, prompt, ...)。这不会隐式切换当前发送方的会话。",
         f"当前支持的会话后端: {backend_choices}",
@@ -164,7 +165,13 @@ def get_tool_guide() -> ToolActionResult:
         ok=True,
         summary="\n".join(lines),
         data={
-            "mutating_tools": ["execute_sender_command", "restart_services", "start_agent_session", "delegate_task"],
+            "mutating_tools": [
+                "execute_sender_command",
+                "restart_services",
+                "send_weixin_media",
+                "start_agent_session",
+                "delegate_task",
+            ],
         },
     )
 
@@ -193,6 +200,8 @@ def get_command_catalog() -> ToolActionResult:
         {"command": "/project sessions [name]", "category": "session", "description": "列出当前或指定项目下的会话"},
         {"command": "/project reset", "category": "session", "description": "恢复跟随 Agent 默认工程目录"},
         {"command": "/sessions all", "category": "session", "description": "列出全部项目下的会话"},
+        {"command": "/showfile <path>", "category": "file", "description": "预览项目内非敏感文本文件内容"},
+        {"command": "/sendfile <path>", "category": "file", "description": "发送项目内非敏感图片或文件到当前微信会话"},
         {"command": "/events [count]", "category": "observe", "description": "查看最近异步回执事件"},
         {"command": "/agent", "category": "agent", "description": "查看当前微信桥默认 Agent"},
         {"command": "/agent list", "category": "agent", "description": "查看所有 Agent 摘要"},
@@ -576,6 +585,37 @@ def restart_services(scope: str = "all") -> ToolActionResult:
         ok=result.ok,
         summary=result.message,
         data={"scope": cleaned_scope, "action": action},
+    )
+
+
+def send_weixin_media(target_sender_id: str, path: str) -> ToolActionResult:
+    cleaned_sender_id = str(target_sender_id or "").strip()
+    cleaned_path = str(path or "").strip()
+    if not cleaned_sender_id:
+        return ToolActionResult(ok=False, summary="target_sender_id 不能为空")
+    if not cleaned_path:
+        return ToolActionResult(ok=False, summary="path 不能为空")
+    bridge = WeixinBridge(BridgeConfig.load())
+    try:
+        account = bridge._load_account()
+        token = str(account.get("token") or "").strip()
+        if not token:
+            return ToolActionResult(ok=False, summary="微信账号 token 为空，请先登录")
+        base_url = str(account.get("baseUrl") or DEFAULT_WEIXIN_BASE_URL).strip()
+        file_path = bridge._resolve_shareable_project_file(cleaned_path)
+        context_token = bridge.context_tokens.get(cleaned_sender_id, "")
+        response = bridge._send_media_file(base_url, token, cleaned_sender_id, context_token, file_path)
+    except Exception as exc:  # noqa: BLE001
+        return ToolActionResult(ok=False, summary=f"发送媒体失败：{exc}")
+    return ToolActionResult(
+        ok=True,
+        summary=f"已发送 {file_path.name} 到 {cleaned_sender_id}。",
+        data={
+            "target_sender_id": cleaned_sender_id,
+            "path": str(file_path),
+            "file_name": file_path.name,
+            "response": response,
+        },
     )
 
 

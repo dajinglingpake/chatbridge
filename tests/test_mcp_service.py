@@ -12,6 +12,7 @@ from core.mcp_service import (
     execute_sender_command,
     get_sender_snapshot,
     restart_services,
+    send_weixin_media,
     start_agent_session,
     list_senders,
 )
@@ -49,6 +50,32 @@ class McpServiceTests(unittest.TestCase):
         result = restart_services("hub")
         self.assertFalse(result.ok)
         self.assertIn("scope 不支持", result.summary)
+
+    def test_send_weixin_media_sends_allowed_project_file(self) -> None:
+        target_file = self.app_dir / "docs" / "diagram.png"
+        fake_bridge = SimpleNamespace(
+            context_tokens={"sender-a": "ctx-a"},
+            _load_account=lambda: {"token": "token-a", "baseUrl": "https://example.com"},
+            _resolve_shareable_project_file=lambda raw_path: target_file,
+            _send_media_file=unittest.mock.Mock(return_value={}),
+        )
+        with patch("core.mcp_service.WeixinBridge", return_value=fake_bridge):
+            with patch("core.mcp_service.BridgeConfig.load", return_value=SimpleNamespace()):
+                result = send_weixin_media("sender-a", "docs/diagram.png")
+        self.assertTrue(result.ok)
+        fake_bridge._send_media_file.assert_called_once_with(
+            "https://example.com",
+            "token-a",
+            "sender-a",
+            "ctx-a",
+            target_file,
+        )
+        self.assertEqual("diagram.png", result.data["file_name"])
+
+    def test_send_weixin_media_rejects_missing_path(self) -> None:
+        result = send_weixin_media("sender-a", "")
+        self.assertFalse(result.ok)
+        self.assertIn("path 不能为空", result.summary)
 
     def test_start_agent_session_submits_first_prompt(self) -> None:
         fake_agent = SimpleNamespace(

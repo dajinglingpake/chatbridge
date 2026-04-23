@@ -3,14 +3,20 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import mimetypes
 import os
 import random
+import secrets
 import subprocess
 import time
 import unicodedata
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives import padding
 
 from agent_backends import get_backend_command_guide, supported_backend_keys
 from agent_backends.codex_status_query import query_codex_status_panel
@@ -59,17 +65,53 @@ RESTART_NOTICE_PATH = BRIDGE_RESTART_NOTICE_PATH
 SERVICE_ACTION_STATE_FILE = SERVICE_ACTION_STATE_PATH
 PROJECT_SPACES_PATH = BRIDGE_PROJECT_SPACES_PATH
 DEFAULT_WEIXIN_BASE_URL = "https://ilinkai.weixin.qq.com"
+DEFAULT_WEIXIN_CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c"
 ILINK_APP_ID = "bot"
 ILINK_APP_CLIENT_VERSION = (2 << 16) | (1 << 8) | 1
 SUPPORTED_BACKENDS = set(supported_backend_keys())
 SESSION_PAGE_SIZE = 5
 ACTIVE_TASK_POLL_TIMEOUT_MS = 1000
 TERMINAL_TASK_STATUSES = frozenset({"succeeded", "failed", "canceled", "unknown_after_restart"})
+MEDIA_SEND_MAX_BYTES = 25 * 1024 * 1024
+MEDIA_UPLOAD_TYPE_IMAGE = 1
+MEDIA_UPLOAD_TYPE_FILE = 3
+MESSAGE_ITEM_TYPE_IMAGE = 2
+MESSAGE_ITEM_TYPE_FILE = 4
+SHOWFILE_PREVIEW_LIMIT = 3200
+SENDMEDIA_IMAGE_EXTENSIONS = frozenset({".bmp", ".gif", ".jpeg", ".jpg", ".png", ".webp"})
+SHOWFILE_ALLOWED_EXTENSIONS = frozenset(
+    {
+        ".bat",
+        ".cmd",
+        ".css",
+        ".html",
+        ".js",
+        ".json",
+        ".md",
+        ".ps1",
+        ".py",
+        ".sh",
+        ".toml",
+        ".ts",
+        ".tsx",
+        ".txt",
+        ".yaml",
+        ".yml",
+    }
+)
+SHOWFILE_BLOCKED_PATH_PARTS = frozenset({".git", ".runtime", ".venv", "__pycache__", "accounts", "sessions"})
 PERMISSION_MODE_PRESETS: tuple[tuple[str, str], ...] = (
     ("default", "Default"),
     ("full-access", "Full Access"),
 )
 SPECIAL_NATIVE_MENU_COMMANDS = frozenset({"/model", "/permission", "/permissions"})
+
+
+def _encrypt_aes_128_ecb(data: bytes, key: bytes) -> bytes:
+    padder = padding.PKCS7(128).padder()
+    padded = padder.update(data) + padder.finalize()
+    encryptor = Cipher(algorithms.AES(key), modes.ECB()).encryptor()
+    return encryptor.update(padded) + encryptor.finalize()
 
 
 def resolve_bridge_language(config_language: str) -> str:
@@ -273,6 +315,17 @@ class WeixinBridge:
                 self._save_state()
                 return
         if passthrough_prompt is None:
+            if self._handle_sendfile_command(base_url, token, sender_id, msg.get("context_token"), text):
+                self._append_message_audit(
+                    sender_id=sender_id,
+                    text=text,
+                    route="media_command",
+                    session_name=session_name or "default",
+                    command=self._normalize_command_text(text).split(maxsplit=1)[0].lower(),
+                )
+                self.state.record_handled()
+                self._save_state()
+                return
             reply, handled = self._handle_control_command(sender_id, text)
             if handled:
                 self._append_message_audit(
@@ -679,6 +732,126 @@ class WeixinBridge:
             print(f"[bridge] send reply failed to={to_user_id} error={exc} preview={preview}", flush=True)
             raise
 
+    def _handle_sendfile_command(self, base_url: str, token: str, sender_id: str, context_token: Any, text: str) -> bool:
+        raw = self._normalize_command_text(text)
+        if not raw.startswith("/sendfile"):
+            return False
+        parts = raw.split(maxsplit=1)
+        if parts[0].lower() != "/sendfile":
+            return False
+        raw_path = parts[1].strip() if len(parts) >= 2 else ""
+        if not raw_path:
+            self._send_text(base_url, token, sender_id, context_token, self._t("bridge.sendfile.usage"))
+            return True
+        try:
+            file_path = self._resolve_shareable_project_file(raw_path)
+            self._send_media_file(base_url, token, sender_id, context_token, file_path)
+        except Exception as exc:  # noqa: BLE001
+            self._send_text(base_url, token, sender_id, context_token, self._t("bridge.sendfile.failed", path=raw_path, error=str(exc)))
+        return True
+
+    def _send_media_file(self, base_url: str, token: str, to_user_id: str, context_token: Any, file_path: Path) -> dict[str, Any]:
+        guessed_mime = mimetypes.guess_type(file_path.name)[0] or ""
+        media_type = MEDIA_UPLOAD_TYPE_IMAGE if guessed_mime.startswith("image/") or file_path.suffix.lower() in SENDMEDIA_IMAGE_EXTENSIONS else MEDIA_UPLOAD_TYPE_FILE
+        uploaded = self._upload_media_file(base_url, token, to_user_id, file_path, media_type=media_type)
+        aes_key = base64.b64encode(str(uploaded["aes_hex"]).encode("utf-8")).decode("ascii")
+        media = {
+            "encrypt_query_param": str(uploaded["download_param"]),
+            "aes_key": aes_key,
+            "encrypt_type": 1,
+        }
+        if media_type == MEDIA_UPLOAD_TYPE_IMAGE:
+            item = {
+                "type": MESSAGE_ITEM_TYPE_IMAGE,
+                "image_item": {
+                    "media": media,
+                    "mid_size": int(uploaded["cipher_size"]),
+                },
+            }
+        else:
+            item = {
+                "type": MESSAGE_ITEM_TYPE_FILE,
+                "file_item": {
+                    "media": media,
+                    "file_name": file_path.name,
+                    "md5": str(uploaded["md5"]),
+                    "len": str(uploaded["raw_size"]),
+                },
+            }
+        body = {
+            "msg": {
+                "from_user_id": "",
+                "to_user_id": to_user_id,
+                "client_id": f"media-{int(time.time() * 1000)}-{random.randint(1000, 9999)}",
+                "message_type": 2,
+                "message_state": 2,
+                "item_list": [item],
+                "context_token": context_token or None,
+            },
+            "base_info": {"channel_version": "2.1.1"},
+        }
+        response = self._post_json(f"{base_url}/ilink/bot/sendmessage", body, token=token, timeout_ms=15000)
+        if isinstance(response, dict) and response.get("ret") not in (None, 0):
+            raise RuntimeError(f"sendmessage returned ret={response.get('ret')}: {response}")
+        print(
+            f"[bridge] sent media to={to_user_id} file={file_path.name} ret={response.get('ret') if isinstance(response, dict) else '-'}",
+            flush=True,
+        )
+        return response if isinstance(response, dict) else {}
+
+    def _upload_media_file(self, base_url: str, token: str, to_user_id: str, file_path: Path, *, media_type: int) -> dict[str, object]:
+        data = file_path.read_bytes()
+        if len(data) > MEDIA_SEND_MAX_BYTES:
+            raise ValueError(f"file is too large: {len(data)} bytes")
+        aes_key = secrets.token_bytes(16)
+        aes_hex = aes_key.hex()
+        ciphertext = _encrypt_aes_128_ecb(data, aes_key)
+        filekey = secrets.token_hex(16)
+        raw_md5 = hashlib.md5(data).hexdigest()
+        upload_response = self._post_json(
+            f"{base_url}/ilink/bot/getuploadurl",
+            {
+                "filekey": filekey,
+                "media_type": media_type,
+                "to_user_id": to_user_id,
+                "rawsize": len(data),
+                "rawfilemd5": raw_md5,
+                "filesize": len(ciphertext),
+                "no_need_thumb": True,
+                "aeskey": aes_hex,
+                "base_info": {"channel_version": "2.1.1"},
+            },
+            token=token,
+            timeout_ms=15000,
+        )
+        cdn_url = str(upload_response.get("upload_full_url") if isinstance(upload_response, dict) else "").strip()
+        if not cdn_url:
+            upload_param = str(upload_response.get("upload_param") if isinstance(upload_response, dict) else "").strip()
+            if not upload_param:
+                raise RuntimeError(f"getuploadurl returned no upload URL: {upload_response}")
+            cdn_url = (
+                f"{DEFAULT_WEIXIN_CDN_BASE_URL}/upload"
+                f"?encrypted_query_param={urllib.parse.quote(upload_param, safe='')}"
+                f"&filekey={urllib.parse.quote(filekey, safe='')}"
+            )
+        request = urllib.request.Request(
+            cdn_url,
+            data=ciphertext,
+            headers={"Content-Type": "application/octet-stream", "Content-Length": str(len(ciphertext))},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310 - endpoint is fixed WeChat CDN URL
+            download_param = str(response.headers.get("x-encrypted-param") or "").strip()
+        if not download_param:
+            raise RuntimeError("CDN upload response missing x-encrypted-param")
+        return {
+            "download_param": download_param,
+            "aes_hex": aes_hex,
+            "raw_size": len(data),
+            "cipher_size": len(ciphertext),
+            "md5": raw_md5,
+        }
+
     def _remember_context_token(self, sender_id: str, context_token: Any) -> None:
         cleaned_sender_id = str(sender_id or "").strip()
         cleaned_context_token = str(context_token or "").strip()
@@ -819,6 +992,8 @@ class WeixinBridge:
                 self._t("bridge.help.preview"),
                 self._t("bridge.help.history"),
                 self._t("bridge.help.export"),
+                self._t("bridge.help.showfile"),
+                self._t("bridge.help.sendfile"),
                 self._t("bridge.help.events"),
                 self._t("bridge.help.use"),
                 self._t("bridge.help.rename"),
@@ -921,6 +1096,10 @@ class WeixinBridge:
             if session_name not in sessions:
                 return self._t("bridge.session.preview.not_found", session=session_name), True
             return self._export_session_history(sender_id, session_name, binding)
+
+        if command == "/showfile":
+            raw_path = raw[len(command) :].strip()
+            return self._render_project_file_preview(raw_path), True
 
         if command == "/events":
             raw_limit = parts[1].strip() if len(parts) >= 2 else ""
@@ -1597,6 +1776,63 @@ class WeixinBridge:
                 count=len(session_tasks),
             ),
             True,
+        )
+
+    def _resolve_shareable_project_file(self, raw_path: str) -> Path:
+        cleaned_path = raw_path.strip()
+        if not cleaned_path:
+            raise ValueError("path is required")
+        project_root = APP_DIR.resolve()
+        candidate = Path(cleaned_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = project_root / candidate
+        resolved = candidate.resolve()
+        try:
+            relative_path = resolved.relative_to(project_root)
+        except ValueError as exc:
+            raise ValueError(f"path is outside project: {cleaned_path}") from exc
+        if self._is_blocked_share_path(relative_path):
+            raise ValueError(f"path is blocked: {relative_path}")
+        if not resolved.exists() or not resolved.is_file():
+            raise FileNotFoundError(str(relative_path))
+        return resolved
+
+    def _is_blocked_share_path(self, relative_path: Path) -> bool:
+        parts = relative_path.parts
+        if len(parts) >= 2 and parts[0] == ".runtime" and parts[1] == "exports":
+            return False
+        return any(part in SHOWFILE_BLOCKED_PATH_PARTS for part in parts)
+
+    def _render_project_file_preview(self, raw_path: str) -> str:
+        cleaned_path = raw_path.strip()
+        if not cleaned_path:
+            return self._t("bridge.showfile.usage")
+        project_root = APP_DIR.resolve()
+        candidate = Path(cleaned_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = project_root / candidate
+        try:
+            resolved = candidate.resolve()
+            relative_path = resolved.relative_to(project_root)
+        except ValueError:
+            return self._t("bridge.showfile.denied", path=cleaned_path)
+        if self._is_blocked_share_path(relative_path):
+            return self._t("bridge.showfile.denied", path=str(relative_path))
+        if not resolved.exists() or not resolved.is_file():
+            return self._t("bridge.showfile.not_found", path=str(relative_path))
+        suffix = resolved.suffix.lower()
+        if suffix not in SHOWFILE_ALLOWED_EXTENSIONS:
+            return self._t("bridge.showfile.unsupported", path=str(relative_path), suffix=suffix or "-")
+        content = resolved.read_text(encoding="utf-8", errors="replace")
+        truncated = len(content) > SHOWFILE_PREVIEW_LIMIT
+        preview = content[:SHOWFILE_PREVIEW_LIMIT].rstrip()
+        if truncated:
+            preview = f"{preview}\n\n...（内容过长，已截断）"
+        return self._t(
+            "bridge.showfile.content",
+            path=str(relative_path),
+            size=resolved.stat().st_size,
+            content=preview or "(empty)",
         )
 
     def _task_summary_excerpt(self, task: HubTask) -> str:

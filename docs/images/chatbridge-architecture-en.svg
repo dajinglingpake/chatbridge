@@ -1,0 +1,206 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2700" height="2050" viewBox="0 0 2700 2050">
+<defs>
+<marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+<path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/>
+</marker>
+</defs>
+<style>
+svg { background: #f8fafc; font-family: 'Noto Sans CJK SC', 'Noto Sans', 'Segoe UI', Arial, sans-serif; }
+.title { fill: #0f172a; font-weight: 500; letter-spacing: 1px; }
+.region { stroke: #cbd5e1; stroke-width: 1.3; opacity: 0.82; }
+.region-title { fill: #0f172a; font-weight: 500; }
+.node { fill: #ffffff; stroke: #334155; stroke-width: 2.2; }
+.node-title { fill: #0f172a; font-weight: 500; }
+.node-line { fill: #475569; }
+.node-rule { stroke: #94a3b8; stroke-width: 1.4; }
+.edge { fill: none; stroke: #64748b; stroke-width: 3; opacity: 0.88; }
+.edge-label-bg { fill: #f8fafc; stroke: #e2e8f0; stroke-width: 1; opacity: 0.96; }
+.edge-label { fill: #64748b; }
+</style>
+<text x="78" y="118" font-size="64" text-anchor="start" class="title">ChatBridge Technical Architecture</text>
+<rect class="region" x="56" y="162" width="394" height="1664" rx="30" fill="#dbeafe"/>
+<text x="86" y="226" font-size="34" text-anchor="start" class="region-title">External Entry</text>
+<rect class="region" x="515" y="162" width="550" height="1664" rx="30" fill="#dcfce7"/>
+<text x="545" y="226" font-size="34" text-anchor="start" class="region-title">Python Application Layer</text>
+<rect class="region" x="1130" y="162" width="435" height="760" rx="30" fill="#fef3c7"/>
+<text x="1160" y="226" font-size="34" text-anchor="start" class="region-title">Agent Backend Adapters</text>
+<rect class="region" x="1635" y="162" width="435" height="760" rx="30" fill="#fee2e2"/>
+<text x="1665" y="226" font-size="34" text-anchor="start" class="region-title">External CLI Processes</text>
+<rect class="region" x="1130" y="1032" width="435" height="780" rx="30" fill="#ffedd5"/>
+<text x="1160" y="1096" font-size="34" text-anchor="start" class="region-title">Media Sending Pipeline</text>
+<rect class="region" x="1635" y="1032" width="1025" height="780" rx="30" fill="#ede9fe"/>
+<text x="1665" y="1096" font-size="34" text-anchor="start" class="region-title">Local State and Config</text>
+<polyline class="edge" points="407,385 580,358" marker-end="url(#arrow)"/>
+<rect class="edge-label-bg" x="426" y="353" width="135" height="30" rx="8"/>
+<text x="493" y="375" font-size="16" text-anchor="middle" class="edge-label">poll/send</text>
+<polyline class="edge" points="407,750 580,647" marker-end="url(#arrow)"/>
+<rect class="edge-label-bg" x="413" y="680" width="161" height="30" rx="8"/>
+<text x="493" y="702" font-size="16" text-anchor="middle" class="edge-label">web request</text>
+<polyline class="edge" points="407,1112 580,950" marker-end="url(#arrow)"/>
+<rect class="edge-label-bg" x="426" y="1013" width="135" height="30" rx="8"/>
+<text x="493" y="1035" font-size="16" text-anchor="middle" class="edge-label">tool call</text>
+<polyline class="edge" points="785,720 785,1210" marker-end="url(#arrow)"/>
+<rect class="edge-label-bg" x="757" y="947" width="57" height="30" rx="8"/>
+<text x="785" y="969" font-size="16" text-anchor="middle" class="edge-label">ops</text>
+<polyline class="edge" points="785,1033 785,1210" marker-end="url(#arrow)"/>
+<rect class="edge-label-bg" x="757" y="1103" width="57" height="30" rx="8"/>
+<text x="785" y="1125" font-size="16" text-anchor="middle" class="edge-label">ops</text>
+<polyline class="edge" points="785,433 785,1500" marker-end="url(#arrow)"/>
+<rect class="edge-label-bg" x="750" y="948" width="70" height="30" rx="8"/>
+<text x="785" y="970" font-size="16" text-anchor="middle" class="edge-label">task</text>
+<polyline class="edge" points="785,1500 1356,458" marker-end="url(#arrow)"/>
+<rect class="edge-label-bg" x="1035" y="961" width="70" height="30" rx="8"/>
+<text x="1070" y="983" font-size="16" text-anchor="middle" class="edge-label">load</text>
+<polyline class="edge" points="1356,458 1356,510" marker-end="url(#arrow)"/>
+<rect class="edge-label-bg" x="1321" y="466" width="70" height="30" rx="8"/>
+<text x="1356" y="488" font-size="16" text-anchor="middle" class="edge-label">load</text>
+<polyline class="edge" points="1356,458 1356,660" marker-end="url(#arrow)"/>
+<rect class="edge-label-bg" x="1321" y="541" width="70" height="30" rx="8"/>
+<text x="1356" y="563" font-size="16" text-anchor="middle" class="edge-label">load</text>
+<polyline class="edge" points="1356,458 1356,806" marker-end="url(#arrow)"/>
+<rect class="edge-label-bg" x="1321" y="614" width="70" height="30" rx="8"/>
+<text x="1356" y="636" font-size="16" text-anchor="middle" class="edge-label">load</text>
+<polyline class="edge" points="1506,562 1710,397" marker-end="url(#arrow)"/>
+<rect class="edge-label-bg" x="1534" y="461" width="148" height="30" rx="8"/>
+<text x="1608" y="483" font-size="16" text-anchor="middle" class="edge-label">subprocess</text>
+<polyline class="edge" points="1506,712 1710,604" marker-end="url(#arrow)"/>
+<rect class="edge-label-bg" x="1534" y="640" width="148" height="30" rx="8"/>
+<text x="1608" y="662" font-size="16" text-anchor="middle" class="edge-label">subprocess</text>
+<polyline class="edge" points="1506,858 1710,811" marker-end="url(#arrow)"/>
+<rect class="edge-label-bg" x="1534" y="816" width="148" height="30" rx="8"/>
+<text x="1608" y="838" font-size="16" text-anchor="middle" class="edge-label">subprocess</text>
+<polyline class="edge" points="785,433 1356,1155" stroke-dasharray="14 12" marker-end="url(#arrow)"/>
+<rect class="edge-label-bg" x="1029" y="776" width="83" height="30" rx="8"/>
+<text x="1070" y="798" font-size="16" text-anchor="middle" class="edge-label">reuse</text>
+<polyline class="edge" points="990,950 1206,1232" marker-end="url(#arrow)"/>
+<rect class="edge-label-bg" x="1024" y="1073" width="148" height="30" rx="8"/>
+<text x="1098" y="1095" font-size="16" text-anchor="middle" class="edge-label">media send</text>
+<polyline class="edge" points="1356,1310 1356,1402" marker-end="url(#arrow)"/>
+<rect class="edge-label-bg" x="1308" y="1338" width="96" height="30" rx="8"/>
+<text x="1356" y="1360" font-size="16" text-anchor="middle" class="edge-label">upload</text>
+<polyline class="edge" points="1356,1547 1356,1620" marker-end="url(#arrow)"/>
+<rect class="edge-label-bg" x="1256" y="1565" width="200" height="30" rx="8"/>
+<text x="1356" y="1587" font-size="16" text-anchor="middle" class="edge-label">download param</text>
+<polyline class="edge" points="1356,1620 257,458" stroke-dasharray="14 12" marker-end="url(#arrow)"/>
+<rect class="edge-label-bg" x="732" y="1021" width="148" height="30" rx="8"/>
+<text x="806" y="1043" font-size="16" text-anchor="middle" class="edge-label">image/file</text>
+<polyline class="edge" points="990,358 2406,1202" stroke-dasharray="14 12" marker-end="url(#arrow)"/>
+<rect class="edge-label-bg" x="1657" y="762" width="83" height="30" rx="8"/>
+<text x="1698" y="784" font-size="16" text-anchor="middle" class="edge-label">state</text>
+<polyline class="edge" points="990,358 1710,1202" stroke-dasharray="14 12" marker-end="url(#arrow)"/>
+<rect class="edge-label-bg" x="1302" y="762" width="96" height="30" rx="8"/>
+<text x="1350" y="784" font-size="16" text-anchor="middle" class="edge-label">config</text>
+<polyline class="edge" points="990,358 2058,1202" stroke-dasharray="14 12" marker-end="url(#arrow)"/>
+<rect class="edge-label-bg" x="1470" y="762" width="109" height="30" rx="8"/>
+<text x="1524" y="784" font-size="16" text-anchor="middle" class="edge-label">account</text>
+<polyline class="edge" points="990,1572 2058,1462" stroke-dasharray="14 12" marker-end="url(#arrow)"/>
+<rect class="edge-label-bg" x="1470" y="1499" width="109" height="30" rx="8"/>
+<text x="1524" y="1521" font-size="16" text-anchor="middle" class="edge-label">session</text>
+<polyline class="edge" points="990,1572 2406,1202" stroke-dasharray="14 12" marker-end="url(#arrow)"/>
+<rect class="edge-label-bg" x="1657" y="1369" width="83" height="30" rx="8"/>
+<text x="1698" y="1391" font-size="16" text-anchor="middle" class="edge-label">state</text>
+<polyline class="edge" points="1860,450 2516,1410" stroke-dasharray="14 12" marker-end="url(#arrow)"/>
+<rect class="edge-label-bg" x="2134" y="912" width="109" height="30" rx="8"/>
+<text x="2188" y="934" font-size="16" text-anchor="middle" class="edge-label">workdir</text>
+<polyline class="edge" points="1860,657 2516,1410" stroke-dasharray="14 12" marker-end="url(#arrow)"/>
+<rect class="edge-label-bg" x="2134" y="1015" width="109" height="30" rx="8"/>
+<text x="2188" y="1037" font-size="16" text-anchor="middle" class="edge-label">workdir</text>
+<polyline class="edge" points="2010,811 2406,1462" stroke-dasharray="14 12" marker-end="url(#arrow)"/>
+<rect class="edge-label-bg" x="2154" y="1118" width="109" height="30" rx="8"/>
+<text x="2208" y="1140" font-size="16" text-anchor="middle" class="edge-label">workdir</text>
+<rect class="node" x="107" y="313" width="300" height="145" rx="22"/>
+<text x="125" y="358" font-size="28" text-anchor="start" class="node-title">WeChat Client</text>
+<line class="node-rule" x1="125" y1="371" x2="389" y2="371"/>
+<text x="257" y="401" font-size="20" text-anchor="middle" class="node-line">iLink Bot API</text>
+<rect class="node" x="107" y="678" width="300" height="145" rx="22"/>
+<text x="125" y="723" font-size="28" text-anchor="start" class="node-title">Browser / Desktop</text>
+<line class="node-rule" x1="125" y1="736" x2="389" y2="736"/>
+<text x="257" y="766" font-size="20" text-anchor="middle" class="node-line">NiceGUI</text>
+<rect class="node" x="107" y="1040" width="300" height="145" rx="22"/>
+<text x="125" y="1085" font-size="28" text-anchor="start" class="node-title">MCP Client</text>
+<line class="node-rule" x1="125" y1="1098" x2="389" y2="1098"/>
+<text x="257" y="1128" font-size="20" text-anchor="middle" class="node-line">JSON-RPC</text>
+<text x="257" y="1156" font-size="20" text-anchor="middle" class="node-line">tools/call</text>
+<rect class="node" x="580" y="283" width="410" height="150" rx="22"/>
+<text x="598" y="328" font-size="28" text-anchor="start" class="node-title">WeixinBridge</text>
+<line class="node-rule" x1="598" y1="341" x2="972" y2="341"/>
+<text x="785" y="371" font-size="20" text-anchor="middle" class="node-line">polling / slash commands</text>
+<text x="785" y="399" font-size="20" text-anchor="middle" class="node-line">replies</text>
+<rect class="node" x="580" y="575" width="410" height="145" rx="22"/>
+<text x="598" y="620" font-size="28" text-anchor="start" class="node-title">Web UI</text>
+<line class="node-rule" x1="598" y1="633" x2="972" y2="633"/>
+<text x="785" y="663" font-size="20" text-anchor="middle" class="node-line">config / status</text>
+<text x="785" y="691" font-size="20" text-anchor="middle" class="node-line">service operations</text>
+<rect class="node" x="580" y="868" width="410" height="165" rx="22"/>
+<text x="598" y="913" font-size="28" text-anchor="start" class="node-title">MCP Service</text>
+<line class="node-rule" x1="598" y1="926" x2="972" y2="926"/>
+<text x="785" y="956" font-size="20" text-anchor="middle" class="node-line">status / sessions / restart</text>
+<text x="785" y="984" font-size="20" text-anchor="middle" class="node-line">send_weixin_media</text>
+<rect class="node" x="580" y="1210" width="410" height="145" rx="22"/>
+<text x="598" y="1255" font-size="28" text-anchor="start" class="node-title">App Service</text>
+<line class="node-rule" x1="598" y1="1268" x2="972" y2="1268"/>
+<text x="785" y="1298" font-size="20" text-anchor="middle" class="node-line">Hub / Bridge</text>
+<text x="785" y="1326" font-size="20" text-anchor="middle" class="node-line">lifecycle</text>
+<rect class="node" x="580" y="1500" width="410" height="145" rx="22"/>
+<text x="598" y="1545" font-size="28" text-anchor="start" class="node-title">AgentHub</text>
+<line class="node-rule" x1="598" y1="1558" x2="972" y2="1558"/>
+<text x="785" y="1588" font-size="20" text-anchor="middle" class="node-line">task queue / sessions</text>
+<text x="785" y="1616" font-size="20" text-anchor="middle" class="node-line">agent dispatch</text>
+<rect class="node" x="1206" y="313" width="300" height="145" rx="22"/>
+<text x="1224" y="358" font-size="28" text-anchor="start" class="node-title">Backend Registry</text>
+<line class="node-rule" x1="1224" y1="371" x2="1488" y2="371"/>
+<text x="1356" y="401" font-size="20" text-anchor="middle" class="node-line">agent_backends/</text>
+<rect class="node" x="1206" y="510" width="300" height="105" rx="22"/>
+<text x="1224" y="555" font-size="28" text-anchor="start" class="node-title">CodexBackend</text>
+<line class="node-rule" x1="1224" y1="568" x2="1488" y2="568"/>
+<rect class="node" x="1206" y="660" width="300" height="105" rx="22"/>
+<text x="1224" y="705" font-size="28" text-anchor="start" class="node-title">ClaudeBackend</text>
+<line class="node-rule" x1="1224" y1="718" x2="1488" y2="718"/>
+<rect class="node" x="1206" y="806" width="300" height="105" rx="22"/>
+<text x="1224" y="851" font-size="28" text-anchor="start" class="node-title">OpenCodeBackend</text>
+<line class="node-rule" x1="1224" y1="864" x2="1488" y2="864"/>
+<rect class="node" x="1710" y="345" width="300" height="105" rx="22"/>
+<text x="1728" y="390" font-size="28" text-anchor="start" class="node-title">codex</text>
+<line class="node-rule" x1="1728" y1="403" x2="1992" y2="403"/>
+<rect class="node" x="1710" y="552" width="300" height="105" rx="22"/>
+<text x="1728" y="597" font-size="28" text-anchor="start" class="node-title">claude</text>
+<line class="node-rule" x1="1728" y1="610" x2="1992" y2="610"/>
+<rect class="node" x="1710" y="759" width="300" height="105" rx="22"/>
+<text x="1728" y="804" font-size="28" text-anchor="start" class="node-title">opencode</text>
+<line class="node-rule" x1="1728" y1="817" x2="1992" y2="817"/>
+<rect class="node" x="1206" y="1155" width="300" height="155" rx="22"/>
+<text x="1224" y="1200" font-size="28" text-anchor="start" class="node-title">Media Sender</text>
+<line class="node-rule" x1="1224" y1="1213" x2="1488" y2="1213"/>
+<text x="1356" y="1243" font-size="20" text-anchor="middle" class="node-line">path guard</text>
+<text x="1356" y="1271" font-size="20" text-anchor="middle" class="node-line">getuploadurl</text>
+<text x="1356" y="1299" font-size="20" text-anchor="middle" class="node-line">encrypted upload</text>
+<rect class="node" x="1206" y="1402" width="300" height="145" rx="22"/>
+<text x="1224" y="1447" font-size="28" text-anchor="start" class="node-title">WeChat CDN</text>
+<line class="node-rule" x1="1224" y1="1460" x2="1488" y2="1460"/>
+<text x="1356" y="1490" font-size="20" text-anchor="middle" class="node-line">AES-128-ECB</text>
+<text x="1356" y="1518" font-size="20" text-anchor="middle" class="node-line">media upload</text>
+<rect class="node" x="1206" y="1620" width="300" height="155" rx="22"/>
+<text x="1224" y="1665" font-size="28" text-anchor="start" class="node-title">sendmessage</text>
+<line class="node-rule" x1="1224" y1="1678" x2="1488" y2="1678"/>
+<text x="1356" y="1708" font-size="20" text-anchor="middle" class="node-line">image_item</text>
+<text x="1356" y="1736" font-size="20" text-anchor="middle" class="node-line">file_item</text>
+<rect class="node" x="1710" y="1150" width="285" height="105" rx="22"/>
+<text x="1728" y="1195" font-size="28" text-anchor="start" class="node-title">config/*.json</text>
+<line class="node-rule" x1="1728" y1="1208" x2="1977" y2="1208"/>
+<rect class="node" x="2058" y="1150" width="285" height="105" rx="22"/>
+<text x="2076" y="1195" font-size="28" text-anchor="start" class="node-title">accounts/*.json</text>
+<line class="node-rule" x1="2076" y1="1208" x2="2325" y2="1208"/>
+<rect class="node" x="2406" y="1150" width="220" height="105" rx="22"/>
+<text x="2424" y="1195" font-size="28" text-anchor="start" class="node-title">.runtime/state</text>
+<line class="node-rule" x1="2424" y1="1208" x2="2608" y2="1208"/>
+<text x="2516" y="1238" font-size="20" text-anchor="middle" class="node-line">.runtime/logs</text>
+<rect class="node" x="1710" y="1410" width="285" height="105" rx="22"/>
+<text x="1728" y="1455" font-size="28" text-anchor="start" class="node-title">.runtime/exports</text>
+<line class="node-rule" x1="1728" y1="1468" x2="1977" y2="1468"/>
+<rect class="node" x="2058" y="1410" width="285" height="105" rx="22"/>
+<text x="2076" y="1455" font-size="28" text-anchor="start" class="node-title">sessions/*.txt</text>
+<line class="node-rule" x1="2076" y1="1468" x2="2325" y2="1468"/>
+<rect class="node" x="2406" y="1410" width="220" height="105" rx="22"/>
+<text x="2424" y="1455" font-size="28" text-anchor="start" class="node-title">workspace/</text>
+<line class="node-rule" x1="2424" y1="1468" x2="2608" y2="1468"/>
+</svg>
