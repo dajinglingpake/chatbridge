@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_hub import AgentConfig, HubConfig, MultiCodexHub
+from core.state_models import HubTask
 
 
 class SleepingBackend:
@@ -115,6 +116,43 @@ class AgentHubCancellationTests(unittest.TestCase):
             hub = MultiCodexHub(config)
             status = hub.render_codex_status("main", "default", str(workdir))
         self.assertEqual("OpenAI Codex v0.122.0", status)
+        mocked_query.assert_called_once()
+
+    def test_get_task_context_left_percent_runs_in_hub_context(self) -> None:
+        workdir = self.temp_path / "workspace"
+        session_file = self.temp_path / "sessions" / "main.txt"
+        workdir.mkdir(parents=True, exist_ok=True)
+        session_file.parent.mkdir(parents=True, exist_ok=True)
+        config = HubConfig(
+            codex_command="codex",
+            claude_command="claude",
+            opencode_command="opencode",
+            agents=[AgentConfig("main", "Main", str(workdir), str(session_file), backend="codex")],
+        )
+        state_path = self.temp_path / "state" / "agent_hub_state.json"
+        task = HubTask(
+            id="task-ctx-001",
+            agent_id="main",
+            agent_name="Main",
+            backend="codex",
+            source="wechat",
+            sender_id="sender-test",
+            prompt="hello",
+            status="running",
+            created_at="2026-04-24T00:00:00",
+            session_name="default",
+            workdir=str(workdir),
+        )
+        with (
+            patch("agent_hub.STATE_PATH", state_path),
+            patch("agent_hub.discover_external_agent_processes", return_value=[]),
+            patch("agent_hub.query_codex_context_left_percent", return_value=18) as mocked_query,
+        ):
+            hub = MultiCodexHub(config)
+            hub.tasks.append(task)
+            percent = hub.get_task_context_left_percent("task-ctx-001")
+        self.assertEqual(18, percent)
+        self.assertEqual(18, task.context_left_percent)
         mocked_query.assert_called_once()
 
 

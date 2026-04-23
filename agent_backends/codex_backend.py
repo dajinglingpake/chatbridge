@@ -70,6 +70,7 @@ class CodexBackend(AgentBackend):
         last_progress = ""
         last_progress_at = 0.0
         pending_delta = ""
+        context_left_percent: int | None = None
         assert proc.stderr is not None
 
         def read_stderr() -> None:
@@ -93,6 +94,11 @@ class CodexBackend(AgentBackend):
                 error_message = str(event["message"])
             if isinstance(event.get("error"), dict) and event["error"].get("message"):
                 error_message = str(event["error"]["message"])
+            next_context_left = self._extract_context_left_percent(event)
+            if next_context_left is not None:
+                context_left_percent = next_context_left
+                if context.on_context_left_percent is not None:
+                    context.on_context_left_percent(next_context_left)
             delta = self._extract_text_delta(event)
             progress = ""
             if delta:
@@ -126,7 +132,10 @@ class CodexBackend(AgentBackend):
             raise RuntimeError("Codex returned an empty result")
         if session_id:
             session_file.write_text(session_id, encoding="utf-8")
-        return {"output": output, "session_id": session_id}
+        result = {"output": output, "session_id": session_id}
+        if context_left_percent is not None:
+            result["context_left_percent"] = str(context_left_percent)
+        return result
 
     def _take_stream_chunk(self, buffer: str, *, force: bool) -> tuple[str, str]:
         normalized = buffer.replace("\r", "")
@@ -163,3 +172,23 @@ class CodexBackend(AgentBackend):
                 if nested:
                     return nested
         return ""
+
+    def _extract_context_left_percent(self, value: object) -> int | None:
+        if not isinstance(value, dict):
+            return None
+        if str(value.get("type") or "") != "event_msg":
+            return None
+        payload = value.get("payload")
+        if not isinstance(payload, dict) or str(payload.get("type") or "") != "token_count":
+            return None
+        info = payload.get("info")
+        if not isinstance(info, dict):
+            return None
+        usage = info.get("last_token_usage")
+        if not isinstance(usage, dict):
+            return None
+        total_tokens = usage.get("total_tokens")
+        context_window = info.get("model_context_window")
+        if not isinstance(total_tokens, int) or not isinstance(context_window, int) or context_window <= 0:
+            return None
+        return max(0, min(100, round((1 - (total_tokens / context_window)) * 100)))

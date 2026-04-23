@@ -10,7 +10,9 @@ from agent_backends.codex_status_query import (
     _format_rate_limit_lines,
     _load_latest_token_usage,
     _render_status_panel,
+    query_codex_context_left_percent,
 )
+from unittest.mock import patch
 
 
 class CodexStatusQueryTests(unittest.TestCase):
@@ -141,6 +143,35 @@ class CodexStatusQueryTests(unittest.TestCase):
         self.assertIn("OpenAI Codex v0.122.0", panel)
         self.assertIn("1753473884@qq.com (Plus)", panel)
         self.assertIn("Rate limits: unavailable", panel)
+
+    def test_query_codex_context_left_percent_reads_resume_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            temp_path = Path(tempdir)
+            session_file = temp_path / "session.txt"
+            log_path = temp_path / "session.jsonl"
+            session_file.write_text("thread-1", encoding="utf-8")
+            log_path.write_text(
+                '{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":108000},"model_context_window":258400}}}\n',
+                encoding="utf-8",
+            )
+
+            class _FakeClient:
+                def __init__(self, codex_command: str) -> None:
+                    self.codex_command = codex_command
+
+                def initialize(self) -> None:
+                    return None
+
+                def request(self, method: str, params: object) -> dict:
+                    self.last_request = (method, params)
+                    return {"thread": {"path": str(log_path)}}
+
+                def close(self) -> None:
+                    return None
+
+            with patch("agent_backends.codex_status_query._AppServerClient", _FakeClient):
+                percent = query_codex_context_left_percent("codex", session_file, temp_path)
+        self.assertEqual(58, percent)
 
 
 if __name__ == "__main__":

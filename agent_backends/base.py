@@ -32,6 +32,7 @@ class BackendContext:
     start_new_session: bool = False
     on_process_started: Callable[[int], None] | None = None
     on_progress: Callable[[str], None] | None = None
+    on_context_left_percent: Callable[[int], None] | None = None
     mcp_server: McpServerConfig | None = None
     reasoning_effort: str = ""
     permission_mode: str = ""

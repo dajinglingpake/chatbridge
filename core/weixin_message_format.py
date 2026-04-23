@@ -33,9 +33,21 @@ def format_output_time(value: str | None) -> str:
     return parsed.strftime("%H:%M:%S")
 
 
-def prefix_weixin_output(status: str, elapsed: str, text: str, *, at: str | None = None) -> str:
+def _format_context_left(value: int | None) -> str:
+    if value is None:
+        return ""
+    percent = max(0, min(100, int(value)))
+    return f"ctx {percent}%"
+
+
+def prefix_weixin_output(status: str, elapsed: str, text: str, *, at: str | None = None, context_left_percent: int | None = None) -> str:
     cleaned_text = str(text or "").strip()
-    header = f"{status} · {elapsed} · {format_output_time(at)}"
+    parts = [status, elapsed]
+    context_text = _format_context_left(context_left_percent)
+    if context_text:
+        parts.append(context_text)
+    parts.append(format_output_time(at))
+    header = " · ".join(parts)
     return f"{header}\n\n{cleaned_text}" if cleaned_text else header
 
 
@@ -44,7 +56,7 @@ def has_weixin_reply_header(text: str) -> bool:
     if not first_line:
         return False
     parts = first_line[0].split(" · ")
-    return len(parts) == 3 and parts[0] in {"running", "done", "reply", "notice"}
+    return len(parts) in {3, 4} and parts[0] in {"running", "done", "reply", "notice"}
 
 
 def format_weixin_reply(text: str, *, status: str = "reply", elapsed: str = "-", at: str | None = None) -> str:

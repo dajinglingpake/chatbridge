@@ -1,23 +1,14 @@
 from __future__ import annotations
 
-import base64
-import json
-import random
-import time
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
 from bridge_config import BridgeConfig
 from core.accounts import AccountFilePayload, DEFAULT_ILINK_BASE_URL, load_account_context_tokens, load_account_file_payload
-from core.http_json import request_json
 from core.json_store import load_json
+from core.weixin_text_outbox import enqueue_text_message
 from core.weixin_message_format import format_weixin_reply
 from runtime_stack import BRIDGE_CONVERSATIONS_PATH
-
-
-ILINK_APP_ID = "bot"
-ILINK_APP_CLIENT_VERSION = (2 << 16) | (1 << 8) | 1
 
 
 @dataclass
@@ -149,32 +140,11 @@ def _load_recipients(account_path: Path | None) -> list[NoticeRecipient]:
 
 
 def _send_text(base_url: str, token: str, to_user_id: str, context_token: str, text: str) -> dict:
-    body = {
-        "msg": {
-            "from_user_id": "",
-            "to_user_id": to_user_id,
-            "client_id": f"notice-{int(time.time() * 1000)}-{random.randint(1000, 9999)}",
-            "message_type": 2,
-            "message_state": 2,
-            "item_list": [{"type": 1, "text_item": {"text": text[:4000]}}],
-            "context_token": context_token or None,
-        },
-        "base_info": {"channel_version": "2.1.1"},
-    }
-    payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
-    headers = {
-        "AuthorizationType": "ilink_bot_token",
-        "Authorization": f"Bearer {token}",
-        "X-WECHAT-UIN": base64.b64encode(str(random.randint(1, 2**32 - 1)).encode("utf-8")).decode("ascii"),
-        "iLink-App-Id": ILINK_APP_ID,
-        "iLink-App-ClientVersion": str(ILINK_APP_CLIENT_VERSION),
-        "Content-Type": "application/json",
-        "Content-Length": str(len(payload)),
-    }
-    request = urllib.request.Request(
-        url=f"{base_url}/ilink/bot/sendmessage",
-        data=payload,
-        headers=headers,
-        method="POST",
+    del base_url, token
+    enqueue_text_message(
+        to_user_id=to_user_id,
+        context_token=context_token,
+        text=text[:4000],
+        source="notice",
     )
-    return request_json(request, timeout=15)
+    return {"ret": 0, "queued": True}

@@ -152,6 +152,38 @@ class WeixinNotifierTests(unittest.TestCase):
             self.assertEqual(1, result.recipient_count)
             self.assertIn("sendmessage returned ret=-2", result.error)
 
+    def test_broadcast_notice_still_sends_when_sender_has_active_wechat_task(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            conversations_path = temp_path / "weixin_conversations.json"
+            account_path = temp_path / "wechat-bot.json"
+            context_tokens_path = temp_path / "wechat-bot.context-tokens.json"
+            conversations_path.write_text(
+                json.dumps({"wx-a@im.wechat": {"current_session": "default"}}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            account_path.write_text(
+                json.dumps({"token": "bot-token", "baseUrl": "https://example.com"}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            context_tokens_path.write_text(
+                json.dumps({"wx-a@im.wechat": "ctx-a"}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            cfg = BridgeConfig.load()
+            cfg.account_file = str(account_path)
+            cfg.service_notice_enabled = True
+
+            with (
+                patch.object(weixin_notifier, "BRIDGE_CONVERSATIONS_PATH", conversations_path),
+                patch.object(weixin_notifier, "_send_text", return_value={"ret": 0, "errcode": 0, "errmsg": "ok"}) as mocked_send,
+            ):
+                result = weixin_notifier.broadcast_weixin_notice_by_kind("service", "服务操作", "启动完成", config=cfg)
+
+            mocked_send.assert_called_once()
+            self.assertEqual(1, result.sent_count)
+            self.assertEqual(1, result.recipient_count)
+
 
 if __name__ == "__main__":
     unittest.main()
