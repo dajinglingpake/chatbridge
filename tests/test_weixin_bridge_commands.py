@@ -18,6 +18,18 @@ class FakeBridge(WeixinBridge):
     def __init__(self, config: BridgeConfig) -> None:
         super().__init__(config)
         self.submit_payloads: list[dict[str, object]] = []
+        self.codex_status_response = IpcResponseEnvelope(
+            ok=True,
+            payload={
+                "status": (
+                    "OpenAI Codex v0.122.0\n"
+                    "\n"
+                    "Model: gpt-5.4 (reasoning high, fast)\n"
+                    "\n"
+                    "Rate limits: unavailable"
+                )
+            },
+        )
         self._state_payload = IpcResponseEnvelope(
             ok=True,
             payload={
@@ -110,6 +122,8 @@ class FakeBridge(WeixinBridge):
         if action == "submit_task":
             self.submit_payloads.append(dict(payload))
             return IpcResponseEnvelope(ok=True, payload={"task": {"id": "task-forwarded-001"}})
+        if action == "codex_status":
+            return self.codex_status_response
         raise RuntimeError(f"unexpected action: {action}")
 
     def _save_conversations(self) -> None:
@@ -558,20 +572,32 @@ class WeixinBridgeCommandTests(unittest.TestCase):
             "msg_id": "msg-status",
             "item_list": [{"type": 1, "text_item": {"text": "//status"}}],
         }
-        with patch(
-            "weixin_hub_bridge.query_codex_status_panel",
-            return_value=(
-                "╭─────────────────────────────────────────────────────────────────────────────────────────╮\n"
-                "│  >_ OpenAI Codex (v0.122.0)                                                             │\n"
-                "│  Model:                       gpt-5.4 (reasoning high, fast)                            │\n"
-                "╰─────────────────────────────────────────────────────────────────────────────────────────╯"
-            ),
-        ):
-            self.bridge._handle_message("https://example.com", "token", message)
+        self.bridge._handle_message("https://example.com", "token", message)
         self.assertEqual([], self.bridge.submit_payloads)
         self.assertEqual(1, len(sent_texts))
-        self.assertIn(">_ OpenAI Codex", sent_texts[0])
-        self.assertIn("gpt-5.4", sent_texts[0])
+        self.assertIn("OpenAI Codex", sent_texts[0])
+        self.assertIn("Rate limits: unavailable", sent_texts[0])
+
+    def test_passthrough_status_reports_codex_status_query_failure(self) -> None:
+        sent_texts: list[str] = []
+
+        def capture_send(_base_url, _token, _to_user_id, _context_token, text: str) -> None:
+            sent_texts.append(text)
+
+        self.bridge._send_text = capture_send  # type: ignore[method-assign]
+        message = {
+            "message_type": 1,
+            "from_user_id": "sender-test",
+            "context_token": "ctx-1",
+            "msg_id": "msg-status-failed",
+            "item_list": [{"type": 1, "text_item": {"text": "//status"}}],
+        }
+        self.bridge.codex_status_response = IpcResponseEnvelope(ok=False, error="codex app-server thread/resume failed")
+        self.bridge._handle_message("https://example.com", "token", message)
+        self.assertEqual([], self.bridge.submit_payloads)
+        self.assertEqual(1, len(sent_texts))
+        self.assertIn("Codex 状态查询失败", sent_texts[0])
+        self.assertIn("thread/resume failed", sent_texts[0])
 
     def test_native_model_menu_updates_session_config_and_submit_payload(self) -> None:
         bridge = FeedbackBridge(BridgeConfig.load(), [])

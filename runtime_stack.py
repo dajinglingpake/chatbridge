@@ -39,6 +39,7 @@ from core.state_models import ExternalAgentProcessState, RuntimeSnapshot
 
 HUB_SCRIPT = APP_DIR / "agent_hub.py"
 BRIDGE_SCRIPT = APP_DIR / "weixin_hub_bridge.py"
+PROXY_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy")
 
 @dataclass
 class ManagedStatus:
@@ -242,7 +243,54 @@ def shutil_which(name: str) -> str | None:
     return shutil.which(name)
 
 
-def start_managed(name: str, script_path: Path, pid_file: Path, stdout_log: Path, stderr_log: Path) -> str:
+def _read_process_proxy_env(pid: int) -> dict[str, str]:
+    if IS_WINDOWS:
+        return {}
+    try:
+        raw_values = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+    except OSError:
+        return {}
+    proxy_keys = {key.lower() for key in PROXY_ENV_KEYS}
+    values: dict[str, str] = {}
+    for raw in raw_values:
+        if b"=" not in raw:
+            continue
+        key_raw, value_raw = raw.split(b"=", 1)
+        key = key_raw.decode("utf-8", errors="replace")
+        if key.lower() not in proxy_keys:
+            continue
+        value = value_raw.decode("utf-8", errors="replace").strip()
+        if value:
+            values[key] = value
+    return values
+
+
+def _discover_proxy_env() -> dict[str, str]:
+    values = {key: value for key in PROXY_ENV_KEYS if (value := os.environ.get(key, "").strip())}
+    for script_path in (HUB_SCRIPT, BRIDGE_SCRIPT):
+        for proc in _find_processes_by_script(script_path):
+            for key, value in _read_process_proxy_env(proc.pid).items():
+                values.setdefault(key, value)
+    return values
+
+
+def _managed_subprocess_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
+    env = dict(base_env or os.environ)
+    for key, value in _discover_proxy_env().items():
+        if not env.get(key, "").strip():
+            env[key] = value
+    return env
+
+
+def start_managed(
+    name: str,
+    script_path: Path,
+    pid_file: Path,
+    stdout_log: Path,
+    stderr_log: Path,
+    *,
+    env: dict[str, str] | None = None,
+) -> str:
     running = _find_processes_by_script(script_path)
     if running:
         primary = running[0]
@@ -264,6 +312,7 @@ def start_managed(name: str, script_path: Path, pid_file: Path, stdout_log: Path
             cwd=str(APP_DIR),
             stdout=out_handle,
             stderr=err_handle,
+            env=_managed_subprocess_env(env),
             creationflags=creationflags(),
             start_new_session=not IS_WINDOWS,
         )
@@ -356,15 +405,15 @@ def stop_managed(name: str, script_path: Path, pid_file: Path) -> str:
     return f"{name} stopped (PIDs {rendered})"
 
 
-def start_all() -> list[str]:
-    messages = [start_managed("Hub", HUB_SCRIPT, HUB_PID_FILE, HUB_OUT_LOG, HUB_ERR_LOG)]
+def start_all(*, env: dict[str, str] | None = None) -> list[str]:
+    messages = [start_managed("Hub", HUB_SCRIPT, HUB_PID_FILE, HUB_OUT_LOG, HUB_ERR_LOG, env=env)]
     time.sleep(1.5)
-    messages.append(start_managed("Bridge", BRIDGE_SCRIPT, BRIDGE_PID_FILE, BRIDGE_OUT_LOG, BRIDGE_ERR_LOG))
+    messages.append(start_managed("Bridge", BRIDGE_SCRIPT, BRIDGE_PID_FILE, BRIDGE_OUT_LOG, BRIDGE_ERR_LOG, env=env))
     return messages
 
 
-def start_bridge() -> str:
-    return start_managed("Bridge", BRIDGE_SCRIPT, BRIDGE_PID_FILE, BRIDGE_OUT_LOG, BRIDGE_ERR_LOG)
+def start_bridge(*, env: dict[str, str] | None = None) -> str:
+    return start_managed("Bridge", BRIDGE_SCRIPT, BRIDGE_PID_FILE, BRIDGE_OUT_LOG, BRIDGE_ERR_LOG, env=env)
 
 
 def stop_bridge() -> str:
@@ -372,7 +421,8 @@ def stop_bridge() -> str:
 
 
 def restart_bridge() -> list[str]:
-    return [stop_bridge(), start_bridge()]
+    env = _managed_subprocess_env()
+    return [stop_bridge(), start_bridge(env=env)]
 
 
 def stop_all() -> list[str]:
@@ -382,8 +432,9 @@ def stop_all() -> list[str]:
 
 
 def restart_all() -> list[str]:
+    env = _managed_subprocess_env()
     messages = stop_all()
-    messages.extend(start_all())
+    messages.extend(start_all(env=env))
     return messages
 
 

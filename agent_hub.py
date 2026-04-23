@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from agent_backends import DEFAULT_BACKEND_KEY, BackendContext, McpServerConfig, build_backend_registry, supported_backend_keys
+from agent_backends.codex_status_query import query_codex_status_panel
+from agent_backends.shared import resolve_session_file
 from bridge_config import BridgeConfig
 from core.json_store import load_json, save_json
 from core.state_models import AgentRuntimeState, HubTask, IpcRequestEnvelope, IpcResponseEnvelope
@@ -198,6 +200,9 @@ class MultiCodexHub:
 
     def list_agents(self) -> list[dict[str, Any]]:
         return [{**asdict(agent), "runtime": self.runtimes.get(agent.id, AgentRuntimeState()).to_dict()} for agent in self.config.agents]
+
+    def _find_agent(self, agent_id: str) -> AgentConfig | None:
+        return next((agent for agent in self.config.agents if agent.id == agent_id), None)
 
     def list_tasks(self) -> list[dict[str, Any]]:
         return [task.to_dict() for task in sorted(self.tasks, key=lambda item: item.created_at, reverse=True)[:50]]
@@ -705,6 +710,17 @@ class MultiCodexHub:
             )
         if action == "wechat_message":
             return IpcResponseEnvelope(ok=True, payload={"task": self.handle_wechat_message(payload)})
+        if action == "codex_status":
+            return IpcResponseEnvelope(
+                ok=True,
+                payload={
+                    "status": self.render_codex_status(
+                        str(payload.get("agent_id") or ""),
+                        str(payload.get("session_name") or ""),
+                        str(payload.get("workdir") or ""),
+                    )
+                },
+            )
         if action == "save_agent":
             return IpcResponseEnvelope(ok=True, payload={"agent": asdict(self.create_or_update_agent(payload))})
         if action == "delete_agent":
@@ -727,6 +743,20 @@ class MultiCodexHub:
                 },
             )
         raise ValueError(f"unsupported action: {action}")
+
+    def render_codex_status(self, agent_id: str, session_name: str, workdir: str = "") -> str:
+        agent = self._find_agent(agent_id)
+        if agent is None:
+            raise ValueError("agent not found")
+        if normalize_backend(agent.backend) != "codex":
+            raise ValueError("agent backend is not codex")
+        session_file = resolve_session_file(agent, session_name or "default", SESSION_DIR)
+        status_panel = query_codex_status_panel(
+            self.config.codex_command,
+            session_file,
+            Path(workdir or agent.workdir),
+        )
+        return status_panel or ""
 
 
 def run() -> int:

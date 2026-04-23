@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from runtime_stack import _taskkill, start_managed, stop_managed
+from runtime_stack import _managed_subprocess_env, _taskkill, start_managed, stop_managed
 
 
 class RuntimeStackTests(unittest.TestCase):
@@ -27,6 +27,24 @@ class RuntimeStackTests(unittest.TestCase):
         mocked_kill.assert_called_once_with(202)
         mocked_write_pid.assert_called_once_with(pid_file, 101)
         self.assertIn("cleaned duplicate PIDs 202", message)
+
+    def test_start_managed_passes_proxy_env_to_child_process(self) -> None:
+        pid_file = self.root / "agent.pid"
+        with patch.dict("runtime_stack.os.environ", {"HTTPS_PROXY": "http://127.0.0.1:7890"}, clear=True):
+            with patch("runtime_stack._find_processes_by_script", return_value=[]):
+                with patch("runtime_stack._get_python_command", return_value="/usr/bin/python3"):
+                    with patch("runtime_stack.subprocess.Popen", return_value=SimpleNamespace(pid=123)) as mocked_popen:
+                        start_managed("Hub", self.root / "agent_hub.py", pid_file, self.root / "out.log", self.root / "err.log")
+        env = mocked_popen.call_args.kwargs["env"]
+        self.assertEqual("http://127.0.0.1:7890", env["HTTPS_PROXY"])
+
+    def test_managed_subprocess_env_copies_proxy_from_running_process(self) -> None:
+        fake_proc = SimpleNamespace(pid=123)
+        with patch.dict("runtime_stack.os.environ", {}, clear=True):
+            with patch("runtime_stack._find_processes_by_script", return_value=[fake_proc]):
+                with patch("runtime_stack._read_process_proxy_env", return_value={"HTTPS_PROXY": "http://127.0.0.1:7890"}):
+                    env = _managed_subprocess_env({})
+        self.assertEqual("http://127.0.0.1:7890", env["HTTPS_PROXY"])
 
     def test_stop_managed_stops_all_duplicate_processes(self) -> None:
         first = SimpleNamespace(pid=101)

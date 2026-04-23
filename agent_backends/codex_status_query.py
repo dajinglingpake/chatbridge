@@ -117,13 +117,20 @@ def query_codex_status_panel(codex_command: str, session_file: Path, workdir: Pa
     client = _AppServerClient(codex_command)
     try:
         client.initialize()
-        account_payload = client.request("account/read", {"refresh": False})
-        limits_payload = client.request("account/rateLimits/read", None)
+        account_payload = _request_optional(client, "account/read", {"refresh": False})
+        limits_payload = _request_optional(client, "account/rateLimits/read", None)
         resume_payload = client.request("thread/resume", {"threadId": session_id})
     finally:
         client.close()
     snapshot = _build_snapshot(session_id, account_payload, limits_payload, resume_payload)
     return _render_status_panel(snapshot)
+
+
+def _request_optional(client: _AppServerClient, method: str, params: object) -> dict:
+    try:
+        return client.request(method, params)
+    except RuntimeError:
+        return {}
 
 
 def _read_session_id(session_file: Path) -> str:
@@ -291,7 +298,9 @@ def _load_latest_token_usage(session_log_path: Path) -> _TokenUsage | None:
             if str(payload.get("type") or "") != "token_count":
                 continue
             info = dict(payload.get("info") or {})
-            total = dict(info.get("total_token_usage") or {})
+            # total_token_usage is cumulative for the whole session. The status
+            # panel needs the current resumed thread window usage.
+            total = dict(info.get("last_token_usage") or {})
             total_tokens = total.get("total_tokens")
             if isinstance(total_tokens, int):
                 latest_total_tokens = total_tokens
@@ -323,6 +332,8 @@ def _render_status_panel(snapshot: _StatusSnapshot) -> str:
     if snapshot.primary_bucket is not None:
         lines.extend(_format_rate_limit_lines("5h limit", snapshot.primary_bucket.primary))
         lines.extend(_format_rate_limit_lines("Weekly limit", snapshot.primary_bucket.secondary))
+    else:
+        lines.extend(["", "Rate limits: unavailable"])
     for bucket in snapshot.extra_buckets:
         title = bucket.limit_name.strip() or bucket.limit_id
         lines.extend(

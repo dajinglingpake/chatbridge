@@ -19,8 +19,6 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
 
 from agent_backends import get_backend_command_guide, supported_backend_keys
-from agent_backends.codex_status_query import query_codex_status_panel
-from agent_backends.shared import resolve_session_file
 from agent_hub import HubConfig
 from bridge_config import APP_DIR, CONFIG_PATH, WEIXIN_ACCOUNTS_DIR, BridgeConfig, normalize_backend
 from core.accounts import load_account_context_tokens, save_account_context_tokens
@@ -2035,16 +2033,19 @@ class WeixinBridge:
             return None
         if session_meta.backend != "codex":
             return "当前会话后端不是 Codex，//status 只支持 Codex 会话。"
-        agent = self._find_agent_config(self.config.backend_id)
-        if agent is None:
-            return "未找到当前 Agent，无法查询 Codex 会话状态。"
-        session_file = resolve_session_file(agent, session_name, Path("sessions"))
-        status_panel = query_codex_status_panel(
-            HubConfig.load().codex_command,
-            session_file,
-            Path(self._resolve_session_workdir(session_meta)),
+        response = self._ipc_request(
+            "codex_status",
+            {
+                "agent_id": self.config.backend_id,
+                "session_name": session_name,
+                "workdir": self._resolve_session_workdir(session_meta),
+            },
+            timeout_seconds=15,
         )
-        if status_panel is None:
+        if not response.ok:
+            return f"Codex 状态查询失败：{response.error or 'unknown error'}"
+        status_panel = str(response.payload.get("status") or "").strip()
+        if not status_panel:
             return "当前会话还没有可查询的 Codex 交互状态。请先在这个会话里发送一条普通消息。"
         return status_panel
 

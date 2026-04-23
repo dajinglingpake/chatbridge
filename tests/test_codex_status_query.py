@@ -21,7 +21,7 @@ class CodexStatusQueryTests(unittest.TestCase):
                 "\n".join(
                     [
                         '{"type":"event_msg","payload":{"type":"other"}}',
-                        '{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":120000},"model_context_window":258400}}}',
+                        '{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":900000},"last_token_usage":{"total_tokens":120000},"model_context_window":258400}}}',
                     ]
                 )
                 + "\n",
@@ -55,7 +55,7 @@ class CodexStatusQueryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             log_path = Path(tempdir) / "session.jsonl"
             log_path.write_text(
-                '{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":108000},"model_context_window":258400}}}\n',
+                '{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":900000},"last_token_usage":{"total_tokens":108000},"model_context_window":258400}}}\n',
                 encoding="utf-8",
             )
             snapshot = _build_snapshot(
@@ -111,6 +111,36 @@ class CodexStatusQueryTests(unittest.TestCase):
         self.assertNotIn("░", panel)
         self.assertNotIn("╭", panel)
         self.assertNotIn("│", panel)
+
+    def test_render_status_panel_reports_unavailable_rate_limits(self) -> None:
+        snapshot = _build_snapshot(
+            "019db7f5-26b3-78b2-80d7-062b07144f1e",
+            {
+                "account": {
+                    "type": "chatgpt",
+                    "email": "1753473884@qq.com",
+                    "planType": "plus",
+                }
+            },
+            {},
+            {
+                "model": "gpt-5.4",
+                "reasoningEffort": "high",
+                "serviceTier": "fast",
+                "approvalPolicy": "never",
+                "sandbox": {"type": "dangerFullAccess", "networkAccess": True},
+                "cwd": "/home/dajingling/PythonProjects/chatbridge",
+                "instructionSources": ["/home/dajingling/.codex/AGENTS.md"],
+                "thread": {
+                    "cliVersion": "0.122.0",
+                    "path": "/path/not/found.jsonl",
+                },
+            },
+        )
+        panel = _render_status_panel(snapshot)
+        self.assertIn("OpenAI Codex v0.122.0", panel)
+        self.assertIn("1753473884@qq.com (Plus)", panel)
+        self.assertIn("Rate limits: unavailable", panel)
 
 
 if __name__ == "__main__":
