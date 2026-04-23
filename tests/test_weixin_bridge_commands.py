@@ -1012,7 +1012,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
             self.assertTrue(bridge.sent_texts[0].startswith("running · "))
             self.assertIn("\n\n最终回答", bridge.sent_texts[0])
             self.assertTrue(bridge.sent_texts[1].startswith("done · "))
-            self.assertIn("\n\nCompleted", bridge.sent_texts[1])
+            self.assertNotIn("\n\n", bridge.sent_texts[1])
             self.assertNotIn("\n\n最终回答", bridge.sent_texts[1])
             entries = [json.loads(line) for line in event_log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
             self.assertEqual(

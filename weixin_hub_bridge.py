@@ -531,7 +531,7 @@ class WeixinBridge:
                     prefix_weixin_output(
                         "done",
                         format_duration_since(task.started_at or task.created_at, ended_at=task.finished_at),
-                        self._t("bridge.task.duplicate_final_result"),
+                        "",
                         at=task.finished_at or now_iso(),
                     ),
                 )
