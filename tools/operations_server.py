@@ -43,6 +43,7 @@ from core.mcp_service import (
     list_senders,
     list_agents,
     execute_sender_command,
+    restart_services,
     start_agent_session,
 )
 from core.state_models import JsonObject
@@ -166,6 +167,17 @@ def _build_tool_specs() -> dict[str, ToolSpec]:
                 str(args.get("target_sender_id") or ""),
                 str(args.get("command") or ""),
             ),
+        ),
+        "restart_services": ToolSpec(
+            name="restart_services",
+            description="异步重启运行中的服务。scope=all 会重启 Hub 和 Bridge；scope=bridge 只重启 Bridge。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "scope": {"type": "string", "description": "可选，all 或 bridge，默认 all。"},
+                },
+            },
+            handler=lambda args: restart_services(str(args.get("scope") or "all")),
         ),
         "start_agent_session": ToolSpec(
             name="start_agent_session",

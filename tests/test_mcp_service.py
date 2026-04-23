@@ -11,6 +11,7 @@ from core.mcp_service import (
     delegate_task,
     execute_sender_command,
     get_sender_snapshot,
+    restart_services,
     start_agent_session,
     list_senders,
 )
@@ -33,6 +34,21 @@ class McpServiceTests(unittest.TestCase):
                 result = execute_sender_command("sender-a", "/status")
         self.assertTrue(result.ok)
         self.assertIn("已对发送方 sender-a 执行桥命令 /status", result.summary)
+
+    def test_restart_services_schedules_async_restart(self) -> None:
+        with patch(
+            "core.mcp_service.schedule_named_action",
+            return_value=ServiceResult(ok=True, message="已安排在 1.00 秒后执行服务操作：restart"),
+        ) as mocked_schedule:
+            result = restart_services("all")
+        self.assertTrue(result.ok)
+        mocked_schedule.assert_called_once_with("restart", delay_seconds=1.0)
+        self.assertEqual("restart", result.data["action"])
+
+    def test_restart_services_rejects_unknown_scope(self) -> None:
+        result = restart_services("hub")
+        self.assertFalse(result.ok)
+        self.assertIn("scope 不支持", result.summary)
 
     def test_start_agent_session_submits_first_prompt(self) -> None:
         fake_agent = SimpleNamespace(

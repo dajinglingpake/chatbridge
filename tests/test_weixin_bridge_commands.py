@@ -238,8 +238,28 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         reply, handled = self.bridge._handle_control_command("sender-test", "/help")
         self.assertTrue(handled)
         self.assertIn("Available commands:", reply)
+        self.assertIn("/restart [bridge]", reply)
         self.assertIn("\n\nNormal messages:", reply)
         self.assertNotIn("/manage", reply)
+
+    def test_restart_command_schedules_full_restart(self) -> None:
+        with patch("weixin_hub_bridge.schedule_named_action", return_value=SimpleNamespace(message="scheduled all")) as mocked_schedule:
+            reply, handled = self.bridge._handle_control_command("sender-test", "/restart")
+        self.assertTrue(handled)
+        self.assertEqual("scheduled all", reply)
+        mocked_schedule.assert_called_once_with("restart", delay_seconds=1.0)
+
+    def test_restart_bridge_command_schedules_bridge_restart(self) -> None:
+        with patch("weixin_hub_bridge.schedule_named_action", return_value=SimpleNamespace(message="scheduled bridge")) as mocked_schedule:
+            reply, handled = self.bridge._handle_control_command("sender-test", "/restart bridge")
+        self.assertTrue(handled)
+        self.assertEqual("scheduled bridge", reply)
+        mocked_schedule.assert_called_once_with("restart-bridge", delay_seconds=1.0)
+
+    def test_restart_command_rejects_unknown_scope(self) -> None:
+        reply, handled = self.bridge._handle_control_command("sender-test", "/restart hub")
+        self.assertTrue(handled)
+        self.assertEqual("Usage: /restart or /restart bridge", reply)
 
     def test_poll_once_ignores_expected_getupdates_timeout(self) -> None:
         bridge = TimeoutPollingBridge(BridgeConfig.load())

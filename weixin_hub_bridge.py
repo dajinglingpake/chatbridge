@@ -17,6 +17,7 @@ from agent_backends import get_backend_command_guide, supported_backend_keys
 from agent_hub import HubConfig
 from bridge_config import APP_DIR, CONFIG_PATH, WEIXIN_ACCOUNTS_DIR, BridgeConfig, normalize_backend
 from core.accounts import load_account_context_tokens, save_account_context_tokens
+from core.app_service import schedule_named_action
 from core.context_relations import build_context_relation_lines
 from core.http_json import request_json
 from core.json_store import load_json, save_json
@@ -713,6 +714,7 @@ class WeixinBridge:
                 self._t("bridge.help.agent.list"),
                 self._t("bridge.help.agent.commands"),
                 self._t("bridge.help.agent.switch"),
+                self._t("bridge.help.restart"),
                 self._t("bridge.help.notify.current"),
                 self._t("bridge.help.notify.switch"),
                 self._t("bridge.help.backend.current"),
@@ -1038,6 +1040,16 @@ class WeixinBridge:
             self.config.set_backend_agent(requested_agent)
             self.config.save()
             return self._t("bridge.agent.switched", agent=requested_agent), True
+
+        if command == "/restart":
+            scope = parts[1].strip().lower() if len(parts) >= 2 else "all"
+            if scope in {"", "all"}:
+                result = schedule_named_action("restart", delay_seconds=1.0)
+                return result.message, True
+            if scope == "bridge":
+                result = schedule_named_action("restart-bridge", delay_seconds=1.0)
+                return result.message, True
+            return self._t("bridge.restart.usage"), True
 
         if command == "/notify":
             if len(parts) < 2:

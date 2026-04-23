@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+import subprocess
+import sys
+import time
 
 from agent_backends import supported_backend_keys
 from env_tools import run_shell_command
@@ -12,6 +16,7 @@ from runtime_stack import BRIDGE_CONVERSATIONS_PATH, emergency_stop, get_runtime
 from core.accounts import activate_account
 from bridge_config import APP_DIR, BridgeConfig, normalize_backend
 from core.json_store import load_json, save_json
+from core.platform_compat import creationflags
 from core.state_models import HubAgentSnapshot, HubTask, JsonObject, WeixinConversationBinding
 from core.weixin_notifier import broadcast_weixin_notice_by_kind
 
@@ -51,6 +56,7 @@ def run_named_action(action: str) -> ServiceResult:
         "start": start_all,
         "stop": stop_all,
         "restart": restart_all,
+        "restart-bridge": restart_bridge,
         "emergency-stop": emergency_stop,
     }
     runner = actions.get(action)
@@ -59,6 +65,33 @@ def run_named_action(action: str) -> ServiceResult:
     result_message = " | ".join(runner())
     notice = broadcast_weixin_notice_by_kind("service", f"服务操作: {action}", result_message)
     return ServiceResult(ok=True, message=f"{result_message} | {notice.summary}")
+
+
+def schedule_named_action(action: str, *, delay_seconds: float = 1.0) -> ServiceResult:
+    cleaned_action = action.strip()
+    if cleaned_action not in {"start", "stop", "restart", "restart-bridge", "emergency-stop"}:
+        return ServiceResult(ok=False, message=f"未知操作：{cleaned_action or action}")
+
+    safe_delay = max(0.0, float(delay_seconds))
+    command = [
+        sys.executable,
+        "-m",
+        "core.app_service",
+        "--run-named-action",
+        cleaned_action,
+        "--delay-seconds",
+        f"{safe_delay:.2f}",
+    ]
+    subprocess.Popen(
+        command,
+        cwd=str(APP_DIR),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+        creationflags=creationflags(),
+        start_new_session=True,
+    )
+    return ServiceResult(ok=True, message=f"已安排在 {safe_delay:.2f} 秒后执行服务操作：{cleaned_action}")
 
 
 def submit_hub_task(
@@ -341,3 +374,25 @@ def _state_now() -> str:
     from datetime import datetime
 
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Run app service actions.")
+    parser.add_argument("--run-named-action", default="", help="Execute a named runtime action.")
+    parser.add_argument("--delay-seconds", type=float, default=0.0, help="Optional delay before the action runs.")
+    args = parser.parse_args(argv)
+
+    action = str(args.run_named_action or "").strip()
+    if not action:
+        parser.print_help()
+        return 1
+
+    delay_seconds = max(0.0, float(args.delay_seconds or 0.0))
+    if delay_seconds > 0:
+        time.sleep(delay_seconds)
+    result = run_named_action(action)
+    return 0 if result.ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())
