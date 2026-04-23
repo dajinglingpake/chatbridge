@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
+import sqlite3
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
@@ -127,18 +129,14 @@ def query_codex_status_panel(codex_command: str, session_file: Path, workdir: Pa
 
 
 def query_codex_context_left_percent(codex_command: str, session_file: Path, workdir: Path) -> int | None:
-    del workdir
+    del codex_command, workdir
     session_id = _read_session_id(session_file)
     if not session_id:
         return None
-    client = _AppServerClient(codex_command)
-    try:
-        client.initialize()
-        resume_payload = client.request("thread/resume", {"threadId": session_id})
-    finally:
-        client.close()
-    thread = dict(resume_payload.get("thread") or {})
-    token_usage = _load_latest_token_usage(Path(str(thread.get("path") or "")))
+    rollout_path = _find_rollout_path_for_session(session_id)
+    if rollout_path is None:
+        return None
+    token_usage = _load_latest_token_usage(rollout_path)
     return _compute_context_left_percent(token_usage)
 
 
@@ -153,6 +151,32 @@ def _read_session_id(session_file: Path) -> str:
     if not session_file.exists():
         return ""
     return session_file.read_text(encoding="utf-8").strip()
+
+
+def _find_rollout_path_for_session(session_id: str) -> Path | None:
+    state_db_path = _resolve_codex_state_db_path()
+    if state_db_path is None:
+        return None
+    with sqlite3.connect(str(state_db_path)) as connection:
+        row = connection.execute(
+            "select rollout_path from threads where id = ? limit 1",
+            (session_id,),
+        ).fetchone()
+    if row is None or not row[0]:
+        return None
+    return Path(str(row[0])).expanduser()
+
+
+def _resolve_codex_state_db_path() -> Path | None:
+    raw_codex_home = str(os.environ.get("CODEX_HOME") or "").strip()
+    codex_home = Path(raw_codex_home).expanduser() if raw_codex_home else Path.home() / ".codex"
+    candidates = sorted(codex_home.glob("state_*.sqlite"))
+    if candidates:
+        return candidates[-1]
+    fallback = codex_home / "state.sqlite"
+    if fallback.exists():
+        return fallback
+    return None
 
 
 def _build_snapshot(
