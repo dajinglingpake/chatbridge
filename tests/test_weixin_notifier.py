@@ -11,6 +11,11 @@ from core import weixin_notifier
 
 
 class WeixinNotifierTests(unittest.TestCase):
+    def test_build_notice_text_uses_compact_header(self) -> None:
+        text = weixin_notifier._build_notice_text("Bridge 启动", "账号: main")
+        self.assertTrue(text.startswith("notice · - · "))
+        self.assertIn("\n\nBridge 启动\n账号: main", text)
+
     def test_load_recipient_ids_filters_blank_sender_ids(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "weixin_conversations.json"

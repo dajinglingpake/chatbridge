@@ -540,6 +540,7 @@ class WeixinPendingTaskState:
     context_token: str = ""
     last_status: str = "queued"
     last_progress_seq: int = 0
+    last_progress_text: str = ""
 
     @classmethod
     def from_dict(cls, raw: object) -> "WeixinPendingTaskState | None":
@@ -560,6 +561,7 @@ class WeixinPendingTaskState:
             context_token=str(raw.get("context_token") or "").strip(),
             last_status=str(raw.get("last_status") or "queued").strip() or "queued",
             last_progress_seq=int(raw.get("last_progress_seq") or 0),
+            last_progress_text=str(raw.get("last_progress_text") or "").strip(),
         )
 
     def to_dict(self) -> JsonObject:

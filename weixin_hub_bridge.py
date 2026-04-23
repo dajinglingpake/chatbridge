@@ -9,7 +9,6 @@ import subprocess
 import time
 import unicodedata
 import urllib.request
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +44,7 @@ from core.state_models import (
     WeixinSessionMeta,
 )
 from core.weixin_notifier import broadcast_weixin_notice_by_kind, build_task_followup_hint
+from core.weixin_message_format import format_duration_since, format_weixin_reply, now_iso, prefix_weixin_output
 from local_ipc import create_request, wait_for_response
 from localization import Localizer
 
@@ -71,10 +71,6 @@ PERMISSION_MODE_PRESETS: tuple[tuple[str, str], ...] = (
 SPECIAL_NATIVE_MENU_COMMANDS = frozenset({"/model", "/permission", "/permissions"})
 
 
-def now_iso() -> str:
-    return datetime.now().isoformat(timespec="seconds")
-
-
 def resolve_bridge_language(config_language: str) -> str:
     cleaned = str(config_language or "").strip()
     if cleaned and cleaned.lower() != "auto":
@@ -83,6 +79,10 @@ def resolve_bridge_language(config_language: str) -> str:
     if env_language:
         return env_language
     return "zh-CN"
+
+
+def _normalize_message_for_dedupe(text: str) -> str:
+    return "\n".join(line.rstrip() for line in str(text or "").strip().splitlines()).strip()
 
 
 class WeixinBridge:
@@ -446,20 +446,21 @@ class WeixinBridge:
         progress_text = task.progress_text.strip()
         if not progress_text:
             return
-        if self._should_emit_progress_to_wechat(progress_text):
+        if progress_text != tracked.last_progress_text:
             context_token = self._resolve_context_token_for_sender(tracked)
             self._send_text(
                 base_url,
                 token,
                 tracked.sender_id,
                 context_token,
-                self._t(
-                    "bridge.task.progress",
-                    task_id=task.id,
-                    session=task.session_name or tracked.session_name or "default",
-                    progress=progress_text,
+                prefix_weixin_output(
+                    "running",
+                    format_duration_since(task.started_at or task.created_at),
+                    progress_text,
+                    at=now_iso(),
                 ),
             )
+            tracked.last_progress_text = progress_text
         self._append_event_log(
             event="progress",
             task_id=task.id,
@@ -472,21 +473,6 @@ class WeixinBridge:
             result_preview=progress_text[:240],
             source=tracked.source,
         )
-
-    @staticmethod
-    def _should_emit_progress_to_wechat(progress_text: str) -> bool:
-        stripped = str(progress_text or "").strip()
-        if not stripped:
-            return False
-        hidden_prefixes = (
-            "正在调用 ",
-            "已收到 ",
-            "已建立 ",
-            "正在分析",
-            "正在整理回复",
-            "即将返回结果",
-        )
-        return not stripped.startswith(hidden_prefixes)
 
     def _poll_pending_tasks(self, base_url: str, token: str) -> None:
         if not self.pending_tasks:
@@ -534,17 +520,36 @@ class WeixinBridge:
     ) -> None:
         context_token = self._resolve_context_token_for_sender(tracked)
         if task.status == "succeeded":
-            reply = self._t(
-                "bridge.task.succeeded",
-                task_id=task.id,
-                session=task.session_name or tracked.session_name or "default",
-                session_id=task.session_id or "-",
-                backend=task.backend or tracked.backend or self.config.default_backend,
-                model=self._display_model(task.model.strip() or tracked.model),
-                workdir=task.workdir.strip() or tracked.workdir or "-",
-                result=(f"{self.config.auto_reply_prefix}{task.output.strip()}" if self.config.auto_reply_prefix else task.output.strip()) or "(empty)",
-            )
-            self._send_text(base_url, token, tracked.sender_id, context_token, reply)
+            output = task.output.strip()
+            if output and _normalize_message_for_dedupe(output) == _normalize_message_for_dedupe(tracked.last_progress_text):
+                self._append_event_log(
+                    event="succeeded",
+                    task_id=task.id,
+                    sender_id=tracked.sender_id,
+                    session_name=task.session_name or tracked.session_name or "default",
+                    session_id=task.session_id or "",
+                    backend=task.backend or tracked.backend or self.config.default_backend,
+                    model=self._display_model(task.model.strip() or tracked.model),
+                    workdir=task.workdir.strip() or tracked.workdir or "-",
+                    status=task.status,
+                    result_preview=output[:240],
+                    source=tracked.source,
+                )
+                self.state.record_handled()
+                return
+            if output:
+                self._send_text(
+                    base_url,
+                    token,
+                    tracked.sender_id,
+                    context_token,
+                    prefix_weixin_output(
+                        "done",
+                        format_duration_since(task.started_at or task.created_at, ended_at=task.finished_at),
+                        output,
+                        at=task.finished_at or now_iso(),
+                    ),
+                )
             self._append_event_log(
                 event="succeeded",
                 task_id=task.id,
@@ -629,9 +634,7 @@ class WeixinBridge:
         self.state.record_failed()
 
     def _send_text(self, base_url: str, token: str, to_user_id: str, context_token: Any, text: str) -> None:
-        text = (text or "").strip()
-        if not text:
-            text = "(empty reply)"
+        text = format_weixin_reply(text)
         body = {
             "msg": {
                 "from_user_id": "",
