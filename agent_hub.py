@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_backends import DEFAULT_BACKEND_KEY, BackendContext, McpServerConfig, build_backend_registry, supported_backend_keys
-from agent_backends.codex_status_query import query_codex_status_panel
+from agent_backends.codex_status_query import query_codex_context_left_percent, query_codex_status_panel
 from agent_backends.shared import resolve_session_file
 from bridge_config import BridgeConfig
 from core.json_store import load_json, save_json
@@ -461,6 +461,8 @@ class MultiCodexHub:
                     task.status = "succeeded"
                     task.output = result["output"]
                     task.session_id = result["session_id"]
+                    if result.get("context_left_percent", "").strip():
+                        task.context_left_percent = int(result["context_left_percent"])
                     runtime.success_count += 1
                     runtime.last_output = result["output"][:1800]
                     runtime.last_error = ""
@@ -591,6 +593,7 @@ class MultiCodexHub:
                 start_new_session=not IS_WINDOWS,
                 on_process_started=lambda pid: self._register_running_task_pid(task.id, pid),
                 on_progress=lambda text: self._update_task_progress(task.id, text),
+                on_context_left_percent=lambda percent: self._update_task_context_left_percent(task.id, percent),
                 mcp_server=mcp_server,
                 reasoning_effort=task.reasoning_effort.strip(),
                 permission_mode=task.permission_mode.strip(),
@@ -612,6 +615,14 @@ class MultiCodexHub:
             task.progress_text = progress_text
             task.progress_at = now_iso()
             task.progress_seq += 1
+            self._save_state()
+
+    def _update_task_context_left_percent(self, task_id: str, percent: int) -> None:
+        with self.lock:
+            task = next((item for item in self.tasks if item.id == task_id), None)
+            if task is None or task.status not in {"running", "queued"}:
+                return
+            task.context_left_percent = max(0, min(100, int(percent)))
             self._save_state()
 
     def _resolve_task_workdir(self, agent: AgentConfig, task: HubTask) -> str:
@@ -721,6 +732,11 @@ class MultiCodexHub:
                     )
                 },
             )
+        if action == "task_context_left":
+            return IpcResponseEnvelope(
+                ok=True,
+                payload={"context_left_percent": self.get_task_context_left_percent(str(payload.get("task_id") or ""))},
+            )
         if action == "save_agent":
             return IpcResponseEnvelope(ok=True, payload={"agent": asdict(self.create_or_update_agent(payload))})
         if action == "delete_agent":
@@ -757,6 +773,28 @@ class MultiCodexHub:
             Path(workdir or agent.workdir),
         )
         return status_panel or ""
+
+    def get_task_context_left_percent(self, task_id: str) -> int | None:
+        task = self._find_task(task_id)
+        if task is None:
+            raise ValueError("task not found")
+        if normalize_backend(task.backend) != "codex":
+            return task.context_left_percent
+        agent = self._find_agent(task.agent_id)
+        if agent is None:
+            return task.context_left_percent
+        session_file = resolve_session_file(agent, task.session_name or "default", SESSION_DIR)
+        current_percent = query_codex_context_left_percent(
+            self.config.codex_command,
+            session_file,
+            Path(task.workdir or agent.workdir),
+        )
+        if current_percent is None:
+            return task.context_left_percent
+        with self.lock:
+            task.context_left_percent = current_percent
+            self._save_state()
+        return current_percent
 
 
 def run() -> int:

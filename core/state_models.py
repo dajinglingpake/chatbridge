@@ -116,6 +116,16 @@ class CheckSnapshot:
         return asdict(self)
 
 
+def _optional_percent(value: object) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        percent = int(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0, min(100, percent))
+
+
 @dataclass
 class HubTask:
     id: str
@@ -142,6 +152,7 @@ class HubTask:
     progress_text: str = ""
     progress_at: str = ""
     progress_seq: int = 0
+    context_left_percent: int | None = None
 
     @classmethod
     def from_dict(cls, raw: object, *, default_backend: str) -> "HubTask | None":
@@ -177,6 +188,7 @@ class HubTask:
             progress_text=str(raw.get("progress_text") or ""),
             progress_at=str(raw.get("progress_at") or "").strip(),
             progress_seq=int(raw.get("progress_seq") or 0),
+            context_left_percent=_optional_percent(raw.get("context_left_percent")),
         )
 
     def to_dict(self) -> JsonObject:

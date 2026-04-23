@@ -8,6 +8,7 @@ import os
 import random
 import secrets
 import subprocess
+import threading
 import time
 import unicodedata
 import urllib.parse
@@ -47,6 +48,8 @@ from core.state_models import (
     WeixinPendingTaskState,
     WeixinSessionMeta,
 )
+from core.weixin_send_gate import sender_send_lock
+from core.weixin_text_outbox import enqueue_text_message, pop_text_messages, requeue_text_message
 from core.weixin_notifier import broadcast_weixin_notice_by_kind, build_task_followup_hint
 from core.weixin_message_format import format_duration_since, format_weixin_reply, now_iso, prefix_weixin_output
 from local_ipc import create_request, wait_for_response
@@ -138,6 +141,7 @@ class WeixinBridge:
         self.pending_tasks = self._load_pending_tasks()
         self._recent_message_keys: list[str] = []
         self._recent_message_fingerprints: dict[str, float] = {}
+        self._send_worker_started = False
         self.state = WeixinBridgeRuntimeState.create(
             now=now_iso(),
             managed_conversations=len(self.conversations),
@@ -170,6 +174,7 @@ class WeixinBridge:
         print(f"Weixin Hub Bridge started at {now_iso()}", flush=True)
         print(f"Config: {CONFIG_PATH}", flush=True)
         print(f"State: {STATE_PATH}", flush=True)
+        self._start_send_worker()
         self._notify_service_started()
         self._deliver_pending_restart_notice()
         while True:
@@ -183,7 +188,53 @@ class WeixinBridge:
                 print(f"[bridge] poll error: {exc}", flush=True)
                 time.sleep(3)
 
+    def _start_send_worker(self) -> None:
+        if self._send_worker_started:
+            return
+        worker = threading.Thread(target=self._send_worker_loop, daemon=True, name="weixin-send-worker")
+        worker.start()
+        self._send_worker_started = True
+
+    def _send_worker_loop(self) -> None:
+        while True:
+            messages = pop_text_messages(limit=20)
+            if not messages:
+                time.sleep(0.2)
+                continue
+            try:
+                account = self._load_account()
+                token = (account.get("token") or "").strip()
+                base_url = (account.get("baseUrl") or DEFAULT_WEIXIN_BASE_URL).strip()
+                if not token:
+                    raise RuntimeError("weixin account token is missing")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[bridge] send worker account load failed: {exc}", flush=True)
+                for message in messages:
+                    if int(message.get("attempt") or 0) < 3:
+                        requeue_text_message(message)
+                time.sleep(1)
+                continue
+            for message in messages:
+                try:
+                    self._deliver_text_now(
+                        base_url,
+                        token,
+                        str(message.get("to_user_id") or ""),
+                        str(message.get("context_token") or ""),
+                        str(message.get("text") or ""),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    print(
+                        f"[bridge] async send failed to={message.get('to_user_id', '')} error={exc}",
+                        flush=True,
+                    )
+                    if int(message.get("attempt") or 0) < 3:
+                        requeue_text_message(message)
+
     def _notify_service_started(self) -> None:
+        if self._has_pending_restart_notice():
+            print("[bridge] startup notice skipped: pending restart notice will be delivered directly", flush=True)
+            return
         detail = (
             f"Bridge 已启动\n"
             f"账号: {self.config.active_account_id or '-'}\n"
@@ -193,6 +244,14 @@ class WeixinBridge:
         print(f"[bridge] startup notice: {result.summary}", flush=True)
         if result.error and result.error != "disabled":
             print(f"[bridge] startup notice error: {result.error}", flush=True)
+
+    def _has_pending_restart_notice(self) -> bool:
+        payload = load_json(RESTART_NOTICE_PATH, {}, expect_type=dict)
+        if not isinstance(payload, dict):
+            return False
+        sender_id = str(payload.get("sender_id") or "").strip()
+        context_token = str(payload.get("context_token") or "").strip()
+        return bool(sender_id and context_token)
 
     def _deliver_pending_restart_notice(self) -> None:
         payload = load_json(RESTART_NOTICE_PATH, {}, expect_type=dict)
@@ -219,7 +278,7 @@ class WeixinBridge:
             ]
             if requested_at:
                 detail_lines.append(f"请求时间: {requested_at}")
-            self._send_text(base_url, token, sender_id, context_token, "\n".join(detail_lines))
+            self._deliver_text_now(base_url, token, sender_id, context_token, "\n".join(detail_lines))
             print(f"[bridge] restart notice delivered to {sender_id}", flush=True)
         except Exception as exc:  # noqa: BLE001
             print(f"[bridge] restart notice delivery failed: {exc}", flush=True)
@@ -510,6 +569,7 @@ class WeixinBridge:
                     format_duration_since(task.started_at or task.created_at),
                     progress_text,
                     at=now_iso(),
+                    context_left_percent=self._resolve_task_context_left_percent(task),
                 ),
             )
             tracked.last_progress_text = progress_text
@@ -584,6 +644,7 @@ class WeixinBridge:
                         format_duration_since(task.started_at or task.created_at, ended_at=task.finished_at),
                         "",
                         at=task.finished_at or now_iso(),
+                        context_left_percent=self._resolve_task_context_left_percent(task),
                     ),
                 )
                 self._append_event_log(
@@ -612,6 +673,7 @@ class WeixinBridge:
                         format_duration_since(task.started_at or task.created_at, ended_at=task.finished_at),
                         output,
                         at=task.finished_at or now_iso(),
+                        context_left_percent=self._resolve_task_context_left_percent(task),
                     ),
                 )
             self._append_event_log(
@@ -697,7 +759,36 @@ class WeixinBridge:
         )
         self.state.record_failed()
 
+    def _resolve_task_context_left_percent(self, task: HubTask) -> int | None:
+        if str(task.backend or "").strip().lower() != "codex":
+            return None
+        try:
+            response = self._ipc_request("task_context_left", {"task_id": task.id}, timeout_seconds=5)
+        except Exception:
+            return task.context_left_percent
+        if not response.ok:
+            return task.context_left_percent
+        value = response.payload.get("context_left_percent")
+        try:
+            if value is None or value == "":
+                return task.context_left_percent
+            return max(0, min(100, int(value)))
+        except (TypeError, ValueError):
+            return task.context_left_percent
+
     def _send_text(self, base_url: str, token: str, to_user_id: str, context_token: Any, text: str) -> None:
+        text = format_weixin_reply(text)
+        self._start_send_worker()
+        enqueue_text_message(
+            to_user_id=str(to_user_id or ""),
+            context_token=str(context_token or ""),
+            text=text,
+            source="bridge",
+        )
+        preview = " ".join(text.split())[:160]
+        print(f"[bridge] queued reply to={to_user_id} preview={preview}", flush=True)
+
+    def _deliver_text_now(self, base_url: str, token: str, to_user_id: str, context_token: Any, text: str) -> None:
         text = format_weixin_reply(text)
         body = {
             "msg": {
@@ -718,7 +809,8 @@ class WeixinBridge:
         }
         preview = " ".join(text.split())[:160]
         try:
-            response = self._post_json(f"{base_url}/ilink/bot/sendmessage", body, token=token, timeout_ms=15000)
+            with sender_send_lock(to_user_id):
+                response = self._post_json(f"{base_url}/ilink/bot/sendmessage", body, token=token, timeout_ms=15000)
             if isinstance(response, dict):
                 print(
                     f"[bridge] sent reply to={to_user_id} ret={response.get('ret')} errcode={response.get('errcode')} errmsg={response.get('errmsg')} preview={preview}",
@@ -788,7 +880,8 @@ class WeixinBridge:
             },
             "base_info": {"channel_version": "2.1.1"},
         }
-        response = self._post_json(f"{base_url}/ilink/bot/sendmessage", body, token=token, timeout_ms=15000)
+        with sender_send_lock(to_user_id):
+            response = self._post_json(f"{base_url}/ilink/bot/sendmessage", body, token=token, timeout_ms=15000)
         if isinstance(response, dict) and response.get("ret") not in (None, 0):
             raise RuntimeError(f"sendmessage returned ret={response.get('ret')}: {response}")
         print(

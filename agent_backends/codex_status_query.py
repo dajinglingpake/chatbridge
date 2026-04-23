@@ -126,6 +126,22 @@ def query_codex_status_panel(codex_command: str, session_file: Path, workdir: Pa
     return _render_status_panel(snapshot)
 
 
+def query_codex_context_left_percent(codex_command: str, session_file: Path, workdir: Path) -> int | None:
+    del workdir
+    session_id = _read_session_id(session_file)
+    if not session_id:
+        return None
+    client = _AppServerClient(codex_command)
+    try:
+        client.initialize()
+        resume_payload = client.request("thread/resume", {"threadId": session_id})
+    finally:
+        client.close()
+    thread = dict(resume_payload.get("thread") or {})
+    token_usage = _load_latest_token_usage(Path(str(thread.get("path") or "")))
+    return _compute_context_left_percent(token_usage)
+
+
 def _request_optional(client: _AppServerClient, method: str, params: object) -> dict:
     try:
         return client.request(method, params)
@@ -365,10 +381,20 @@ def _format_context_window(token_usage: _TokenUsage) -> str:
         return f"used {token_usage.total_tokens:_}".replace("_", ",")
     used = token_usage.total_tokens
     total = token_usage.model_context_window
-    left_percent = max(0, min(100, round((1 - (used / total)) * 100)))
+    left_percent = _compute_context_left_percent(token_usage)
+    if left_percent is None:
+        return f"used {token_usage.total_tokens:_}".replace("_", ",")
     used_display = _format_compact_tokens(used)
     total_display = _format_compact_tokens(total)
     return f"{left_percent}% left ({used_display} used / {total_display})"
+
+
+def _compute_context_left_percent(token_usage: _TokenUsage | None) -> int | None:
+    if token_usage is None or not token_usage.model_context_window:
+        return None
+    used = token_usage.total_tokens
+    total = token_usage.model_context_window
+    return max(0, min(100, round((1 - (used / total)) * 100)))
 
 
 def _format_compact_tokens(value: int) -> str:

@@ -30,6 +30,7 @@ class FakeBridge(WeixinBridge):
                 )
             },
         )
+        self.task_context_left_response = IpcResponseEnvelope(ok=True, payload={"context_left_percent": None})
         self._state_payload = IpcResponseEnvelope(
             ok=True,
             payload={
@@ -124,6 +125,8 @@ class FakeBridge(WeixinBridge):
             return IpcResponseEnvelope(ok=True, payload={"task": {"id": "task-forwarded-001"}})
         if action == "codex_status":
             return self.codex_status_response
+        if action == "task_context_left":
+            return self.task_context_left_response
         raise RuntimeError(f"unexpected action: {action}")
 
     def _save_conversations(self) -> None:
@@ -148,6 +151,9 @@ class FeedbackBridge(FakeBridge):
         return super()._ipc_request(action, payload, timeout_seconds)
 
     def _send_text(self, base_url: str, token: str, to_user_id: str, context_token, text: str) -> None:
+        self.sent_texts.append(text)
+
+    def _deliver_text_now(self, base_url: str, token: str, to_user_id: str, context_token, text: str) -> None:
         self.sent_texts.append(text)
 
     def poll_pending(self) -> None:
@@ -197,6 +203,17 @@ class WeixinBridgeCommandTests(unittest.TestCase):
 
     def test_format_bridge_reply_does_not_wrap_existing_header(self) -> None:
         output = prefix_weixin_output("running", "3s", "hello", at="2026-04-23T18:09:46")
+        self.assertEqual(output, format_weixin_reply(output))
+
+    def test_format_bridge_reply_preserves_context_window_header(self) -> None:
+        output = prefix_weixin_output(
+            "running",
+            "3s",
+            "hello",
+            at="2026-04-23T18:09:46",
+            context_left_percent=20,
+        )
+        self.assertEqual("running · 3s · ctx 20% · 18:09:46\n\nhello", output)
         self.assertEqual(output, format_weixin_reply(output))
 
     def setUp(self) -> None:
@@ -758,6 +775,31 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                 bridge._notify_service_started()
         mocked_print.assert_any_call("[bridge] startup notice: 已通知 1 个微信会话", flush=True)
 
+    def test_notify_service_started_skips_broadcast_when_restart_notice_pending(self) -> None:
+        bridge = FeedbackBridge(BridgeConfig.load(), [])
+        self.restart_notice_path.write_text(
+            json.dumps(
+                {
+                    "sender_id": "sender-test",
+                    "context_token": "ctx",
+                    "scope": "all",
+                    "requested_at": "2026-04-24T04:55:00",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        with (
+            patch("weixin_hub_bridge.broadcast_weixin_notice_by_kind") as mocked_broadcast,
+            patch("builtins.print") as mocked_print,
+        ):
+            bridge._notify_service_started()
+        mocked_broadcast.assert_not_called()
+        mocked_print.assert_any_call(
+            "[bridge] startup notice skipped: pending restart notice will be delivered directly",
+            flush=True,
+        )
+
     def test_notify_test_command_returns_delivery_summary(self) -> None:
         with patch("weixin_hub_bridge.broadcast_weixin_notice_by_kind") as mocked_broadcast:
             mocked_broadcast.return_value = SimpleNamespace(summary="已通知 1/4 个微信会话，剩余发送失败：missing context token", error="missing context token")
@@ -932,6 +974,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                         "prompt": "hello",
                         "progress_text": "正在分析仓库结构",
                         "progress_seq": 1,
+                        "context_left_percent": 21,
                         "created_at": "2026-04-20T12:00:00",
                     },
                     {
@@ -945,6 +988,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                         "prompt": "hello",
                         "progress_text": "正在生成修复方案",
                         "progress_seq": 2,
+                        "context_left_percent": 20,
                         "created_at": "2026-04-20T12:00:00",
                     },
                     {
@@ -957,6 +1001,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                         "backend": "codex",
                         "prompt": "hello",
                         "output": "world",
+                        "context_left_percent": 19,
                         "created_at": "2026-04-20T12:00:00",
                     },
                 ],
@@ -976,10 +1021,13 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                 bridge.poll_pending()
                 bridge.poll_pending()
             self.assertTrue(bridge.sent_texts[0].startswith("running · "))
+            self.assertIn(" · ctx 21% · ", bridge.sent_texts[0].splitlines()[0])
             self.assertIn("\n\n正在分析仓库结构", bridge.sent_texts[0])
             self.assertTrue(bridge.sent_texts[1].startswith("running · "))
+            self.assertIn(" · ctx 20% · ", bridge.sent_texts[1].splitlines()[0])
             self.assertIn("\n\n正在生成修复方案", bridge.sent_texts[1])
             self.assertTrue(bridge.sent_texts[2].startswith("done · "))
+            self.assertIn(" · ctx 19% · ", bridge.sent_texts[2].splitlines()[0])
             self.assertIn("\n\nworld", bridge.sent_texts[2])
             entries = [json.loads(line) for line in event_log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
             self.assertEqual(
@@ -987,6 +1035,56 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                 [entry["event"] for entry in entries],
             )
             self.assertEqual("正在生成修复方案", entries[-2]["result_preview"])
+
+    def test_handle_message_queries_live_context_for_codex_header(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            event_log_path = Path(temp_dir) / "weixin_bridge_events.jsonl"
+            bridge = FeedbackBridge(
+                BridgeConfig.load(),
+                [
+                    {
+                        "id": "task-feedback-001",
+                        "sender_id": "sender-test",
+                        "session_name": "default",
+                        "status": "running",
+                        "agent_id": "main",
+                        "agent_name": "default",
+                        "backend": "codex",
+                        "prompt": "hello",
+                        "progress_text": "正在分析仓库结构",
+                        "progress_seq": 1,
+                        "created_at": "2026-04-20T12:00:00",
+                    },
+                    {
+                        "id": "task-feedback-001",
+                        "sender_id": "sender-test",
+                        "session_name": "default",
+                        "status": "succeeded",
+                        "agent_id": "main",
+                        "agent_name": "default",
+                        "backend": "codex",
+                        "prompt": "hello",
+                        "output": "world",
+                        "created_at": "2026-04-20T12:00:00",
+                    },
+                ],
+            )
+            bridge.task_context_left_response = IpcResponseEnvelope(ok=True, payload={"context_left_percent": 18})
+            with patch("weixin_hub_bridge.EVENT_LOG_PATH", event_log_path):
+                bridge._handle_message(
+                    "https://example.com",
+                    "token",
+                    {
+                        "message_type": 1,
+                        "from_user_id": "sender-test",
+                        "context_token": "ctx",
+                        "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
+                    },
+                )
+                bridge.poll_pending()
+                bridge.poll_pending()
+            self.assertIn(" · ctx 18% · ", bridge.sent_texts[0].splitlines()[0])
+            self.assertIn(" · ctx 18% · ", bridge.sent_texts[1].splitlines()[0])
 
     def test_handle_message_sends_completion_notice_for_duplicate_final_result_after_progress(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

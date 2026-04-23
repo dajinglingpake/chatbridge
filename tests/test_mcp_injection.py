@@ -177,12 +177,14 @@ class McpServerCodexBackendTests(unittest.TestCase):
                 model="gpt-5.4",
                 prompt_prefix="system",
             )
+            context_left_values: list[int] = []
             context = BackendContext(
                 codex_command="codex",
                 claude_command="claude",
                 opencode_command="opencode",
                 session_dir=session_dir,
                 creationflags=0,
+                on_context_left_percent=context_left_values.append,
                 mcp_server=McpServerConfig(
                     name="operations",
                     command="python3",
@@ -195,7 +197,15 @@ class McpServerCodexBackendTests(unittest.TestCase):
                 def __init__(self, argv: list[str]) -> None:
                     self.argv = argv
                     self.pid = 4321
-                    self.stdout = iter(['{"type":"thread.started","thread_id":"thread-1"}\n'])
+                    self.stdout = iter(
+                        [
+                            '{"type":"thread.started","thread_id":"thread-1"}\n',
+                            (
+                                '{"type":"event_msg","payload":{"type":"token_count","info":'
+                                '{"last_token_usage":{"total_tokens":100000},"model_context_window":250000}}}\n'
+                            ),
+                        ]
+                    )
                     self.stderr = iter([])
 
                 def wait(self) -> int:
@@ -216,6 +226,8 @@ class McpServerCodexBackendTests(unittest.TestCase):
 
             self.assertEqual("ok", result["output"])
             self.assertEqual("thread-1", result["session_id"])
+            self.assertEqual("60", result["context_left_percent"])
+            self.assertEqual([60], context_left_values)
 
     def test_codex_backend_applies_reasoning_effort_and_default_permission_mode(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
