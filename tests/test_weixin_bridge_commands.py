@@ -471,6 +471,52 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         self.assertEqual("/model", bridge.conversations["sender-test"].sessions["default"].native_menu_command)
         self.assertEqual("select_model", bridge.conversations["sender-test"].sessions["default"].native_menu_stage)
 
+    def test_unsupported_passthrough_slash_command_is_rejected(self) -> None:
+        bridge = FeedbackBridge(BridgeConfig.load(), [])
+        bridge._handle_message(
+            "https://example.com",
+            "token",
+            {
+                "client_id": "status-pass",
+                "message_type": 1,
+                "from_user_id": "sender-test",
+                "context_token": "ctx",
+                "item_list": [{"type": 1, "text_item": {"text": "//foo"}}],
+            },
+        )
+        self.assertEqual([], bridge.submit_payloads)
+        self.assertIn("/foo", bridge.sent_texts[-1])
+        self.assertIn("//model", bridge.sent_texts[-1])
+
+    def test_passthrough_status_returns_codex_status_panel_without_submitting_task(self) -> None:
+        sent_texts: list[str] = []
+
+        def capture_send(_base_url, _token, _to_user_id, _context_token, text: str) -> None:
+            sent_texts.append(text)
+
+        self.bridge._send_text = capture_send  # type: ignore[method-assign]
+        message = {
+            "message_type": 1,
+            "from_user_id": "sender-test",
+            "context_token": "ctx-1",
+            "msg_id": "msg-status",
+            "item_list": [{"type": 1, "text_item": {"text": "//status"}}],
+        }
+        with patch(
+            "weixin_hub_bridge.query_codex_status_panel",
+            return_value=(
+                "╭─────────────────────────────────────────────────────────────────────────────────────────╮\n"
+                "│  >_ OpenAI Codex (v0.122.0)                                                             │\n"
+                "│  Model:                       gpt-5.4 (reasoning high, fast)                            │\n"
+                "╰─────────────────────────────────────────────────────────────────────────────────────────╯"
+            ),
+        ):
+            self.bridge._handle_message("https://example.com", "token", message)
+        self.assertEqual([], self.bridge.submit_payloads)
+        self.assertEqual(1, len(sent_texts))
+        self.assertIn(">_ OpenAI Codex", sent_texts[0])
+        self.assertIn("gpt-5.4", sent_texts[0])
+
     def test_native_model_menu_updates_session_config_and_submit_payload(self) -> None:
         bridge = FeedbackBridge(BridgeConfig.load(), [])
         catalog = [

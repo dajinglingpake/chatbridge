@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any
 
 from agent_backends import get_backend_command_guide, supported_backend_keys
+from agent_backends.codex_status_query import query_codex_status_panel
+from agent_backends.shared import resolve_session_file
 from agent_hub import HubConfig
 from bridge_config import APP_DIR, CONFIG_PATH, WEIXIN_ACCOUNTS_DIR, BridgeConfig, normalize_backend
 from core.accounts import load_account_context_tokens, save_account_context_tokens
@@ -286,6 +288,19 @@ class WeixinBridge:
                 return
             prompt = text.strip()
         else:
+            local_codex_status = self._render_local_codex_status(session_name, session_meta, passthrough_prompt)
+            if local_codex_status is not None:
+                self._append_message_audit(
+                    sender_id=sender_id,
+                    text=text,
+                    route="passthrough_local_status",
+                    session_name=session_name or "default",
+                    command=passthrough_prompt.strip().lower(),
+                )
+                self._send_text(base_url, token, sender_id, msg.get("context_token"), local_codex_status)
+                self.state.record_handled()
+                self._save_state()
+                return
             special_native_menu = self._start_special_native_menu(session_name, session_meta, passthrough_prompt)
             if special_native_menu is not None:
                 self._append_message_audit(
@@ -298,6 +313,24 @@ class WeixinBridge:
                 self._send_text(base_url, token, sender_id, msg.get("context_token"), special_native_menu)
                 self.state.record_handled()
                 self._save_conversations()
+                self._save_state()
+                return
+            if self._looks_like_agent_slash_command(passthrough_prompt):
+                self._append_message_audit(
+                    sender_id=sender_id,
+                    text=text,
+                    route="passthrough_unsupported",
+                    session_name=session_name or "default",
+                    command=passthrough_prompt.strip().lower(),
+                )
+                self._send_text(
+                    base_url,
+                    token,
+                    sender_id,
+                    msg.get("context_token"),
+                    self._t("bridge.passthrough.unsupported", command=passthrough_prompt.strip()),
+                )
+                self.state.record_handled()
                 self._save_state()
                 return
             prompt = passthrough_prompt
@@ -1740,6 +1773,29 @@ class WeixinBridge:
         prompt = raw[1:].strip()
         return prompt or "/"
 
+    def _render_local_codex_status(
+        self,
+        session_name: str,
+        session_meta: WeixinSessionMeta,
+        passthrough_prompt: str,
+    ) -> str | None:
+        if str(passthrough_prompt or "").strip().lower() != "/status":
+            return None
+        if session_meta.backend != "codex":
+            return "当前会话后端不是 Codex，//status 只支持 Codex 会话。"
+        agent = self._find_agent_config(self.config.backend_id)
+        if agent is None:
+            return "未找到当前 Agent，无法查询 Codex 会话状态。"
+        session_file = resolve_session_file(agent, session_name, Path("sessions"))
+        status_panel = query_codex_status_panel(
+            HubConfig.load().codex_command,
+            session_file,
+            Path(self._resolve_session_workdir(session_meta)),
+        )
+        if status_panel is None:
+            return "当前会话还没有可查询的 Codex 交互状态。请先在这个会话里发送一条普通消息。"
+        return status_panel
+
     def _render_restart_status(self) -> str:
         payload = load_json(SERVICE_ACTION_STATE_FILE, {}, expect_type=dict)
         if not isinstance(payload, dict) or not payload:
@@ -1780,6 +1836,10 @@ class WeixinBridge:
     @staticmethod
     def _is_special_native_menu_command(prompt: str) -> bool:
         return str(prompt or "").strip().lower() in SPECIAL_NATIVE_MENU_COMMANDS
+
+    @staticmethod
+    def _looks_like_agent_slash_command(prompt: str | None) -> bool:
+        return str(prompt or "").strip().startswith("/")
 
     def _start_special_native_menu(self, session_name: str, session_meta: WeixinSessionMeta, prompt: str) -> str | None:
         command = str(prompt or "").strip().lower()
