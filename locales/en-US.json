@@ -181,6 +181,7 @@
   "bridge.task.status.unknown": "Unknown",
   "bridge.task.accepted": "Status: submitted\\nTask ID: {task_id}\\nSession: {session}\\nHandled by: {backend}\\nModel: {model}\\nCodex output will be forwarded with duplicate content suppressed\\nUse /task {task_id} or /last to inspect details",
   "bridge.task.running": "Status: running\\nTask ID: {task_id}\\nSession: {session}\\nHandled by: {backend}\\nModel: {model}\\nProject: {workdir}",
+  "bridge.task.duplicate_final_result": "Completed",
   "bridge.task.cancel.none": "There is no cancelable task for this sender.",
   "bridge.task.cancel.ok": "Canceled task: {task_id}\\nSession: {session}",
   "bridge.task.cancel.failed": "Failed to cancel task: {task_id}\\nReason: {error}",

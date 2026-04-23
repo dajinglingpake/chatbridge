@@ -290,29 +290,40 @@ def _taskkill(pid: int) -> None:
             return
         current_pid = os.getpid()
         children = proc.children(recursive=True)
+
+        def safe_wait(process: object, timeout: float) -> bool:
+            try:
+                process.wait(timeout=timeout)
+                return True
+            except (psutil.Error, TimeoutError, OSError):
+                return False
+
+        def safe_kill(process: object) -> None:
+            try:
+                process.kill()
+            except (psutil.Error, OSError):
+                pass
+
         for child in children:
             if child.pid == current_pid:
                 continue
             try:
                 child.terminate()
-            except psutil.Error:
+            except (psutil.Error, OSError):
                 pass
         try:
             proc.terminate()
-            proc.wait(timeout=5)
-        except (psutil.Error, TimeoutError):
-            try:
-                proc.kill()
-            except psutil.Error:
-                pass
+        except (psutil.Error, OSError):
+            pass
+        if not safe_wait(proc, 5):
+            safe_kill(proc)
+            safe_wait(proc, 2)
         for child in children:
-            try:
-                child.wait(timeout=2)
-            except psutil.Error:
-                try:
-                    child.kill()
-                except psutil.Error:
-                    pass
+            if child.pid == current_pid:
+                continue
+            if not safe_wait(child, 2):
+                safe_kill(child)
+                safe_wait(child, 1)
         return
 
     try:

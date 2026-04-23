@@ -228,6 +228,10 @@ class McpServiceTests(unittest.TestCase):
                     result = get_sender_snapshot("sender-a")
         self.assertTrue(result.ok)
         self.assertEqual("最近回复：已返回会话总览", result.data["target_sender"]["latest_sender_reply_summary"])
+        session = result.data["target_sender"]["sessions"][0]
+        self.assertEqual("task-old", session["latest_task_id"])
+        self.assertEqual("succeeded", session["latest_status"])
+        self.assertIn("最近状态 已完成", session["overview_line"])
         self.assertNotIn("处理中：列出所有会话", result.summary)
 
     def test_list_senders_returns_global_sender_summary(self) -> None:
