@@ -207,7 +207,6 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                 {
                     "sender-test": {
                         "current_session": "default",
-                        "manager_mode": False,
                         "sessions": {
                             "default": {"backend": "codex"},
                             "deep-dive": {"backend": "claude"},
@@ -239,8 +238,8 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         reply, handled = self.bridge._handle_control_command("sender-test", "/help")
         self.assertTrue(handled)
         self.assertIn("Available commands:", reply)
-        self.assertIn("\n\n/manage on", reply)
         self.assertIn("\n\nNormal messages:", reply)
+        self.assertNotIn("/manage", reply)
 
     def test_poll_once_ignores_expected_getupdates_timeout(self) -> None:
         bridge = TimeoutPollingBridge(BridgeConfig.load())
@@ -269,22 +268,25 @@ class WeixinBridgeCommandTests(unittest.TestCase):
 
         self.assertEqual("", bridge.state.last_error)
 
-    def test_new_sender_defaults_to_manager_mode(self) -> None:
+    def test_new_sender_defaults_to_default_session(self) -> None:
         binding = self.bridge._ensure_conversation("sender-new")
-        self.assertTrue(binding.manager_mode)
+        self.assertEqual("default", binding.current_session)
+        self.assertEqual("default", binding.last_regular_session)
+        self.assertIn("default", binding.sessions)
 
-    def test_manage_command_toggles_manager_mode(self) -> None:
+    def test_obsolete_manage_command_is_rejected_as_unknown(self) -> None:
         reply, handled = self.bridge._handle_control_command("sender-test", "/manage on")
         self.assertTrue(handled)
-        self.assertIn("Management assistant entry enabled", reply)
-        self.assertTrue(self.bridge.conversations["sender-test"].manager_mode)
+        self.assertEqual("Unknown command. Send /help to see supported commands.", reply)
+        self.assertEqual("default", self.bridge.conversations["sender-test"].current_session)
+        self.assertEqual("default", self.bridge.conversations["sender-test"].last_regular_session)
 
         reply, handled = self.bridge._handle_control_command("sender-test", "/manage off")
         self.assertTrue(handled)
-        self.assertIn("Direct session entry enabled", reply)
-        self.assertFalse(self.bridge.conversations["sender-test"].manager_mode)
+        self.assertEqual("Unknown command. Send /help to see supported commands.", reply)
+        self.assertEqual("default", self.bridge.conversations["sender-test"].current_session)
 
-    def test_handle_message_routes_new_sender_to_management_agent(self) -> None:
+    def test_handle_message_routes_new_sender_to_default_session(self) -> None:
         bridge = FeedbackBridge(BridgeConfig.load(), [])
         bridge._handle_message(
             "https://example.com",
@@ -296,15 +298,178 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                 "item_list": [{"type": 1, "text_item": {"text": "列出所有会话"}}],
             },
         )
-        self.assertEqual("wechat-manager", bridge.submit_payloads[-1]["source"])
-        self.assertTrue(str(bridge.submit_payloads[-1]["session_name"]).startswith("__manager__-"))
+        self.assertEqual("wechat", bridge.submit_payloads[-1]["source"])
+        self.assertEqual("default", bridge.submit_payloads[-1]["session_name"])
         self.assertEqual([], bridge.sent_texts)
         audits = [json.loads(line) for line in self.message_audit_log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
         self.assertEqual("task_submission", audits[-1]["route"])
-        self.assertTrue(audits[-1]["manager_mode"])
-        self.assertEqual("wechat-manager", audits[-1]["source"])
+        self.assertEqual("wechat", audits[-1]["source"])
 
-    def test_bridge_defaults_management_feedback_to_chinese_when_auto_and_env_unset(self) -> None:
+    def test_passthrough_model_command_starts_dynamic_native_menu(self) -> None:
+        bridge = FeedbackBridge(BridgeConfig.load(), [])
+        with patch.object(
+            bridge,
+            "_load_codex_model_catalog",
+            return_value=[
+                {
+                    "slug": "gpt-5.4",
+                    "display_name": "gpt-5.4",
+                    "description": "Latest flagship",
+                    "default_reasoning": "medium",
+                    "reasoning_levels": ["low", "medium", "high"],
+                },
+                {
+                    "slug": "gpt-5.4-mini",
+                    "display_name": "gpt-5.4-mini",
+                    "description": "Smaller model",
+                    "default_reasoning": "medium",
+                    "reasoning_levels": ["medium", "high"],
+                },
+            ],
+        ):
+            bridge._handle_message(
+                "https://example.com",
+                "token",
+                {
+                    "client_id": "model-start",
+                    "message_type": 1,
+                    "from_user_id": "sender-test",
+                    "context_token": "ctx",
+                    "item_list": [{"type": 1, "text_item": {"text": "//model"}}],
+                },
+            )
+        self.assertEqual([], bridge.submit_payloads)
+        self.assertIn("Select a model", bridge.sent_texts[-1])
+        self.assertIn("1. gpt-5.4 - Latest flagship", bridge.sent_texts[-1])
+        self.assertEqual("/model", bridge.conversations["sender-test"].sessions["default"].native_menu_command)
+        self.assertEqual("select_model", bridge.conversations["sender-test"].sessions["default"].native_menu_stage)
+
+    def test_native_model_menu_updates_session_config_and_submit_payload(self) -> None:
+        bridge = FeedbackBridge(BridgeConfig.load(), [])
+        catalog = [
+            {
+                "slug": "gpt-5.4",
+                "display_name": "gpt-5.4",
+                "description": "Latest flagship",
+                "default_reasoning": "medium",
+                "reasoning_levels": ["low", "medium", "high"],
+            },
+            {
+                "slug": "gpt-5.4-mini",
+                "display_name": "gpt-5.4-mini",
+                "description": "Smaller model",
+                "default_reasoning": "medium",
+                "reasoning_levels": ["medium", "high"],
+            },
+        ]
+        with patch.object(bridge, "_load_codex_model_catalog", return_value=catalog):
+            bridge._handle_message(
+                "https://example.com",
+                "token",
+                {
+                    "message_type": 1,
+                    "from_user_id": "sender-test",
+                    "context_token": "ctx",
+                    "item_list": [{"type": 1, "text_item": {"text": "//model"}}],
+                },
+            )
+        bridge._handle_message(
+            "https://example.com",
+            "token",
+            {
+                "client_id": "model-pick",
+                "message_type": 1,
+                "from_user_id": "sender-test",
+                "context_token": "ctx",
+                "item_list": [{"type": 1, "text_item": {"text": "2"}}],
+            },
+        )
+        self.assertIn("Select a reasoning effort", bridge.sent_texts[-1])
+        bridge._handle_message(
+            "https://example.com",
+            "token",
+            {
+                "client_id": "reasoning-pick",
+                "message_type": 1,
+                "from_user_id": "sender-test",
+                "context_token": "ctx",
+                "item_list": [{"type": 1, "text_item": {"text": "2"}}],
+            },
+        )
+        session_meta = bridge.conversations["sender-test"].sessions["default"]
+        self.assertEqual("gpt-5.4-mini", session_meta.model)
+        self.assertEqual("high", session_meta.reasoning_effort)
+        self.assertEqual("", session_meta.native_menu_command)
+        bridge._handle_message(
+            "https://example.com",
+            "token",
+            {
+                "client_id": "task-submit",
+                "message_type": 1,
+                "from_user_id": "sender-test",
+                "context_token": "ctx",
+                "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
+            },
+        )
+        self.assertEqual("gpt-5.4-mini", bridge.submit_payloads[-1]["model"])
+        self.assertEqual("high", bridge.submit_payloads[-1]["reasoning_effort"])
+
+    def test_native_permission_menu_updates_session_config_and_blocks_unrelated_text(self) -> None:
+        bridge = FeedbackBridge(BridgeConfig.load(), [])
+        bridge._handle_message(
+            "https://example.com",
+            "token",
+            {
+                "client_id": "perm-start",
+                "message_type": 1,
+                "from_user_id": "sender-test",
+                "context_token": "ctx",
+                "item_list": [{"type": 1, "text_item": {"text": "//permissions"}}],
+            },
+        )
+        self.assertEqual([], bridge.submit_payloads)
+        self.assertIn("Select a permission mode", bridge.sent_texts[-1])
+        bridge._handle_message(
+            "https://example.com",
+            "token",
+            {
+                "client_id": "perm-invalid",
+                "message_type": 1,
+                "from_user_id": "sender-test",
+                "context_token": "ctx",
+                "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
+            },
+        )
+        self.assertEqual([], bridge.submit_payloads)
+        self.assertIn("Invalid selection", bridge.sent_texts[-1])
+        bridge._handle_message(
+            "https://example.com",
+            "token",
+            {
+                "client_id": "perm-pick",
+                "message_type": 1,
+                "from_user_id": "sender-test",
+                "context_token": "ctx",
+                "item_list": [{"type": 1, "text_item": {"text": "1"}}],
+            },
+        )
+        session_meta = bridge.conversations["sender-test"].sessions["default"]
+        self.assertEqual("default", session_meta.permission_mode)
+        self.assertEqual("", session_meta.native_menu_command)
+        bridge._handle_message(
+            "https://example.com",
+            "token",
+            {
+                "client_id": "perm-submit",
+                "message_type": 1,
+                "from_user_id": "sender-test",
+                "context_token": "ctx",
+                "item_list": [{"type": 1, "text_item": {"text": "run a task"}}],
+            },
+        )
+        self.assertEqual("default", bridge.submit_payloads[-1]["permission_mode"])
+
+    def test_bridge_defaults_session_feedback_to_chinese_when_auto_and_env_unset(self) -> None:
         os.environ.pop("CHATBRIDGE_LANG", None)
         bridge = FeedbackBridge(BridgeConfig.load(), [])
         bridge._handle_message(
@@ -320,7 +485,16 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         self.assertEqual("zh-CN", bridge.localizer.language)
         self.assertEqual([], bridge.sent_texts)
 
-    def test_handle_message_falls_back_to_management_agent_for_unknown_prompt(self) -> None:
+    def test_notify_service_started_broadcasts_service_notice(self) -> None:
+        bridge = FeedbackBridge(BridgeConfig.load(), [])
+        with patch("weixin_hub_bridge.broadcast_weixin_notice_by_kind") as mocked_broadcast:
+            bridge._notify_service_started()
+        mocked_broadcast.assert_called_once()
+        self.assertEqual("service", mocked_broadcast.call_args.args[0])
+        self.assertEqual("Bridge 启动", mocked_broadcast.call_args.args[1])
+        self.assertIn("默认 Agent", mocked_broadcast.call_args.args[2])
+
+    def test_handle_message_routes_session_request_inside_current_session(self) -> None:
         bridge = FeedbackBridge(BridgeConfig.load(), [])
         bridge._handle_message(
             "https://example.com",
@@ -332,12 +506,11 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                 "item_list": [{"type": 1, "text_item": {"text": "帮我梳理一下最近这几个会话的差异并给建议"}}],
             },
         )
-        self.assertEqual("wechat-manager", bridge.submit_payloads[-1]["source"])
-        self.assertTrue(str(bridge.submit_payloads[-1]["session_name"]).startswith("__manager__-"))
+        self.assertEqual("wechat", bridge.submit_payloads[-1]["source"])
+        self.assertEqual("default", bridge.submit_payloads[-1]["session_name"])
 
-    def test_handle_message_routes_natural_language_session_switch_to_management_agent(self) -> None:
+    def test_handle_message_routes_session_style_prompt_without_switching_session(self) -> None:
         bridge = FeedbackBridge(BridgeConfig.load(), [])
-        bridge._handle_control_command("sender-test", "/manage on")
         bridge._handle_message(
             "https://example.com",
             "token",
@@ -348,8 +521,8 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                 "item_list": [{"type": 1, "text_item": {"text": "切换到 deep-dive 会话"}}],
             },
         )
-        self.assertEqual("wechat-manager", bridge.submit_payloads[-1]["source"])
-        self.assertEqual("__manager__-sender-test", bridge.submit_payloads[-1]["session_name"])
+        self.assertEqual("wechat", bridge.submit_payloads[-1]["source"])
+        self.assertEqual("default", bridge.submit_payloads[-1]["session_name"])
         self.assertEqual("default", bridge.conversations["sender-test"].current_session)
         self.assertEqual([], bridge.sent_texts)
 
@@ -362,22 +535,22 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                 "message_type": 1,
                 "from_user_id": "sender-test",
                 "context_token": "ctx",
-                "item_list": [{"type": 1, "text_item": {"text": "/manage off"}}],
+                "item_list": [{"type": 1, "text_item": {"text": "/obsolete"}}],
             },
         )
         self.assertEqual([], bridge.submit_payloads)
         audits = [json.loads(line) for line in self.message_audit_log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
         self.assertEqual("control_command", audits[-1]["route"])
-        self.assertEqual("/manage", audits[-1]["command"])
+        self.assertEqual("/obsolete", audits[-1]["command"])
 
-    def test_management_task_result_uses_plain_manager_reply(self) -> None:
+    def test_session_style_task_result_uses_standard_task_reply(self) -> None:
         bridge = FeedbackBridge(
             BridgeConfig.load(),
             [
                 {
                     "id": "task-feedback-001",
                     "sender_id": "sender-manager",
-                    "session_name": "__manager__-sender-manager",
+                    "session_name": "default",
                     "status": "succeeded",
                     "agent_id": "main",
                     "agent_name": "default",
@@ -400,9 +573,10 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         )
         self.assertEqual([], bridge.sent_texts)
         bridge.poll_pending()
-        self.assertEqual("找到 2 个会话：default, deep-dive", bridge.sent_texts[-1])
+        self.assertIn("Task completed", bridge.sent_texts[-1])
+        self.assertIn("Result:\n找到 2 个会话：default, deep-dive", bridge.sent_texts[-1])
 
-    def test_supported_management_prompt_still_uses_management_agent(self) -> None:
+    def test_supported_session_prompt_still_submits_from_current_session(self) -> None:
         bridge = FeedbackBridge(BridgeConfig.load(), [])
         bridge._handle_message(
             "https://example.com",
@@ -414,7 +588,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                 "item_list": [{"type": 1, "text_item": {"text": "列出所有会话"}}],
             },
         )
-        self.assertEqual("wechat-manager", bridge.submit_payloads[-1]["source"])
+        self.assertEqual("wechat", bridge.submit_payloads[-1]["source"])
         self.assertEqual([], bridge.sent_texts)
 
     def test_handle_message_sends_queued_and_running_feedback(self) -> None:
@@ -540,7 +714,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
             )
             self.assertEqual("正在生成修复方案", entries[-2]["result_preview"])
 
-    def test_management_task_sends_incremental_progress_feedback(self) -> None:
+    def test_session_style_task_sends_incremental_progress_feedback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             event_log_path = Path(temp_dir) / "weixin_bridge_events.jsonl"
             bridge = FeedbackBridge(
@@ -549,20 +723,20 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                     {
                         "id": "task-feedback-001",
                         "sender_id": "sender-manager",
-                        "session_name": "__manager__-sender-manager",
+                        "session_name": "default",
                         "status": "running",
                         "agent_id": "main",
                         "agent_name": "default",
                         "backend": "codex",
                         "prompt": "列出所有会话",
-                        "progress_text": "正在调用 get_management_snapshot",
+                        "progress_text": "正在调用 get_sender_snapshot",
                         "progress_seq": 1,
                         "created_at": "2026-04-20T12:00:00",
                     },
                     {
                         "id": "task-feedback-001",
                         "sender_id": "sender-manager",
-                        "session_name": "__manager__-sender-manager",
+                        "session_name": "default",
                         "status": "succeeded",
                         "agent_id": "main",
                         "agent_name": "default",
@@ -586,13 +760,15 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                 )
                 bridge.poll_pending()
                 bridge.poll_pending()
-            self.assertEqual(["找到 2 个会话：default, deep-dive"], bridge.sent_texts)
+            self.assertEqual(1, len(bridge.sent_texts))
+            self.assertIn("Task completed", bridge.sent_texts[0])
+            self.assertIn("Result:\n找到 2 个会话：default, deep-dive", bridge.sent_texts[0])
             entries = [json.loads(line) for line in event_log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
             self.assertEqual(
                 ["accepted", "running", "progress", "succeeded"],
                 [entry["event"] for entry in entries],
             )
-            self.assertEqual("正在调用 get_management_snapshot", entries[-2]["result_preview"])
+            self.assertEqual("正在调用 get_sender_snapshot", entries[-2]["result_preview"])
 
     def test_handle_message_failure_includes_retry_hint(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -826,7 +1002,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                         "sender_id": "sender-test",
                         "session_name": "default",
                         "session_id": "",
-                        "result_preview": "正在调用 get_management_snapshot",
+                        "result_preview": "正在调用 get_sender_snapshot",
                     },
                     ensure_ascii=False,
                 )
@@ -837,7 +1013,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                 reply, handled = bridge._handle_control_command("sender-test", "/events 1")
         self.assertTrue(handled)
         self.assertIn("进度更新", reply)
-        self.assertIn("正在调用 get_management_snapshot", reply)
+        self.assertIn("正在调用 get_sender_snapshot", reply)
 
     def test_events_command_hides_legacy_global_sender_entries(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -863,7 +1039,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                                 "event": "succeeded",
                                 "task_id": "task-a",
                                 "sender_id": "sender-test",
-                                "session_name": "__manager__-sender-test",
+                                "session_name": "default",
                                 "session_id": "sess-123",
                                 "result_preview": "会话总览：\n当前你: 当前会话 default\n\n发送方 2: 当前会话 deep-dive",
                             },

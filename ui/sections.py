@@ -554,7 +554,7 @@ def render_diagnostics_section(
                     "状态": item.runtime_status,
                     "队列": item.queue_size,
                 }
-                for item in model.agent_management
+                for item in model.agent_entries
             ]
             ui.table(
                 columns=[{"name": key, "label": key, "field": key} for key in ["ID", "名称", "后端", "启用", "状态", "队列"]],
@@ -567,8 +567,8 @@ def render_diagnostics_section(
                     ui.button("上一页", on_click=lambda: on_set_agent_page(model.agent_page - 1)).props("outline").set_enabled(model.agent_page > 1)
                     ui.button("下一页", on_click=lambda: on_set_agent_page(model.agent_page + 1)).props("outline").set_enabled(model.agent_page < model.agent_total_pages)
 
-            agent_lookup = {item.agent_id: item for item in model.agent_management}
-            agent_options = {"": "新建 Agent", **{item.agent_id: f"{item.name} ({item.agent_id})" for item in model.agent_management}}
+            agent_lookup = {item.agent_id: item for item in model.agent_entries}
+            agent_options = {"": "新建 Agent", **{item.agent_id: f"{item.name} ({item.agent_id})" for item in model.agent_entries}}
             selected_agent = ui.select(agent_options, value="", label="编辑 Agent").classes("w-full")
             agent_id = ui.input(label="Agent ID", placeholder="assistant-1")
             agent_name = ui.input(label="名称", placeholder="客服助手")

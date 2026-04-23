@@ -28,7 +28,7 @@ CHECKS = [
             "unittest",
             "-v",
             "tests.test_weixin_bridge_commands",
-            "tests.test_management_agent",
+            "tests.test_mcp_injection",
             "tests.test_mcp_service",
         ],
     ),
@@ -37,10 +37,10 @@ CHECKS = [
         command=[sys.executable, "tools/smoke_weixin_bridge.py"],
     ),
     AcceptanceCheck(
-        name="管理助手会话总览 smoke",
+        name="会话总览 smoke",
         command=[
             sys.executable,
-            "tools/smoke_management_agent.py",
+            "tools/smoke_sender_sessions.py",
             "--seed-history",
             "--prompt",
             "列出所有会话",
@@ -49,10 +49,10 @@ CHECKS = [
         ],
     ),
     AcceptanceCheck(
-        name="管理助手状态总览 smoke",
+        name="状态总览 smoke",
         command=[
             sys.executable,
-            "tools/smoke_management_agent.py",
+            "tools/smoke_sender_sessions.py",
             "--seed-history",
             "--prompt",
             "/status",
@@ -64,7 +64,7 @@ CHECKS = [
         name="异步事件回执 smoke",
         command=[
             sys.executable,
-            "tools/smoke_management_agent.py",
+            "tools/smoke_sender_sessions.py",
             "--seed-history",
             "--prompt",
             "/events 3",

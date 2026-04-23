@@ -89,6 +89,7 @@ class StateModelTests(unittest.TestCase):
         self.assertEqual({"focus"}, set(binding.sessions.keys()))
         self.assertEqual("claude", binding.sessions["focus"].backend)
         self.assertEqual("", binding.sessions["focus"].model)
+        self.assertEqual("focus", binding.last_regular_session)
 
     def test_weixin_conversation_binding_ensures_default_session(self) -> None:
         binding = WeixinConversationBinding.from_dict(
@@ -100,6 +101,7 @@ class StateModelTests(unittest.TestCase):
 
         self.assertEqual("default", binding.current_session)
         self.assertEqual("codex", binding.sessions["default"].backend)
+        self.assertEqual("default", binding.last_regular_session)
 
     def test_weixin_bridge_runtime_state_tracks_mutations(self) -> None:
         state = WeixinBridgeRuntimeState.create(

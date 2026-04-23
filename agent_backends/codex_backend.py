@@ -26,16 +26,22 @@ class CodexBackend(AgentBackend):
         final_prompt = build_final_prompt(agent, prompt)
         output_path = Path(tempfile.gettempdir()) / f"multi-codex-output-{uuid.uuid4().hex}.txt"
 
-        options = ["--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "--json", "-o", str(output_path)]
+        options = ["--skip-git-repo-check", "--json", "-o", str(output_path)]
         if agent.model:
             options.extend(["-m", agent.model])
-        if context.chatbridge_mcp is not None:
+        if context.reasoning_effort:
+            options.extend(["-c", f'model_reasoning_effort="{context.reasoning_effort}"'])
+        if context.permission_mode == "default":
+            options.extend(["-a", "never", "-s", "workspace-write"])
+        else:
+            options.append("--dangerously-bypass-approvals-and-sandbox")
+        if context.mcp_server is not None:
             options.extend(
                 [
                     "-c",
-                    f'mcp_servers.{context.chatbridge_mcp.name}.command="{context.chatbridge_mcp.command}"',
+                    f'mcp_servers.{context.mcp_server.name}.command="{context.mcp_server.command}"',
                     "-c",
-                    f"mcp_servers.{context.chatbridge_mcp.name}.args={json.dumps(context.chatbridge_mcp.args, ensure_ascii=False)}",
+                    f"mcp_servers.{context.mcp_server.name}.args={json.dumps(context.mcp_server.args, ensure_ascii=False)}",
                 ]
             )
         if existing_session:

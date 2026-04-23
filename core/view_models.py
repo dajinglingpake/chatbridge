@@ -71,7 +71,7 @@ class AgentOptionViewModel:
 
 
 @dataclass
-class AgentManagementViewModel:
+class AgentEntryViewModel:
     agent_id: str
     name: str
     workdir: str
@@ -143,7 +143,7 @@ class WebConsoleViewModel:
     session_conversation_lines: list[str]
     task_detail_lines: list[str]
     task_result_lines: list[str]
-    agent_management: list[AgentManagementViewModel]
+    agent_entries: list[AgentEntryViewModel]
     agent_page: int
     agent_total_count: int
     agent_total_pages: int
@@ -175,7 +175,7 @@ class IssuePanelViewModel:
 
 
 @dataclass
-class AccountManagementViewModel:
+class AccountSelectionViewModel:
     active_account_id: str
     options: list[AccountOptionViewModel]
 
@@ -272,7 +272,7 @@ def build_issue_panel_view_model(
     )
 
 
-def build_account_management_view_model(t: Translator, config: BridgeConfig | None = None) -> AccountManagementViewModel:
+def build_account_selection_view_model(t: Translator, config: BridgeConfig | None = None) -> AccountSelectionViewModel:
     config = config or BridgeConfig.load()
     built_options, active_index = build_account_options(config, t)
     options: list[AccountOptionViewModel] = []
@@ -287,7 +287,7 @@ def build_account_management_view_model(t: Translator, config: BridgeConfig | No
                 selected=index == active_index,
             )
         )
-    return AccountManagementViewModel(active_account_id=config.active_account_id, options=options)
+    return AccountSelectionViewModel(active_account_id=config.active_account_id, options=options)
 
 
 def build_diagnostics_view_model(checks: dict[str, CheckSnapshot], diag_at: str, t: Translator) -> DiagnosticsViewModel:
@@ -395,18 +395,18 @@ def build_web_console_view_model_from_dashboard(
         session_total_count = len(all_session_rows)
         session_rows, session_page, session_total_pages = paginate_items(all_session_rows, session_page, 10)
     bridge_config = dashboard.bridge_config
-    account_management = build_account_management_view_model(t, bridge_config)
+    account_selection = build_account_selection_view_model(t, bridge_config)
 
     agent_options: list[AgentOptionViewModel] = []
-    agent_management: list[AgentManagementViewModel] = []
+    agent_entries: list[AgentEntryViewModel] = []
     for agent in hub_state.agents:
         agent_id = agent.id
         name = agent.name or agent_id
         runtime = agent.runtime
         if agent_id:
             agent_options.append(AgentOptionViewModel(agent_id=agent_id, label=f"{name} ({agent_id})"))
-            agent_management.append(
-                AgentManagementViewModel(
+            agent_entries.append(
+                AgentEntryViewModel(
                     agent_id=agent_id,
                     name=name,
                     workdir=agent.workdir,
@@ -421,9 +421,9 @@ def build_web_console_view_model_from_dashboard(
             )
     if not agent_options:
         agent_options.append(AgentOptionViewModel(agent_id="main", label="默认会话 (main)"))
-    all_agent_management = agent_management
-    agent_total_count = len(all_agent_management)
-    agent_management, agent_page, agent_total_pages = paginate_items(all_agent_management, agent_page, 10)
+    all_agent_entries = agent_entries
+    agent_total_count = len(all_agent_entries)
+    agent_entries, agent_page, agent_total_pages = paginate_items(all_agent_entries, agent_page, 10)
 
     external_agent_processes: list[ExternalAgentProcessViewModel] = []
     for process in dashboard.external_agent_processes or hub_state.external_agent_processes:
@@ -585,7 +585,7 @@ def build_web_console_view_model_from_dashboard(
             t=t,
         ),
         log_dir=dashboard.snapshot.log_dir,
-        active_account_id=account_management.active_account_id,
+        active_account_id=account_selection.active_account_id,
         bridge_agent_id=bridge_config.backend_id,
         service_notice_enabled=bridge_config.service_notice_enabled,
         config_notice_enabled=bridge_config.config_notice_enabled,
@@ -617,13 +617,13 @@ def build_web_console_view_model_from_dashboard(
         session_conversation_lines=session_detail.conversation_text.splitlines(),
         task_detail_lines=task_detail_lines,
         task_result_lines=task_result_lines,
-        agent_management=agent_management,
+        agent_entries=agent_entries,
         agent_page=agent_page,
         agent_total_count=agent_total_count,
         agent_total_pages=agent_total_pages,
         external_agent_processes=external_agent_processes,
         weixin_conversations=weixin_conversations,
-        account_options=account_management.options,
+        account_options=account_selection.options,
         agent_options=agent_options,
         checks_page=checks_page,
         checks_total_count=checks_total_count,

@@ -156,14 +156,12 @@ def _print_manual_checklist(*, sender_id: str = "") -> None:
     print(f"1. 在微信里发送“列出所有会话” {target_hint}")
     print("   期望: 先收到“我先帮你处理这件事”，再收到“还在处理”，最后收到会话总览。")
     print("2. 在微信里发送“切换到 deep-dive 会话”")
-    print("   期望: 管理助手完成切换后，再发“/status”时当前会话变成 deep-dive。")
+    print("   期望: 切换完成后，再发“/status”时当前会话变成 deep-dive。")
     print("3. 在微信里发送“/events 3”")
     print("   期望: 能看到已接收 / 处理中 / 已完成三段事件，且详情不是裸 backend。")
-    print("4. 在微信里发送“/manage off”，再发一条普通业务消息。")
-    print("   期望: 普通消息直接进入当前会话，而不是先走管理助手。")
-    print("5. 再发送“/manage on”，恢复默认入口。")
-    print("   期望: 后续普通消息重新先进入管理助手。")
-    print("6. 如果要验证主动通知，运行本脚本时加 --send-notice。")
+    print("4. 在微信里直接发送一条普通业务消息。")
+    print("   期望: 消息直接进入当前会话，不存在额外模式切换。")
+    print("5. 如果要验证主动通知，运行本脚本时加 --send-notice。")
 
 
 def _send_notice() -> NoticeResult:

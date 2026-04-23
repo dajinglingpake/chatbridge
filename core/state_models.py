@@ -135,9 +135,10 @@ class HubTask:
     session_name: str = ""
     workdir: str = ""
     model: str = ""
+    reasoning_effort: str = ""
+    permission_mode: str = ""
     bridge_conversations_path: str = ""
     bridge_event_log_path: str = ""
-    manager_state_path: str = ""
     progress_text: str = ""
     progress_at: str = ""
     progress_seq: int = 0
@@ -169,9 +170,10 @@ class HubTask:
             session_name=str(raw.get("session_name") or "").strip(),
             workdir=str(raw.get("workdir") or "").strip(),
             model=str(raw.get("model") or "").strip(),
+            reasoning_effort=str(raw.get("reasoning_effort") or "").strip(),
+            permission_mode=str(raw.get("permission_mode") or "").strip(),
             bridge_conversations_path=str(raw.get("bridge_conversations_path") or "").strip(),
             bridge_event_log_path=str(raw.get("bridge_event_log_path") or "").strip(),
-            manager_state_path=str(raw.get("manager_state_path") or "").strip(),
             progress_text=str(raw.get("progress_text") or ""),
             progress_at=str(raw.get("progress_at") or "").strip(),
             progress_seq=int(raw.get("progress_seq") or 0),
@@ -267,6 +269,12 @@ class WeixinSessionMeta:
     updated_at: str
     workdir: str = ""
     model: str = ""
+    reasoning_effort: str = ""
+    permission_mode: str = ""
+    native_menu_command: str = ""
+    native_menu_stage: str = ""
+    native_menu_options: list[str] = field(default_factory=list)
+    native_menu_context: str = ""
 
     @classmethod
     def from_dict(
@@ -289,6 +297,12 @@ class WeixinSessionMeta:
             updated_at=str(raw.get("updated_at") or now),
             workdir=str(raw.get("workdir") or "").strip(),
             model=str(raw.get("model") or "").strip(),
+            reasoning_effort=str(raw.get("reasoning_effort") or "").strip(),
+            permission_mode=str(raw.get("permission_mode") or "").strip(),
+            native_menu_command=str(raw.get("native_menu_command") or "").strip(),
+            native_menu_stage=str(raw.get("native_menu_stage") or "").strip(),
+            native_menu_options=[str(item).strip() for item in (raw.get("native_menu_options") or []) if str(item).strip()],
+            native_menu_context=str(raw.get("native_menu_context") or "").strip(),
         )
 
     def touch(
@@ -297,6 +311,8 @@ class WeixinSessionMeta:
         backend: str | None = None,
         workdir: str | None = None,
         model: str | None = None,
+        reasoning_effort: str | None = None,
+        permission_mode: str | None = None,
     ) -> None:
         if backend is not None:
             self.backend = backend
@@ -304,7 +320,30 @@ class WeixinSessionMeta:
             self.workdir = workdir
         if model is not None:
             self.model = model
+        if reasoning_effort is not None:
+            self.reasoning_effort = reasoning_effort
+        if permission_mode is not None:
+            self.permission_mode = permission_mode
         self.updated_at = now
+
+    def set_native_menu(
+        self,
+        *,
+        command: str,
+        stage: str,
+        options: list[str],
+        context: str = "",
+    ) -> None:
+        self.native_menu_command = command.strip()
+        self.native_menu_stage = stage.strip()
+        self.native_menu_options = [str(item).strip() for item in options if str(item).strip()]
+        self.native_menu_context = context.strip()
+
+    def clear_native_menu(self) -> None:
+        self.native_menu_command = ""
+        self.native_menu_stage = ""
+        self.native_menu_options = []
+        self.native_menu_context = ""
 
     def to_dict(self) -> JsonObject:
         return asdict(self)
@@ -313,14 +352,14 @@ class WeixinSessionMeta:
 @dataclass
 class WeixinConversationBinding:
     current_session: str = "default"
-    manager_mode: bool = True
+    last_regular_session: str = "default"
     sessions: dict[str, WeixinSessionMeta] = field(default_factory=dict)
 
     @classmethod
     def create(cls, *, default_backend: str, now: str) -> "WeixinConversationBinding":
         return cls(
             current_session="default",
-            manager_mode=True,
+            last_regular_session="default",
             sessions={
                 "default": WeixinSessionMeta(
                     backend=default_backend,
@@ -367,9 +406,12 @@ class WeixinConversationBinding:
                 created_at=now,
                 updated_at=now,
             )
+        last_regular_session = str(raw.get("last_regular_session") or "").strip()
+        if not last_regular_session or last_regular_session not in sessions:
+            last_regular_session = current_session
         return cls(
             current_session=current_session,
-            manager_mode=bool(raw.get("manager_mode", True)),
+            last_regular_session=last_regular_session,
             sessions=sessions,
         )
 
@@ -391,6 +433,7 @@ class WeixinConversationBinding:
             )
             self.sessions[cleaned_name] = session
         self.current_session = cleaned_name
+        self.last_regular_session = cleaned_name
         return session
 
     def get_current_session(
@@ -411,7 +454,7 @@ class WeixinConversationBinding:
     def to_dict(self) -> JsonObject:
         return {
             "current_session": self.current_session,
-            "manager_mode": self.manager_mode,
+            "last_regular_session": self.last_regular_session,
             "sessions": {name: meta.to_dict() for name, meta in self.sessions.items()},
         }
 

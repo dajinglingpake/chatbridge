@@ -72,7 +72,6 @@ def _prepare_sender_state(conversation_path: Path, sender_id: str) -> None:
     payload = _load_json_object(conversation_path)
     payload[sender_id] = {
         "current_session": "default",
-        "manager_mode": True,
         "sessions": {
             "default": {"backend": "codex"},
         },
@@ -106,11 +105,9 @@ def _wait_for_pending_tasks(bridge: CaptureBridge, *, timeout_seconds: int) -> b
 
 def _seed_history(bridge: CaptureBridge, *, sender_id: str, context_token: str, timeout_seconds: int) -> bool:
     commands = [
-        "/manage off",
         "帮我确认默认会话已经建立历史，简单回复一句即可。",
         "/new deep-dive",
         "帮我确认 deep-dive 会话也有历史，简单回复一句即可。",
-        "/manage on",
     ]
     for index, text in enumerate(commands, start=1):
         bridge._handle_message(
@@ -203,20 +200,20 @@ def run_smoke(*, prompt: str, sender_id: str, context_token: str, timeout_second
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Developer smoke test for the ChatBridge management agent.")
+    parser = argparse.ArgumentParser(description="Developer smoke test for the ChatBridge sender-session path.")
     parser.add_argument("--prompt", default=DEFAULT_PROMPT, help="Synthetic incoming WeChat message text.")
     parser.add_argument("--sender-id", default="", help="Synthetic sender id. Defaults to a unique ephemeral sender for each run.")
     parser.add_argument("--context-token", default="", help="Synthetic context token. Defaults to a unique ephemeral token for each run.")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS, help="Wait timeout in seconds.")
-    parser.add_argument("--seed-history", action="store_true", help="Seed two real session replies before asking the management agent.")
+    parser.add_argument("--seed-history", action="store_true", help="Seed two real session replies before asking the sender-session path.")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     run_suffix = str(int(time.time() * 1000))
-    sender_id = str(args.sender_id).strip() or f"manager-smoke-{run_suffix}@local"
-    context_token = str(args.context_token).strip() or f"manager-smoke-context-{run_suffix}"
+    sender_id = str(args.sender_id).strip() or f"sender-smoke-{run_suffix}@local"
+    context_token = str(args.context_token).strip() or f"sender-smoke-context-{run_suffix}"
     return run_smoke(
         prompt=str(args.prompt),
         sender_id=sender_id,

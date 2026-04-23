@@ -25,14 +25,14 @@ class ClaudeBackend(AgentBackend):
         if existing_session:
             argv.extend(["--resume", existing_session])
         mcp_config_path = None
-        if context.chatbridge_mcp is not None:
+        if context.mcp_server is not None:
             config_file = tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False)
             json.dump(
                 {
                     "mcpServers": {
-                        context.chatbridge_mcp.name: {
-                            "command": context.chatbridge_mcp.command,
-                            "args": context.chatbridge_mcp.args,
+                        context.mcp_server.name: {
+                            "command": context.mcp_server.command,
+                            "args": context.mcp_server.args,
                         }
                     }
                 },

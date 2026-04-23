@@ -12,7 +12,6 @@ def _apply_path_overrides_from_argv(argv: list[str]) -> None:
     path_flags = {
         "--bridge-conversations-path": "CHATBRIDGE_BRIDGE_CONVERSATIONS_PATH",
         "--bridge-event-log-path": "CHATBRIDGE_BRIDGE_EVENT_LOG_PATH",
-        "--manager-state-path": "CHATBRIDGE_MANAGER_STATE_PATH",
     }
     index = 0
     while index < len(argv):
@@ -35,24 +34,21 @@ if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
 from core.mcp_service import (
-    ManagerActionResult,
+    ToolActionResult,
     delegate_task,
-    enter_control_mode,
-    exit_control_mode,
     get_command_catalog,
-    get_control_mode_state,
-    get_management_snapshot,
-    get_manager_guide,
+    get_sender_snapshot,
+    get_tool_guide,
     get_task,
-    list_sender_conversations,
+    list_senders,
     list_agents,
-    run_sender_command,
+    execute_sender_command,
     start_agent_session,
 )
 from core.state_models import JsonObject
 
 
-SERVER_NAME = "chatbridge-manager"
+SERVER_NAME = "operations"
 SERVER_VERSION = "0.1.0"
 LATEST_PROTOCOL_VERSION = "2025-11-25"
 SUPPORTED_PROTOCOL_VERSIONS = {
@@ -61,7 +57,6 @@ SUPPORTED_PROTOCOL_VERSIONS = {
     "2025-06-18",
     "2025-11-25",
 }
-TRUSTED_INTERNAL_MANAGER = "--trusted-internal-manager" in sys.argv
 
 
 @dataclass(frozen=True)
@@ -69,7 +64,7 @@ class ToolSpec:
     name: str
     description: str
     input_schema: JsonObject
-    handler: Callable[[JsonObject], ManagerActionResult]
+    handler: Callable[[JsonObject], ToolActionResult]
 
     def to_mcp_dict(self) -> JsonObject:
         return {
@@ -79,7 +74,7 @@ class ToolSpec:
         }
 
 
-def _tool_result_text(result: ManagerActionResult) -> str:
+def _tool_result_text(result: ToolActionResult) -> str:
     return result.summary
 
 
@@ -96,61 +91,36 @@ def _args_as_dict(raw: object) -> JsonObject:
 
 
 def _server_instructions() -> str:
-    if TRUSTED_INTERNAL_MANAGER:
-        return "This server exposes ChatBridge management tools. Trusted internal manager mode is enabled for the embedded ChatBridge manager agent."
-    return "This server exposes ChatBridge management tools. Use enter_control_mode before mutating sender state, starting new agent sessions, or delegating tasks."
+    return "This server exposes the built-in bridge tools with direct mutation access for a private deployment."
 
 
 def _build_tool_specs() -> dict[str, ToolSpec]:
-    def no_args(handler: Callable[[], ManagerActionResult]) -> Callable[[JsonObject], ManagerActionResult]:
+    def no_args(handler: Callable[[], ToolActionResult]) -> Callable[[JsonObject], ToolActionResult]:
         return lambda _args: handler()
 
     return {
-        "get_manager_guide": ToolSpec(
-            name="get_manager_guide",
-            description="返回 ChatBridge 管理助手的工作规则，包括进入/退出管理模式、控制平面隔离原则以及推荐操作流程。",
+        "get_tool_guide": ToolSpec(
+            name="get_tool_guide",
+            description="返回内置桥接工具的工作规则，包括当前会话语义以及推荐操作流程。",
             input_schema={"type": "object", "properties": {}},
-            handler=no_args(get_manager_guide),
-        ),
-        "get_control_mode_state": ToolSpec(
-            name="get_control_mode_state",
-            description="查看当前是否已进入管理模式。只有进入管理模式后，才能执行目标发送方命令、启动新 Agent 会话或委派任务。",
-            input_schema={"type": "object", "properties": {}},
-            handler=no_args(get_control_mode_state),
-        ),
-        "enter_control_mode": ToolSpec(
-            name="enter_control_mode",
-            description="显式进入 ChatBridge 管理模式。进入后才允许执行会修改状态或触发其他 Agent 的操作。",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "note": {"type": "string", "description": "本次进入管理模式的备注，可选。"},
-                },
-            },
-            handler=lambda args: enter_control_mode(str(args.get("note") or "")),
-        ),
-        "exit_control_mode": ToolSpec(
-            name="exit_control_mode",
-            description="显式退出 ChatBridge 管理模式。退出后只保留只读查询能力。",
-            input_schema={"type": "object", "properties": {}},
-            handler=no_args(exit_control_mode),
+            handler=no_args(get_tool_guide),
         ),
         "get_command_catalog": ToolSpec(
             name="get_command_catalog",
-            description="返回当前桥接层命令清单及其说明，便于管理助手教用户使用或在需要时退回桥命令代理。",
+            description="返回当前桥接层命令清单及其说明，便于解释工具用法或在需要时退回桥命令代理。",
             input_schema={"type": "object", "properties": {}},
             handler=no_args(get_command_catalog),
         ),
-        "get_management_snapshot": ToolSpec(
-            name="get_management_snapshot",
-            description="获取 ChatBridge 总览，或按 target_sender_id 获取某个发送方的当前会话、模型、工程目录和历史摘要。该工具是只读的。",
+        "get_sender_snapshot": ToolSpec(
+            name="get_sender_snapshot",
+            description="获取某个发送方的当前会话、模型、工程目录和历史摘要；为空时返回全局总览。该工具是只读的。",
             input_schema={
                 "type": "object",
                 "properties": {
                     "target_sender_id": {"type": "string", "description": "目标发送方 ID；为空时返回全局总览。"},
                 },
             },
-            handler=lambda args: get_management_snapshot(str(args.get("target_sender_id") or "")),
+            handler=lambda args: get_sender_snapshot(str(args.get("target_sender_id") or "")),
         ),
         "list_agents": ToolSpec(
             name="list_agents",
@@ -158,8 +128,8 @@ def _build_tool_specs() -> dict[str, ToolSpec]:
             input_schema={"type": "object", "properties": {}},
             handler=no_args(list_agents),
         ),
-        "list_sender_conversations": ToolSpec(
-            name="list_sender_conversations",
+        "list_senders": ToolSpec(
+            name="list_senders",
             description="列出全局所有发送方及其会话摘要。适合处理“列出所有会话/全部会话”这类全局问题，而不是只看当前发送方。",
             input_schema={
                 "type": "object",
@@ -167,7 +137,7 @@ def _build_tool_specs() -> dict[str, ToolSpec]:
                     "focus_sender_id": {"type": "string", "description": "可选，用于把某个发送方标记为“当前你”，便于自然语言总结。"},
                 },
             },
-            handler=lambda args: list_sender_conversations(focus_sender_id=str(args.get("focus_sender_id") or "")),
+            handler=lambda args: list_senders(focus_sender_id=str(args.get("focus_sender_id") or "")),
         ),
         "get_task": ToolSpec(
             name="get_task",
@@ -181,9 +151,9 @@ def _build_tool_specs() -> dict[str, ToolSpec]:
             },
             handler=lambda args: get_task(str(args.get("task_id") or "")),
         ),
-        "run_sender_command": ToolSpec(
-            name="run_sender_command",
-            description="对目标发送方执行桥接层 slash 命令。该工具要求先进入管理模式，并且显式提供 target_sender_id，不会隐式切换管理助手自己的上下文。",
+        "execute_sender_command": ToolSpec(
+            name="execute_sender_command",
+            description="对目标发送方执行桥接层 slash 命令，必须显式提供 target_sender_id。",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -192,15 +162,14 @@ def _build_tool_specs() -> dict[str, ToolSpec]:
                 },
                 "required": ["target_sender_id", "command"],
             },
-            handler=lambda args: run_sender_command(
+            handler=lambda args: execute_sender_command(
                 str(args.get("target_sender_id") or ""),
                 str(args.get("command") or ""),
-                require_control_mode=not TRUSTED_INTERNAL_MANAGER,
             ),
         ),
         "start_agent_session": ToolSpec(
             name="start_agent_session",
-            description="为指定 Agent 显式启动一个全新的会话实例，并发送首条指令。该工具要求先进入管理模式；如果 session_name 已存在，会拒绝执行。",
+            description="为指定 Agent 显式启动一个全新的会话实例，并发送首条指令。如果 session_name 已存在，会拒绝执行。",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -222,12 +191,11 @@ def _build_tool_specs() -> dict[str, ToolSpec]:
                 target_sender_id=str(args.get("target_sender_id") or ""),
                 workdir=str(args.get("workdir") or ""),
                 model=str(args.get("model") or ""),
-                require_control_mode=not TRUSTED_INTERNAL_MANAGER,
             ),
         ),
         "delegate_task": ToolSpec(
             name="delegate_task",
-            description="向指定 Agent 委派一条新指令。该工具要求先进入管理模式，不会隐式改变管理助手自己的控制上下文。",
+            description="向指定 Agent 委派一条新指令，不会隐式改变当前发送方会话。",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -249,7 +217,6 @@ def _build_tool_specs() -> dict[str, ToolSpec]:
                 target_sender_id=str(args.get("target_sender_id") or ""),
                 workdir=str(args.get("workdir") or ""),
                 model=str(args.get("model") or ""),
-                require_control_mode=not TRUSTED_INTERNAL_MANAGER,
             ),
         ),
     }
