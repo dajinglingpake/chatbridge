@@ -12,6 +12,7 @@ from bridge_config import BridgeConfig
 from core.accounts import AccountFilePayload, DEFAULT_ILINK_BASE_URL, load_account_context_tokens, load_account_file_payload
 from core.http_json import request_json
 from core.json_store import load_json
+from core.weixin_message_format import format_weixin_reply
 from runtime_stack import BRIDGE_CONVERSATIONS_PATH
 
 
@@ -91,7 +92,7 @@ def broadcast_weixin_notice_by_kind(kind: str, title: str, detail: str, config: 
 
 def _build_notice_text(title: str, detail: str) -> str:
     body = (detail or "").strip() or "-"
-    return f"[ChatBridge 系统通知]\n操作: {title}\n结果: {body}"
+    return format_weixin_reply(f"{title}\n{body}", status="notice")
 
 
 def _is_real_weixin_sender(sender_id: str) -> bool:

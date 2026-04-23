@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from bridge_config import BridgeConfig
 from core.state_models import IpcResponseEnvelope
+from core.weixin_message_format import format_weixin_reply, prefix_weixin_output
 from weixin_hub_bridge import WeixinBridge
 
 
@@ -175,6 +176,15 @@ def _fake_agent(
 
 
 class WeixinBridgeCommandTests(unittest.TestCase):
+    def test_format_bridge_reply_adds_compact_header(self) -> None:
+        reply = format_weixin_reply("hello")
+        self.assertTrue(reply.startswith("reply · - · "))
+        self.assertIn("\n\nhello", reply)
+
+    def test_format_bridge_reply_does_not_wrap_existing_header(self) -> None:
+        output = prefix_weixin_output("running", "3s", "hello", at="2026-04-23T18:09:46")
+        self.assertEqual(output, format_weixin_reply(output))
+
     def setUp(self) -> None:
         self._tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self._tempdir.cleanup)
@@ -762,8 +772,8 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         )
         self.assertEqual([], bridge.sent_texts)
         bridge.poll_pending()
-        self.assertIn("Task completed", bridge.sent_texts[-1])
-        self.assertIn("Result:\n找到 2 个会话：default, deep-dive", bridge.sent_texts[-1])
+        self.assertTrue(bridge.sent_texts[-1].startswith("done · "))
+        self.assertIn("\n\n找到 2 个会话：default, deep-dive", bridge.sent_texts[-1])
 
     def test_supported_session_prompt_still_submits_from_current_session(self) -> None:
         bridge = FeedbackBridge(BridgeConfig.load(), [])
@@ -826,15 +836,14 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                 bridge.poll_pending()
                 bridge.poll_pending()
             self.assertEqual(1, len(bridge.sent_texts))
-            self.assertIn("Task completed", bridge.sent_texts[0])
-            self.assertIn("Session ID: -", bridge.sent_texts[0])
-            self.assertIn("Result:\nworld", bridge.sent_texts[0])
+            self.assertTrue(bridge.sent_texts[0].startswith("done · "))
+            self.assertIn("\n\nworld", bridge.sent_texts[0])
             entries = [json.loads(line) for line in event_log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
             self.assertEqual(["accepted", "running", "succeeded"], [entry["event"] for entry in entries])
             self.assertEqual("task-feedback-001", entries[-1]["task_id"])
             self.assertEqual("default", entries[-1]["session_name"])
 
-    def test_handle_message_sends_incremental_progress_feedback(self) -> None:
+    def test_handle_message_sends_progress_and_final_when_content_differs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             event_log_path = Path(temp_dir) / "weixin_bridge_events.jsonl"
             bridge = FeedbackBridge(
@@ -894,14 +903,73 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                 bridge.poll_pending()
                 bridge.poll_pending()
                 bridge.poll_pending()
-            self.assertIn("正在生成修复方案", bridge.sent_texts[0])
-            self.assertIn("Task completed", bridge.sent_texts[1])
+            self.assertTrue(bridge.sent_texts[0].startswith("running · "))
+            self.assertIn("\n\n正在分析仓库结构", bridge.sent_texts[0])
+            self.assertTrue(bridge.sent_texts[1].startswith("running · "))
+            self.assertIn("\n\n正在生成修复方案", bridge.sent_texts[1])
+            self.assertTrue(bridge.sent_texts[2].startswith("done · "))
+            self.assertIn("\n\nworld", bridge.sent_texts[2])
             entries = [json.loads(line) for line in event_log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
             self.assertEqual(
                 ["accepted", "running", "progress", "progress", "succeeded"],
                 [entry["event"] for entry in entries],
             )
             self.assertEqual("正在生成修复方案", entries[-2]["result_preview"])
+
+    def test_handle_message_suppresses_duplicate_final_result_after_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            event_log_path = Path(temp_dir) / "weixin_bridge_events.jsonl"
+            bridge = FeedbackBridge(
+                BridgeConfig.load(),
+                [
+                    {
+                        "id": "task-feedback-001",
+                        "sender_id": "sender-test",
+                        "session_name": "default",
+                        "status": "running",
+                        "agent_id": "main",
+                        "agent_name": "default",
+                        "backend": "codex",
+                        "prompt": "hello",
+                        "progress_text": "最终回答",
+                        "progress_seq": 1,
+                        "created_at": "2026-04-20T12:00:00",
+                    },
+                    {
+                        "id": "task-feedback-001",
+                        "sender_id": "sender-test",
+                        "session_name": "default",
+                        "status": "succeeded",
+                        "agent_id": "main",
+                        "agent_name": "default",
+                        "backend": "codex",
+                        "prompt": "hello",
+                        "output": "最终回答",
+                        "created_at": "2026-04-20T12:00:00",
+                    },
+                ],
+            )
+            with patch("weixin_hub_bridge.EVENT_LOG_PATH", event_log_path):
+                bridge._handle_message(
+                    "https://example.com",
+                    "token",
+                    {
+                        "message_type": 1,
+                        "from_user_id": "sender-test",
+                        "context_token": "ctx",
+                        "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
+                    },
+                )
+                bridge.poll_pending()
+                bridge.poll_pending()
+            self.assertEqual(1, len(bridge.sent_texts))
+            self.assertTrue(bridge.sent_texts[0].startswith("running · "))
+            self.assertIn("\n\n最终回答", bridge.sent_texts[0])
+            entries = [json.loads(line) for line in event_log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            self.assertEqual(
+                ["accepted", "running", "progress", "succeeded"],
+                [entry["event"] for entry in entries],
+            )
 
     def test_session_style_task_sends_incremental_progress_feedback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -949,9 +1017,11 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                 )
                 bridge.poll_pending()
                 bridge.poll_pending()
-            self.assertEqual(1, len(bridge.sent_texts))
-            self.assertIn("Task completed", bridge.sent_texts[0])
-            self.assertIn("Result:\n找到 2 个会话：default, deep-dive", bridge.sent_texts[0])
+            self.assertEqual(2, len(bridge.sent_texts))
+            self.assertTrue(bridge.sent_texts[0].startswith("running · "))
+            self.assertIn("\n\n正在调用 get_sender_snapshot", bridge.sent_texts[0])
+            self.assertTrue(bridge.sent_texts[1].startswith("done · "))
+            self.assertIn("\n\n找到 2 个会话：default, deep-dive", bridge.sent_texts[1])
             entries = [json.loads(line) for line in event_log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
             self.assertEqual(
                 ["accepted", "running", "progress", "succeeded"],
@@ -1076,8 +1146,8 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         self.assertTrue(handled)
         self.assertIn("deep-dive", reply)
         bridge.poll_pending()
-        self.assertIn("Session: default", bridge.sent_texts[-1])
-        self.assertIn("Session ID: sess-001", bridge.sent_texts[-1])
+        self.assertTrue(bridge.sent_texts[-1].startswith("done · "))
+        self.assertIn("\n\nworld", bridge.sent_texts[-1])
 
     def test_events_command_returns_recent_async_events(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
