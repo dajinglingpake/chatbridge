@@ -76,6 +76,8 @@ def broadcast_weixin_notice_by_kind(kind: str, title: str, detail: str, config: 
             continue
         try:
             response = _send_text(base_url, token, recipient.sender_id, recipient.context_token, message)
+            if isinstance(response, dict) and response.get("ret") not in (None, 0):
+                raise RuntimeError(f"sendmessage returned ret={response.get('ret')}: {response}")
             print(
                 f"[notifier] sent recipient={recipient.sender_id} ret={response.get('ret')} errcode={response.get('errcode')} errmsg={response.get('errmsg')}",
                 flush=True,

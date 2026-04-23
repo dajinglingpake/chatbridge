@@ -44,6 +44,7 @@ from core.mcp_service import (
     list_agents,
     execute_sender_command,
     restart_services,
+    send_weixin_media,
     start_agent_session,
 )
 from core.state_models import JsonObject
@@ -178,6 +179,22 @@ def _build_tool_specs() -> dict[str, ToolSpec]:
                 },
             },
             handler=lambda args: restart_services(str(args.get("scope") or "all")),
+        ),
+        "send_weixin_media": ToolSpec(
+            name="send_weixin_media",
+            description="发送项目内允许的图片或文件到指定微信发送方，复用 /sendfile 的安全校验和 iLink 媒体上传链路。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "target_sender_id": {"type": "string", "description": "目标微信发送方 ID。"},
+                    "path": {"type": "string", "description": "项目内文件路径；允许 .runtime/exports 下的导出文件。"},
+                },
+                "required": ["target_sender_id", "path"],
+            },
+            handler=lambda args: send_weixin_media(
+                str(args.get("target_sender_id") or ""),
+                str(args.get("path") or ""),
+            ),
         ),
         "start_agent_session": ToolSpec(
             name="start_agent_session",

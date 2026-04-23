@@ -1,3 +1,4 @@
 psutil
 qrcode
 nicegui
+cryptography

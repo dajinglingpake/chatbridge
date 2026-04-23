@@ -33,6 +33,7 @@ class ChatBridgeMcpServerTests(unittest.TestCase):
         self.assertIn("start_agent_session", tool_names)
         self.assertIn("list_senders", tool_names)
         self.assertIn("restart_services", tool_names)
+        self.assertIn("send_weixin_media", tool_names)
         self.assertNotIn("enter_control_mode", tool_names)
         self.assertNotIn("exit_control_mode", tool_names)
 
@@ -79,3 +80,24 @@ class ChatBridgeMcpServerTests(unittest.TestCase):
         mocked_restart.assert_called_once_with("bridge")
         self.assertFalse(response["result"]["isError"])
         self.assertEqual("已安排重启", response["result"]["content"][0]["text"])
+
+    def test_send_weixin_media_tool_calls_handler(self) -> None:
+        from unittest.mock import patch
+
+        with patch("tools.operations_server.send_weixin_media") as mocked_send:
+            mocked_send.return_value = type("Result", (), {"ok": True, "summary": "已发送文件", "data": {}})()
+            response = handle_request(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 6,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "send_weixin_media",
+                        "arguments": {"target_sender_id": "sender-a", "path": "docs/diagram.png"},
+                    },
+                }
+            )
+        assert response is not None
+        mocked_send.assert_called_once_with("sender-a", "docs/diagram.png")
+        self.assertFalse(response["result"]["isError"])
+        self.assertEqual("已发送文件", response["result"]["content"][0]["text"])

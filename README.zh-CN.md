@@ -8,6 +8,18 @@ ChatBridge 最初是一个桌面控制应用，现在也支持在无图形界面
 - 多个 AI 会话管理
 - Hub / Bridge / 多种 Agent CLI 子进程生命周期控制
 
+## 技术架构图
+
+![ChatBridge 技术架构图](docs/images/chatbridge-architecture-zh.svg)
+
+技术上可以理解为五层：
+
+- **入口层**：微信 iLink Bot API、NiceGUI Web UI、MCP JSON-RPC 工具入口。
+- **应用层**：`WeixinBridge` 负责微信消息、Slash 命令、任务反馈和 `/sendfile` 媒体发送；`AgentHub` 负责任务队列、会话和 Agent 调度；`App Service` 负责服务生命周期。
+- **后端适配层**：`agent_backends/` 统一封装 Codex、Claude、OpenCode 的 CLI 调用差异。
+- **状态层**：配置、账号、任务状态、事件日志、会话文件、导出文件和工作目录都保留在项目本地目录中，便于调试和部署。
+- **媒体层**：MCP 工具 `send_weixin_media(target_sender_id, path)` 是主入口；微信侧 `/sendfile` 复用同一实现。两者都会读取项目内允许的图片或文件，调用 iLink `getuploadurl` 获取上传地址，使用 AES-128-ECB 加密上传到 WeChat CDN，再通过 `sendmessage` 发送 `image_item` 或 `file_item`。
+
 ## 仓库状态
 
 这个仓库旨在以普通源码仓库的方式托管到 GitHub。
@@ -270,6 +282,10 @@ Web 模式启动后，终端会打印本地地址和局域网地址，例如 `ht
   查看当前或指定会话的历史摘要
 - `/export [name]`
   导出当前或指定会话历史到本地 Markdown 文件
+- `/showfile <path>`
+  预览项目内非敏感文本文件内容，适合远程查看 README、源码片段或导出内容
+- `/sendfile <path>`
+  发送项目内非敏感图片或文件到当前微信会话；图片会以图片消息发送，其他文件以附件发送
 - `/use <name>`
   切换到指定会话
 - `/rename <new>` / `/rename <old> <new>`

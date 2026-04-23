@@ -8,6 +8,18 @@ ChatBridge provides a single public entrypoint with parameter-controlled web mod
 - multiple AI conversations
 - lifecycle control for Hub / Bridge / multiple agent CLI child processes
 
+## Technical Architecture
+
+![ChatBridge Technical Architecture](docs/images/chatbridge-architecture-en.svg)
+
+Technically, the system has five layers:
+
+- **Entry layer**: WeChat iLink Bot API, NiceGUI Web UI, and MCP JSON-RPC tools.
+- **Application layer**: `WeixinBridge` handles WeChat messages, slash commands, task feedback, and `/sendfile`; `AgentHub` handles task queues, sessions, and agent dispatch; `App Service` handles service lifecycle.
+- **Backend adapter layer**: `agent_backends/` normalizes Codex, Claude, and OpenCode CLI differences.
+- **State layer**: config, account files, task state, event logs, session files, exports, and work directories stay local to the project.
+- **Media layer**: MCP tool `send_weixin_media(target_sender_id, path)` is the primary entrypoint; WeChat `/sendfile` reuses the same implementation. Both read allowed project files, call iLink `getuploadurl`, upload AES-128-ECB encrypted bytes to WeChat CDN, then send `image_item` or `file_item` with `sendmessage`.
+
 ## Repository Status
 
 This repository is intended to be pushed to GitHub as normal source code.

@@ -1644,6 +1644,112 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         self.assertIn("# Session Export: deep-dive", content)
         self.assertIn("investigate bug", content)
 
+    def test_showfile_command_previews_project_text_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            docs_dir = project_root / "docs"
+            docs_dir.mkdir()
+            (docs_dir / "architecture.md").write_text("# Architecture\n\nBridge -> Hub\n", encoding="utf-8")
+            with patch("weixin_hub_bridge.APP_DIR", project_root):
+                reply, handled = self.bridge._handle_control_command("sender-test", "/showfile docs/architecture.md")
+        self.assertTrue(handled)
+        self.assertIn("File preview", reply)
+        self.assertIn("Path: docs/architecture.md", reply)
+        self.assertIn("Bridge -> Hub", reply)
+
+    def test_showfile_command_denies_sensitive_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            accounts_dir = project_root / "accounts"
+            accounts_dir.mkdir()
+            (accounts_dir / "wechat-bot.json").write_text('{"token":"secret"}', encoding="utf-8")
+            with patch("weixin_hub_bridge.APP_DIR", project_root):
+                reply, handled = self.bridge._handle_control_command("sender-test", "/showfile accounts/wechat-bot.json")
+        self.assertTrue(handled)
+        self.assertIn("File preview denied", reply)
+
+    def test_sendfile_command_sends_project_file(self) -> None:
+        bridge = FeedbackBridge(BridgeConfig.load(), [])
+        sent_paths: list[Path] = []
+
+        def capture_send_media(_base_url, _token, _to_user_id, _context_token, file_path: Path) -> None:
+            sent_paths.append(file_path)
+
+        bridge._send_media_file = capture_send_media  # type: ignore[method-assign]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            docs_dir = project_root / "docs"
+            docs_dir.mkdir()
+            media_path = docs_dir / "architecture.md"
+            media_path.write_text("# Architecture\n", encoding="utf-8")
+            with patch("weixin_hub_bridge.APP_DIR", project_root):
+                bridge._handle_message(
+                    "https://example.com",
+                    "token",
+                    {
+                        "message_type": 1,
+                        "from_user_id": "sender-test",
+                        "context_token": "ctx",
+                        "item_list": [{"type": 1, "text_item": {"text": "/sendfile docs/architecture.md"}}],
+                    },
+                )
+        self.assertEqual(1, len(sent_paths))
+        self.assertEqual("architecture.md", sent_paths[0].name)
+        self.assertEqual([], bridge.sent_texts)
+
+    def test_send_media_file_builds_image_message_item(self) -> None:
+        bridge = FakeBridge(BridgeConfig.load())
+        sent_bodies: list[dict[str, object]] = []
+
+        def fake_upload(_base_url, _token, _to_user_id, _file_path, *, media_type: int) -> dict[str, object]:
+            self.assertEqual(1, media_type)
+            return {
+                "download_param": "download-param",
+                "aes_hex": "00112233445566778899aabbccddeeff",
+                "raw_size": 3,
+                "cipher_size": 16,
+                "md5": "md5",
+            }
+
+        def fake_post(_url, body, *, token, timeout_ms):
+            sent_bodies.append(body)
+            return {"ret": 0}
+
+        bridge._upload_media_file = fake_upload  # type: ignore[method-assign]
+        bridge._post_json = fake_post  # type: ignore[method-assign]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "diagram.png"
+            image_path.write_bytes(b"png")
+            bridge._send_media_file("https://example.com", "token", "sender-test", "ctx", image_path)
+        item = sent_bodies[0]["msg"]["item_list"][0]  # type: ignore[index]
+        self.assertEqual(2, item["type"])
+        self.assertEqual("download-param", item["image_item"]["media"]["encrypt_query_param"])
+        self.assertEqual("MDAxMTIyMzM0NDU1NjY3Nzg4OTlhYWJiY2NkZGVlZmY=", item["image_item"]["media"]["aes_key"])
+        self.assertEqual(16, item["image_item"]["mid_size"])
+
+    def test_send_media_file_rejects_sendmessage_error_code(self) -> None:
+        bridge = FakeBridge(BridgeConfig.load())
+
+        def fake_upload(_base_url, _token, _to_user_id, _file_path, *, media_type: int) -> dict[str, object]:
+            return {
+                "download_param": "download-param",
+                "aes_hex": "00112233445566778899aabbccddeeff",
+                "raw_size": 3,
+                "cipher_size": 16,
+                "md5": "md5",
+            }
+
+        def fake_post(_url, _body, *, token, timeout_ms):
+            return {"ret": -2}
+
+        bridge._upload_media_file = fake_upload  # type: ignore[method-assign]
+        bridge._post_json = fake_post  # type: ignore[method-assign]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "diagram.png"
+            image_path.write_bytes(b"png")
+            with self.assertRaisesRegex(RuntimeError, "sendmessage returned ret=-2"):
+                bridge._send_media_file("https://example.com", "token", "sender-test", "ctx", image_path)
+
     def test_rename_command_updates_current_session(self) -> None:
         reply, handled = self.bridge._handle_control_command("sender-test", "/use deep-dive")
         self.assertTrue(handled)
