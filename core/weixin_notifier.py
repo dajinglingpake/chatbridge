@@ -71,12 +71,18 @@ def broadcast_weixin_notice_by_kind(kind: str, title: str, detail: str, config: 
     for recipient in recipients:
         if not recipient.context_token:
             skipped_missing_context += 1
+            print(f"[notifier] skip recipient={recipient.sender_id} reason=missing_context_token", flush=True)
             continue
         try:
-            _send_text(base_url, token, recipient.sender_id, recipient.context_token, message)
+            response = _send_text(base_url, token, recipient.sender_id, recipient.context_token, message)
+            print(
+                f"[notifier] sent recipient={recipient.sender_id} ret={response.get('ret')} errcode={response.get('errcode')} errmsg={response.get('errmsg')}",
+                flush=True,
+            )
             sent_count += 1
         except Exception as exc:  # noqa: BLE001
             last_error = str(exc)
+            print(f"[notifier] failed recipient={recipient.sender_id} error={last_error}", flush=True)
     if skipped_missing_context > 0:
         context_error = f"missing context token for {skipped_missing_context} recipient(s)"
         last_error = context_error if not last_error else f"{last_error}; {context_error}"
@@ -86,6 +92,10 @@ def broadcast_weixin_notice_by_kind(kind: str, title: str, detail: str, config: 
 def _build_notice_text(title: str, detail: str) -> str:
     body = (detail or "").strip() or "-"
     return f"[ChatBridge 系统通知]\n操作: {title}\n结果: {body}"
+
+
+def _is_real_weixin_sender(sender_id: str) -> bool:
+    return str(sender_id or "").strip().endswith("@im.wechat")
 
 
 def build_task_followup_hint(
@@ -113,7 +123,7 @@ def _load_recipient_ids() -> list[str]:
     payload = load_json(BRIDGE_CONVERSATIONS_PATH, {}, expect_type=dict)
     if not isinstance(payload, dict):
         return []
-    return [str(sender_id).strip() for sender_id in payload.keys() if str(sender_id).strip()]
+    return [cleaned for sender_id in payload.keys() if (cleaned := str(sender_id).strip()) and _is_real_weixin_sender(cleaned)]
 
 
 def _load_recipients(account_path: Path | None) -> list[NoticeRecipient]:
@@ -124,7 +134,7 @@ def _load_recipients(account_path: Path | None) -> list[NoticeRecipient]:
     recipients: list[NoticeRecipient] = []
     for sender_id in payload.keys():
         cleaned_sender_id = str(sender_id).strip()
-        if not cleaned_sender_id:
+        if not cleaned_sender_id or not _is_real_weixin_sender(cleaned_sender_id):
             continue
         recipients.append(
             NoticeRecipient(
@@ -135,7 +145,7 @@ def _load_recipients(account_path: Path | None) -> list[NoticeRecipient]:
     return recipients
 
 
-def _send_text(base_url: str, token: str, to_user_id: str, context_token: str, text: str) -> None:
+def _send_text(base_url: str, token: str, to_user_id: str, context_token: str, text: str) -> dict:
     body = {
         "msg": {
             "from_user_id": "",
@@ -164,4 +174,4 @@ def _send_text(base_url: str, token: str, to_user_id: str, context_token: str, t
         headers=headers,
         method="POST",
     )
-    request_json(request, timeout=15)
+    return request_json(request, timeout=15)

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
+import traceback
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -17,6 +21,7 @@ from core.accounts import activate_account
 from bridge_config import APP_DIR, BridgeConfig, normalize_backend
 from core.json_store import load_json, save_json
 from core.platform_compat import creationflags
+from core.runtime_paths import APP_SERVICE_ERR_LOG, APP_SERVICE_OUT_LOG, LOG_DIR, SERVICE_ACTION_LOG_PATH, SERVICE_ACTION_STATE_PATH, STATE_DIR
 from core.state_models import HubAgentSnapshot, HubTask, JsonObject, WeixinConversationBinding
 from core.weixin_notifier import broadcast_weixin_notice_by_kind
 
@@ -35,6 +40,18 @@ class AgentServiceResult:
     ok: bool
     message: str
     agent: HubAgentSnapshot | None = None
+
+
+def _append_action_log(event: str, **payload: object) -> None:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    record = {"at": _state_now(), "event": event, **payload}
+    with SERVICE_ACTION_LOG_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _write_action_state(**payload: object) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    save_json(SERVICE_ACTION_STATE_PATH, {"updated_at": _state_now(), **payload})
 
 
 def _parse_hub_task(raw: object) -> HubTask | None:
@@ -73,25 +90,112 @@ def schedule_named_action(action: str, *, delay_seconds: float = 1.0) -> Service
         return ServiceResult(ok=False, message=f"未知操作：{cleaned_action or action}")
 
     safe_delay = max(0.0, float(delay_seconds))
+    request_id = f"svc-{uuid.uuid4().hex[:12]}"
+    snapshot = get_runtime_snapshot()
+    command = [
+        sys.executable,
+        "-m",
+        "core.app_service",
+        "--spawn-runner",
+        cleaned_action,
+        "--request-id",
+        request_id,
+        "--delay-seconds",
+        f"{safe_delay:.2f}",
+    ]
+    APP_SERVICE_OUT_LOG.parent.mkdir(parents=True, exist_ok=True)
+    _write_action_state(
+        request_id=request_id,
+        action=cleaned_action,
+        status="scheduled",
+        delay_seconds=safe_delay,
+        scheduler_pid=os.getpid(),
+        scheduler_python=sys.executable,
+        hub_pid=snapshot.hub_pid,
+        bridge_pid=snapshot.bridge_pid,
+    )
+    _append_action_log(
+        "scheduled",
+        request_id=request_id,
+        action=cleaned_action,
+        delay_seconds=safe_delay,
+        scheduler_pid=os.getpid(),
+        scheduler_python=sys.executable,
+        hub_pid=snapshot.hub_pid,
+        bridge_pid=snapshot.bridge_pid,
+    )
+    with APP_SERVICE_OUT_LOG.open("ab") as out_handle, APP_SERVICE_ERR_LOG.open("ab") as err_handle:
+        proc = subprocess.Popen(
+            command,
+            cwd=str(APP_DIR),
+            stdout=out_handle,
+            stderr=err_handle,
+            stdin=subprocess.DEVNULL,
+            creationflags=creationflags(),
+            start_new_session=True,
+        )
+    _write_action_state(
+        request_id=request_id,
+        action=cleaned_action,
+        status="launcher_spawned",
+        delay_seconds=safe_delay,
+        scheduler_pid=os.getpid(),
+        launcher_pid=proc.pid,
+        scheduler_python=sys.executable,
+        hub_pid=snapshot.hub_pid,
+        bridge_pid=snapshot.bridge_pid,
+    )
+    _append_action_log(
+        "launcher_spawned",
+        request_id=request_id,
+        action=cleaned_action,
+        launcher_pid=proc.pid,
+    )
+    return ServiceResult(ok=True, message=f"已安排在 {safe_delay:.2f} 秒后执行服务操作：{cleaned_action}（请求 {request_id}）")
+
+
+def spawn_named_action_runner(action: str, request_id: str, delay_seconds: float) -> int:
+    cleaned_action = action.strip()
+    safe_delay = max(0.0, float(delay_seconds))
     command = [
         sys.executable,
         "-m",
         "core.app_service",
         "--run-named-action",
         cleaned_action,
+        "--request-id",
+        request_id,
         "--delay-seconds",
         f"{safe_delay:.2f}",
     ]
-    subprocess.Popen(
-        command,
-        cwd=str(APP_DIR),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL,
-        creationflags=creationflags(),
-        start_new_session=True,
+    APP_SERVICE_OUT_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with APP_SERVICE_OUT_LOG.open("ab") as out_handle, APP_SERVICE_ERR_LOG.open("ab") as err_handle:
+        proc = subprocess.Popen(
+            command,
+            cwd=str(APP_DIR),
+            stdout=out_handle,
+            stderr=err_handle,
+            stdin=subprocess.DEVNULL,
+            creationflags=creationflags(),
+            start_new_session=True,
+        )
+    _write_action_state(
+        request_id=request_id,
+        action=action,
+        status="child_spawned",
+        delay_seconds=delay_seconds,
+        launcher_pid=os.getpid(),
+        child_pid=proc.pid,
+        scheduler_python=sys.executable,
     )
-    return ServiceResult(ok=True, message=f"已安排在 {safe_delay:.2f} 秒后执行服务操作：{cleaned_action}")
+    _append_action_log(
+        "child_spawned",
+        request_id=request_id,
+        action=action,
+        launcher_pid=os.getpid(),
+        child_pid=proc.pid,
+    )
+    return proc.pid
 
 
 def submit_hub_task(
@@ -378,9 +482,17 @@ def _state_now() -> str:
 
 def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run app service actions.")
+    parser.add_argument("--spawn-runner", default="", help="Spawn a detached action runner and exit.")
     parser.add_argument("--run-named-action", default="", help="Execute a named runtime action.")
+    parser.add_argument("--request-id", default="", help="Correlation ID for an async scheduled action.")
     parser.add_argument("--delay-seconds", type=float, default=0.0, help="Optional delay before the action runs.")
     args = parser.parse_args(argv)
+
+    spawn_action = str(args.spawn_runner or "").strip()
+    if spawn_action:
+        request_id = str(args.request_id or "").strip() or f"svc-{uuid.uuid4().hex[:12]}"
+        spawn_named_action_runner(spawn_action, request_id, max(0.0, float(args.delay_seconds or 0.0)))
+        return 0
 
     action = str(args.run_named_action or "").strip()
     if not action:
@@ -388,10 +500,87 @@ def _main(argv: list[str] | None = None) -> int:
         return 1
 
     delay_seconds = max(0.0, float(args.delay_seconds or 0.0))
-    if delay_seconds > 0:
-        time.sleep(delay_seconds)
-    result = run_named_action(action)
-    return 0 if result.ok else 1
+    request_id = str(args.request_id or "").strip() or f"svc-{uuid.uuid4().hex[:12]}"
+    _write_action_state(
+        request_id=request_id,
+        action=action,
+        status="child_started",
+        child_pid=os.getpid(),
+        delay_seconds=delay_seconds,
+    )
+    _append_action_log(
+        "child_started",
+        request_id=request_id,
+        action=action,
+        child_pid=os.getpid(),
+        delay_seconds=delay_seconds,
+    )
+    try:
+        if delay_seconds > 0:
+            time.sleep(delay_seconds)
+        before = get_runtime_snapshot()
+        _write_action_state(
+            request_id=request_id,
+            action=action,
+            status="running",
+            child_pid=os.getpid(),
+            delay_seconds=delay_seconds,
+            hub_pid_before=before.hub_pid,
+            bridge_pid_before=before.bridge_pid,
+        )
+        _append_action_log(
+            "running",
+            request_id=request_id,
+            action=action,
+            child_pid=os.getpid(),
+            hub_pid_before=before.hub_pid,
+            bridge_pid_before=before.bridge_pid,
+        )
+        result = run_named_action(action)
+        after = get_runtime_snapshot()
+        status = "succeeded" if result.ok else "failed"
+        _write_action_state(
+            request_id=request_id,
+            action=action,
+            status=status,
+            child_pid=os.getpid(),
+            delay_seconds=delay_seconds,
+            result_message=result.message,
+            hub_pid_before=before.hub_pid,
+            bridge_pid_before=before.bridge_pid,
+            hub_pid_after=after.hub_pid,
+            bridge_pid_after=after.bridge_pid,
+        )
+        _append_action_log(
+            status,
+            request_id=request_id,
+            action=action,
+            child_pid=os.getpid(),
+            result_message=result.message,
+            hub_pid_before=before.hub_pid,
+            bridge_pid_before=before.bridge_pid,
+            hub_pid_after=after.hub_pid,
+            bridge_pid_after=after.bridge_pid,
+        )
+        return 0 if result.ok else 1
+    except Exception as exc:  # noqa: BLE001
+        _write_action_state(
+            request_id=request_id,
+            action=action,
+            status="crashed",
+            child_pid=os.getpid(),
+            error=str(exc),
+            traceback=traceback.format_exc(),
+        )
+        _append_action_log(
+            "crashed",
+            request_id=request_id,
+            action=action,
+            child_pid=os.getpid(),
+            error=str(exc),
+            traceback=traceback.format_exc(),
+        )
+        raise
 
 
 if __name__ == "__main__":

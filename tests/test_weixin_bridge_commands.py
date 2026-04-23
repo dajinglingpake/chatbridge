@@ -184,6 +184,8 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         self.project_spaces_path = temp_root / ".runtime" / "state" / "project_spaces.json"
         self.event_log_path = temp_root / ".runtime" / "logs" / "weixin_bridge_events.jsonl"
         self.message_audit_log_path = temp_root / ".runtime" / "logs" / "weixin_bridge_message_audit.jsonl"
+        self.restart_notice_path = temp_root / ".runtime" / "state" / "weixin_restart_notice.json"
+        self.service_action_state_path = temp_root / ".runtime" / "state" / "service_action_state.json"
         self.state_path = temp_root / ".runtime" / "state" / "weixin_hub_bridge_state.json"
         self.conversation_path.parent.mkdir(parents=True, exist_ok=True)
         self.event_log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -193,6 +195,8 @@ class WeixinBridgeCommandTests(unittest.TestCase):
             patch("weixin_hub_bridge.PROJECT_SPACES_PATH", self.project_spaces_path),
             patch("weixin_hub_bridge.EVENT_LOG_PATH", self.event_log_path),
             patch("weixin_hub_bridge.MESSAGE_AUDIT_LOG_PATH", self.message_audit_log_path),
+            patch("weixin_hub_bridge.RESTART_NOTICE_PATH", self.restart_notice_path),
+            patch("weixin_hub_bridge.SERVICE_ACTION_STATE_FILE", self.service_action_state_path),
             patch("weixin_hub_bridge.STATE_PATH", self.state_path),
             patch("weixin_hub_bridge.load_account_context_tokens", return_value={}),
             patch("weixin_hub_bridge.save_account_context_tokens", return_value=None),
@@ -238,9 +242,37 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         reply, handled = self.bridge._handle_control_command("sender-test", "/help")
         self.assertTrue(handled)
         self.assertIn("Available commands:", reply)
-        self.assertIn("/restart [bridge]", reply)
+        self.assertIn("/restart [bridge|status]", reply)
         self.assertIn("\n\nNormal messages:", reply)
         self.assertNotIn("/manage", reply)
+
+    def test_duplicate_control_message_with_different_ids_is_deduplicated(self) -> None:
+        sent_texts: list[str] = []
+
+        def capture_send(_base_url, _token, _to_user_id, _context_token, text: str) -> None:
+            sent_texts.append(text)
+
+        self.bridge._send_text = capture_send  # type: ignore[method-assign]
+        message_one = {
+            "message_type": 1,
+            "from_user_id": "sender-test",
+            "context_token": "ctx-1",
+            "msg_id": "msg-a",
+            "item_list": [{"type": 1, "text_item": {"text": "/help"}}],
+        }
+        message_two = {
+            "message_type": 1,
+            "from_user_id": "sender-test",
+            "context_token": "ctx-1",
+            "msg_id": "msg-b",
+            "item_list": [{"type": 1, "text_item": {"text": "/help"}}],
+        }
+
+        self.bridge._handle_message("https://example.com", "token", message_one)
+        self.bridge._handle_message("https://example.com", "token", message_two)
+
+        self.assertEqual(1, len(sent_texts))
+        self.assertIn("/restart [bridge|status]", sent_texts[0])
 
     def test_restart_command_schedules_full_restart(self) -> None:
         with patch("weixin_hub_bridge.schedule_named_action", return_value=SimpleNamespace(message="scheduled all")) as mocked_schedule:
@@ -248,6 +280,9 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         self.assertTrue(handled)
         self.assertEqual("scheduled all", reply)
         mocked_schedule.assert_called_once_with("restart", delay_seconds=1.0)
+        payload = json.loads(self.restart_notice_path.read_text(encoding="utf-8"))
+        self.assertEqual("sender-test", payload["sender_id"])
+        self.assertEqual("all", payload["scope"])
 
     def test_restart_bridge_command_schedules_bridge_restart(self) -> None:
         with patch("weixin_hub_bridge.schedule_named_action", return_value=SimpleNamespace(message="scheduled bridge")) as mocked_schedule:
@@ -259,7 +294,79 @@ class WeixinBridgeCommandTests(unittest.TestCase):
     def test_restart_command_rejects_unknown_scope(self) -> None:
         reply, handled = self.bridge._handle_control_command("sender-test", "/restart hub")
         self.assertTrue(handled)
-        self.assertEqual("Usage: /restart or /restart bridge", reply)
+        self.assertEqual("Usage: /restart, /restart bridge, or /restart status", reply)
+
+    def test_restart_status_renders_latest_action_state(self) -> None:
+        self.service_action_state_path.write_text(
+            json.dumps(
+                {
+                    "request_id": "svc-123",
+                    "action": "restart",
+                    "status": "succeeded",
+                    "updated_at": "2026-04-23T15:45:00",
+                    "hub_pid_before": 100,
+                    "bridge_pid_before": 200,
+                    "hub_pid_after": 300,
+                    "bridge_pid_after": 400,
+                    "result_message": "Bridge stopped | Hub started | Bridge started",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        reply, handled = self.bridge._handle_control_command("sender-test", "/restart status")
+        self.assertTrue(handled)
+        self.assertIn("Latest restart state", reply)
+        self.assertIn("Request ID: svc-123", reply)
+        self.assertIn("PIDs before restart", reply)
+        self.assertIn("PIDs after restart", reply)
+        self.assertIn("Result: Bridge stopped | Hub started | Bridge started", reply)
+
+    def test_deliver_pending_restart_notice_sends_direct_message_and_clears_file(self) -> None:
+        self.restart_notice_path.write_text(
+            json.dumps(
+                {
+                    "sender_id": "sender-test",
+                    "context_token": "ctx-restart",
+                    "scope": "all",
+                    "requested_at": "2026-04-23T14:20:00",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        bridge = FeedbackBridge(BridgeConfig.load(), [])
+        with patch.object(bridge, "_load_account", return_value={"token": "bot-token", "baseUrl": "https://example.com"}):
+            bridge._deliver_pending_restart_notice()
+        self.assertTrue(any("服务已重启成功" in text for text in bridge.sent_texts))
+        self.assertFalse(self.restart_notice_path.exists())
+
+    def test_poll_pending_tasks_drops_stale_missing_task(self) -> None:
+        self.pending_tasks_path.write_text(
+            json.dumps(
+                {
+                    "task-stale": {
+                        "task_id": "task-stale",
+                        "sender_id": "sender-test",
+                        "session_name": "default",
+                        "backend": "codex",
+                        "source": "wechat",
+                        "model": "-",
+                        "workdir": "/tmp",
+                        "context_token": "ctx-stale",
+                        "last_status": "running",
+                        "last_progress_seq": 0,
+                    }
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        bridge = FakeBridge(BridgeConfig.load())
+        bridge.pending_tasks = bridge._load_pending_tasks()
+        with patch.object(bridge, "_ipc_request", return_value=IpcResponseEnvelope(ok=False, error="task not found")):
+            bridge._poll_pending_tasks("https://example.com", "token")
+        self.assertEqual({}, bridge.pending_tasks)
 
     def test_poll_once_ignores_expected_getupdates_timeout(self) -> None:
         bridge = TimeoutPollingBridge(BridgeConfig.load())
@@ -508,11 +615,27 @@ class WeixinBridgeCommandTests(unittest.TestCase):
     def test_notify_service_started_broadcasts_service_notice(self) -> None:
         bridge = FeedbackBridge(BridgeConfig.load(), [])
         with patch("weixin_hub_bridge.broadcast_weixin_notice_by_kind") as mocked_broadcast:
+            mocked_broadcast.return_value = SimpleNamespace(summary="已通知 1 个微信会话", error="")
             bridge._notify_service_started()
         mocked_broadcast.assert_called_once()
         self.assertEqual("service", mocked_broadcast.call_args.args[0])
         self.assertEqual("Bridge 启动", mocked_broadcast.call_args.args[1])
         self.assertIn("默认 Agent", mocked_broadcast.call_args.args[2])
+
+    def test_notify_service_started_logs_summary(self) -> None:
+        bridge = FeedbackBridge(BridgeConfig.load(), [])
+        with patch("weixin_hub_bridge.broadcast_weixin_notice_by_kind") as mocked_broadcast:
+            mocked_broadcast.return_value = SimpleNamespace(summary="已通知 1 个微信会话", error="")
+            with patch("builtins.print") as mocked_print:
+                bridge._notify_service_started()
+        mocked_print.assert_any_call("[bridge] startup notice: 已通知 1 个微信会话", flush=True)
+
+    def test_notify_test_command_returns_delivery_summary(self) -> None:
+        with patch("weixin_hub_bridge.broadcast_weixin_notice_by_kind") as mocked_broadcast:
+            mocked_broadcast.return_value = SimpleNamespace(summary="已通知 1/4 个微信会话，剩余发送失败：missing context token", error="missing context token")
+            reply, handled = self.bridge._handle_control_command("sender-test", "/notify test")
+        self.assertTrue(handled)
+        self.assertIn("Delivery result: 已通知 1/4 个微信会话", reply)
 
     def test_handle_message_routes_session_request_inside_current_session(self) -> None:
         bridge = FeedbackBridge(BridgeConfig.load(), [])

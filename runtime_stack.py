@@ -115,14 +115,20 @@ def _cmdline_text(proc) -> str:
 
 
 def _find_process_by_script(script_path: Path):
+    matches = _find_processes_by_script(script_path)
+    return matches[0] if matches else None
+
+
+def _find_processes_by_script(script_path: Path) -> list[object]:
     if psutil is None:
-        return None
+        return []
     target = str(script_path)
+    matches: list[object] = []
     for proc in psutil.process_iter(["pid", "cmdline"]):
         cmdline = proc.info.get("cmdline") or []
         if target in cmdline or target in " ".join(cmdline):
-            return proc
-    return None
+            matches.append(proc)
+    return sorted(matches, key=lambda item: getattr(item, "pid", 0))
 
 
 def _managed_root_pids() -> set[int]:
@@ -237,9 +243,18 @@ def shutil_which(name: str) -> str | None:
 
 
 def start_managed(name: str, script_path: Path, pid_file: Path, stdout_log: Path, stderr_log: Path) -> str:
-    status = get_managed_status(name, script_path, pid_file)
-    if status.running:
-        return f"{name} already running (PID {status.pid})"
+    running = _find_processes_by_script(script_path)
+    if running:
+        primary = running[0]
+        duplicate_pids: list[int] = []
+        for proc in running[1:]:
+            duplicate_pids.append(proc.pid)
+            _taskkill(proc.pid)
+        _write_pid_file(pid_file, primary.pid)
+        if duplicate_pids:
+            rendered = ", ".join(str(pid) for pid in duplicate_pids)
+            return f"{name} already running (PID {primary.pid}); cleaned duplicate PIDs {rendered}"
+        return f"{name} already running (PID {primary.pid})"
 
     ensure_runtime_dirs()
     python_cmd = _get_python_command(gui=False)
@@ -273,8 +288,11 @@ def _taskkill(pid: int) -> None:
         proc = _get_process(pid)
         if proc is None:
             return
+        current_pid = os.getpid()
         children = proc.children(recursive=True)
         for child in children:
+            if child.pid == current_pid:
+                continue
             try:
                 child.terminate()
             except psutil.Error:
@@ -312,12 +330,19 @@ def _taskkill(pid: int) -> None:
 
 
 def stop_managed(name: str, script_path: Path, pid_file: Path) -> str:
-    status = get_managed_status(name, script_path, pid_file)
-    if not status.running or not status.pid:
+    running = _find_processes_by_script(script_path)
+    if not running:
+        _clear_pid_file(pid_file)
         return f"{name} is not running"
-    _taskkill(status.pid)
+    stopped_pids: list[int] = []
+    for proc in running:
+        stopped_pids.append(proc.pid)
+        _taskkill(proc.pid)
     _clear_pid_file(pid_file)
-    return f"{name} stopped (PID {status.pid})"
+    if len(stopped_pids) == 1:
+        return f"{name} stopped (PID {stopped_pids[0]})"
+    rendered = ", ".join(str(pid) for pid in stopped_pids)
+    return f"{name} stopped (PIDs {rendered})"
 
 
 def start_all() -> list[str]:

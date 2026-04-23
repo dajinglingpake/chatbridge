@@ -25,6 +25,8 @@ from core.runtime_paths import (
     BRIDGE_EVENT_LOG_PATH,
     BRIDGE_MESSAGE_AUDIT_LOG_PATH,
     BRIDGE_PENDING_TASKS_PATH,
+    BRIDGE_RESTART_NOTICE_PATH,
+    SERVICE_ACTION_STATE_PATH,
     BRIDGE_STATE_PATH,
     BRIDGE_CONVERSATIONS_PATH,
     LOG_DIR,
@@ -51,6 +53,8 @@ CONVERSATION_PATH = BRIDGE_CONVERSATIONS_PATH
 PENDING_TASKS_PATH = BRIDGE_PENDING_TASKS_PATH
 EVENT_LOG_PATH = BRIDGE_EVENT_LOG_PATH
 MESSAGE_AUDIT_LOG_PATH = BRIDGE_MESSAGE_AUDIT_LOG_PATH
+RESTART_NOTICE_PATH = BRIDGE_RESTART_NOTICE_PATH
+SERVICE_ACTION_STATE_FILE = SERVICE_ACTION_STATE_PATH
 PROJECT_SPACES_PATH = BRIDGE_PROJECT_SPACES_PATH
 DEFAULT_WEIXIN_BASE_URL = "https://ilinkai.weixin.qq.com"
 ILINK_APP_ID = "bot"
@@ -90,6 +94,7 @@ class WeixinBridge:
         self.context_tokens = load_account_context_tokens(self.account_path)
         self.pending_tasks = self._load_pending_tasks()
         self._recent_message_keys: list[str] = []
+        self._recent_message_fingerprints: dict[str, float] = {}
         self.state = WeixinBridgeRuntimeState.create(
             now=now_iso(),
             managed_conversations=len(self.conversations),
@@ -119,10 +124,11 @@ class WeixinBridge:
         save_json(PROJECT_SPACES_PATH, {"projects": ordered})
 
     def run(self) -> None:
-        print(f"Weixin Hub Bridge started at {now_iso()}")
-        print(f"Config: {CONFIG_PATH}")
-        print(f"State: {STATE_PATH}")
+        print(f"Weixin Hub Bridge started at {now_iso()}", flush=True)
+        print(f"Config: {CONFIG_PATH}", flush=True)
+        print(f"State: {STATE_PATH}", flush=True)
         self._notify_service_started()
+        self._deliver_pending_restart_notice()
         while True:
             try:
                 self.poll_once()
@@ -131,7 +137,7 @@ class WeixinBridge:
             except Exception as exc:  # noqa: BLE001
                 self.state.set_error(str(exc))
                 self._save_state()
-                print(f"[bridge] poll error: {exc}")
+                print(f"[bridge] poll error: {exc}", flush=True)
                 time.sleep(3)
 
     def _notify_service_started(self) -> None:
@@ -140,7 +146,42 @@ class WeixinBridge:
             f"账号: {self.config.active_account_id or '-'}\n"
             f"默认 Agent: {self.config.backend_id or 'main'}"
         )
-        broadcast_weixin_notice_by_kind("service", "Bridge 启动", detail, config=self.config)
+        result = broadcast_weixin_notice_by_kind("service", "Bridge 启动", detail, config=self.config)
+        print(f"[bridge] startup notice: {result.summary}", flush=True)
+        if result.error and result.error != "disabled":
+            print(f"[bridge] startup notice error: {result.error}", flush=True)
+
+    def _deliver_pending_restart_notice(self) -> None:
+        payload = load_json(RESTART_NOTICE_PATH, {}, expect_type=dict)
+        if not isinstance(payload, dict):
+            return
+        sender_id = str(payload.get("sender_id") or "").strip()
+        context_token = str(payload.get("context_token") or "").strip()
+        scope = str(payload.get("scope") or "all").strip().lower() or "all"
+        requested_at = str(payload.get("requested_at") or "").strip()
+        if not sender_id or not context_token:
+            RESTART_NOTICE_PATH.unlink(missing_ok=True)
+            return
+        try:
+            account = self._load_account()
+            token = (account.get("token") or "").strip()
+            base_url = (account.get("baseUrl") or DEFAULT_WEIXIN_BASE_URL).strip()
+            if not token:
+                raise RuntimeError("weixin account token is missing")
+            scope_label = "Bridge" if scope == "bridge" else "Hub + Bridge"
+            detail_lines = [
+                "服务已重启成功",
+                f"范围: {scope_label}",
+                f"时间: {now_iso()}",
+            ]
+            if requested_at:
+                detail_lines.append(f"请求时间: {requested_at}")
+            self._send_text(base_url, token, sender_id, context_token, "\n".join(detail_lines))
+            print(f"[bridge] restart notice delivered to {sender_id}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[bridge] restart notice delivery failed: {exc}", flush=True)
+        finally:
+            RESTART_NOTICE_PATH.unlink(missing_ok=True)
 
     def poll_once(self) -> None:
         account = self._load_account()
@@ -196,7 +237,7 @@ class WeixinBridge:
             )
             return
         message_key = self._message_key(msg, text)
-        if self._is_duplicate_message(message_key):
+        if self._is_duplicate_message(message_key, sender_id=sender_id, text=text):
             self._append_message_audit(
                 sender_id=sender_id,
                 text=text,
@@ -424,7 +465,12 @@ class WeixinBridge:
                 print(f"[bridge] pending task poll failed for {task_id}: {exc}")
                 continue
             if not data.ok:
-                print(f"[bridge] pending task poll failed for {task_id}: {data.error or 'unknown error'}")
+                error_text = str(data.error or "unknown error")
+                print(f"[bridge] pending task poll failed for {task_id}: {error_text}")
+                if "task not found" in error_text.lower():
+                    self.pending_tasks.pop(task_id, None)
+                    self._save_pending_tasks()
+                    print(f"[bridge] dropped stale pending task {task_id}", flush=True)
                 continue
             task = HubTask.from_dict(data.payload.get("task"), default_backend=self.config.default_backend)
             if task is None:
@@ -570,7 +616,19 @@ class WeixinBridge:
             },
             "base_info": {"channel_version": "2.1.1"},
         }
-        self._post_json(f"{base_url}/ilink/bot/sendmessage", body, token=token, timeout_ms=15000)
+        preview = " ".join(text.split())[:160]
+        try:
+            response = self._post_json(f"{base_url}/ilink/bot/sendmessage", body, token=token, timeout_ms=15000)
+            if isinstance(response, dict):
+                print(
+                    f"[bridge] sent reply to={to_user_id} ret={response.get('ret')} errcode={response.get('errcode')} errmsg={response.get('errmsg')} preview={preview}",
+                    flush=True,
+                )
+            else:
+                print(f"[bridge] sent reply to={to_user_id} preview={preview}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[bridge] send reply failed to={to_user_id} error={exc} preview={preview}", flush=True)
+            raise
 
     def _remember_context_token(self, sender_id: str, context_token: Any) -> None:
         cleaned_sender_id = str(sender_id or "").strip()
@@ -663,12 +721,22 @@ class WeixinBridge:
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
         return hashlib.sha1(encoded).hexdigest()
 
-    def _is_duplicate_message(self, message_key: str) -> bool:
+    def _is_duplicate_message(self, message_key: str, *, sender_id: str = "", text: str = "") -> bool:
+        now_value = time.monotonic()
+        cleaned_text = text.strip()
+        fingerprint = f"{sender_id.strip()}::{cleaned_text}" if cleaned_text.startswith("/") else ""
         if message_key in self._recent_message_keys:
+            return True
+        recent_seen_at = self._recent_message_fingerprints.get(fingerprint)
+        if fingerprint.strip(":") and recent_seen_at is not None and now_value - recent_seen_at <= 2.0:
             return True
         self._recent_message_keys.append(message_key)
         if len(self._recent_message_keys) > 200:
             self._recent_message_keys = self._recent_message_keys[-200:]
+        self._recent_message_fingerprints[fingerprint] = now_value
+        expired = [key for key, seen_at in self._recent_message_fingerprints.items() if now_value - seen_at > 10.0]
+        for key in expired:
+            self._recent_message_fingerprints.pop(key, None)
         return False
 
     def _handle_control_command(self, sender_id: str, text: str) -> tuple[str, bool]:
@@ -1043,10 +1111,14 @@ class WeixinBridge:
 
         if command == "/restart":
             scope = parts[1].strip().lower() if len(parts) >= 2 else "all"
+            if scope == "status":
+                return self._render_restart_status(), True
             if scope in {"", "all"}:
+                self._store_pending_restart_notice(sender_id, scope="all")
                 result = schedule_named_action("restart", delay_seconds=1.0)
                 return result.message, True
             if scope == "bridge":
+                self._store_pending_restart_notice(sender_id, scope="bridge")
                 result = schedule_named_action("restart-bridge", delay_seconds=1.0)
                 return result.message, True
             return self._t("bridge.restart.usage"), True
@@ -1060,6 +1132,17 @@ class WeixinBridge:
                     task=self._t("bridge.notify.on") if self.config.task_notice_enabled else self._t("bridge.notify.off"),
                 ), True
             desired = parts[1].strip().lower()
+            if desired == "test":
+                result = broadcast_weixin_notice_by_kind(
+                    "service",
+                    "通知测试",
+                    f"Bridge 通知链路测试\n账号: {self.config.active_account_id or '-'}\n默认 Agent: {self.config.backend_id or 'main'}",
+                    config=self.config,
+                )
+                print(f"[bridge] notify test: {result.summary}", flush=True)
+                if result.error and result.error != "disabled":
+                    print(f"[bridge] notify test error: {result.error}", flush=True)
+                return self._t("bridge.notify.test", summary=result.summary), True
             if desired not in {"on", "off", "service-on", "service-off", "config-on", "config-off", "task-on", "task-off"}:
                 return self._t("bridge.notify.usage"), True
             if desired == "on":
@@ -1657,6 +1740,43 @@ class WeixinBridge:
         prompt = raw[1:].strip()
         return prompt or "/"
 
+    def _render_restart_status(self) -> str:
+        payload = load_json(SERVICE_ACTION_STATE_FILE, {}, expect_type=dict)
+        if not isinstance(payload, dict) or not payload:
+            return self._t("bridge.restart.status.empty")
+        lines = [
+            self._t(
+                "bridge.restart.status.header",
+                request_id=str(payload.get("request_id") or "-"),
+                action=str(payload.get("action") or "-"),
+                status=str(payload.get("status") or "-"),
+                updated_at=str(payload.get("updated_at") or "-"),
+            )
+        ]
+        if payload.get("hub_pid_before") is not None or payload.get("bridge_pid_before") is not None:
+            lines.append(
+                self._t(
+                    "bridge.restart.status.before",
+                    hub=str(payload.get("hub_pid_before") or "-"),
+                    bridge=str(payload.get("bridge_pid_before") or "-"),
+                )
+            )
+        if payload.get("hub_pid_after") is not None or payload.get("bridge_pid_after") is not None:
+            lines.append(
+                self._t(
+                    "bridge.restart.status.after",
+                    hub=str(payload.get("hub_pid_after") or "-"),
+                    bridge=str(payload.get("bridge_pid_after") or "-"),
+                )
+            )
+        result_message = str(payload.get("result_message") or "").strip()
+        if result_message:
+            lines.append(self._t("bridge.restart.status.result", result=result_message))
+        error = str(payload.get("error") or "").strip()
+        if error:
+            lines.append(self._t("bridge.restart.status.error", error=error))
+        return "\n".join(lines)
+
     @staticmethod
     def _is_special_native_menu_command(prompt: str) -> bool:
         return str(prompt or "").strip().lower() in SPECIAL_NATIVE_MENU_COMMANDS
@@ -2221,6 +2341,20 @@ class WeixinBridge:
 
     def _sanitize_project_name(self, requested: str) -> str:
         return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in requested).strip("-_")
+
+    def _store_pending_restart_notice(self, sender_id: str, *, scope: str) -> None:
+        cleaned_sender_id = str(sender_id or "").strip()
+        context_token = self.context_tokens.get(cleaned_sender_id, "")
+        RESTART_NOTICE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        save_json(
+            RESTART_NOTICE_PATH,
+            {
+                "sender_id": cleaned_sender_id,
+                "context_token": context_token,
+                "scope": scope,
+                "requested_at": now_iso(),
+            },
+        )
 
     @staticmethod
     def _split_named_path_args(raw: str) -> tuple[str, str]:
