@@ -95,6 +95,28 @@ class AgentHubCancellationTests(unittest.TestCase):
             self.assertEqual("idle", runtime.status)
             self.assertEqual(0, runtime.failure_count)
 
+    def test_render_codex_status_runs_in_hub_context(self) -> None:
+        workdir = self.temp_path / "workspace"
+        session_file = self.temp_path / "sessions" / "main.txt"
+        workdir.mkdir(parents=True, exist_ok=True)
+        session_file.parent.mkdir(parents=True, exist_ok=True)
+        config = HubConfig(
+            codex_command="codex",
+            claude_command="claude",
+            opencode_command="opencode",
+            agents=[AgentConfig("main", "Main", str(workdir), str(session_file), backend="codex")],
+        )
+        state_path = self.temp_path / "state" / "agent_hub_state.json"
+        with (
+            patch("agent_hub.STATE_PATH", state_path),
+            patch("agent_hub.discover_external_agent_processes", return_value=[]),
+            patch("agent_hub.query_codex_status_panel", return_value="OpenAI Codex v0.122.0") as mocked_query,
+        ):
+            hub = MultiCodexHub(config)
+            status = hub.render_codex_status("main", "default", str(workdir))
+        self.assertEqual("OpenAI Codex v0.122.0", status)
+        mocked_query.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
