@@ -20,6 +20,15 @@ ChatBridge 最初是一个桌面控制应用，现在也支持在无图形界面
 - **状态层**：除了项目内的配置、账号、任务状态、事件日志、会话文件、导出文件和工作目录，`ctx%` 还会读取 Codex 原生本地状态库 `~/.codex/state_*.sqlite` 和对应的 `rollout-*.jsonl`。
 - **出站消息与媒体层**：文本回复和通知统一进入 `Text Outbox`，由 Bridge 后台发送线程串行发往微信；MCP 工具 `send_weixin_media(target_sender_id, path)` 是媒体主入口，微信侧 `/sendfile` 复用同一实现，调用 iLink `getuploadurl`、上传到 WeChat CDN，再通过 `sendmessage` 发送 `text_item`、`image_item` 或 `file_item`。
 
+## 微信协议说明
+
+当前实现：由 [weixin_hub_bridge.py](weixin_hub_bridge.py) 直接调用 iLink HTTP 接口（`getupdates`、`sendmessage`、`getuploadurl`、`getconfig`、`sendtyping`）。
+
+参考来源：
+
+- Tencent `openclaw-weixin`：<https://github.com/Tencent/openclaw-weixin>
+- `wechat-ilink-client`：<https://github.com/photon-hq/wechat-ilink-client>
+
 ## 仓库状态
 
 这个仓库旨在以普通源码仓库的方式托管到 GitHub。

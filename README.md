@@ -20,6 +20,15 @@ Technically, the system has five layers:
 - **State layer**: in addition to project-local config, accounts, task state, event logs, session files, exports, and work directories, `ctx%` reads Codex native local state from `~/.codex/state_*.sqlite` and the matching `rollout-*.jsonl`.
 - **Outbound messaging and media layer**: text replies and notices flow through a shared `Text Outbox`, then the Bridge sender worker serializes delivery to WeChat; MCP tool `send_weixin_media(target_sender_id, path)` is the primary media entrypoint, WeChat `/sendfile` reuses the same implementation, and both call iLink `getuploadurl`, upload to WeChat CDN, then send `text_item`, `image_item`, or `file_item` with `sendmessage`.
 
+## WeChat Protocol Notes
+
+Current implementation: [weixin_hub_bridge.py](weixin_hub_bridge.py) calls the iLink HTTP APIs directly (`getupdates`, `sendmessage`, `getuploadurl`, `getconfig`, `sendtyping`).
+
+References:
+
+- Tencent `openclaw-weixin`: <https://github.com/Tencent/openclaw-weixin>
+- `wechat-ilink-client`: <https://github.com/photon-hq/wechat-ilink-client>
+
 ## Repository Status
 
 This repository is intended to be pushed to GitHub as normal source code.
