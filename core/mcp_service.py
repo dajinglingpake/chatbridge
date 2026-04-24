@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -13,7 +14,7 @@ from core.app_service import schedule_named_action, submit_hub_task
 from core.context_relations import build_context_relation_lines
 from core.dashboard import load_dashboard_state
 from core.json_store import load_json
-from core.runtime_paths import PROJECT_SPACES_PATH, WORKSPACE_DIR
+from core.runtime_paths import PROJECT_SPACES_PATH, RUNTIME_DIR, WORKSPACE_DIR
 from core.state_models import HubTask, JsonObject, WeixinConversationBinding, WeixinSessionMeta
 from weixin_hub_bridge import DEFAULT_WEIXIN_BASE_URL, EVENT_LOG_PATH, WeixinBridge
 
@@ -22,11 +23,24 @@ def _state_now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _stamp_for_export() -> str:
+    return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
 def _summarize_text(value: str, *, limit: int = 120) -> str:
     text = " ".join(str(value or "").split())
     if not text:
         return ""
     return text[: limit - 1] + "..." if len(text) > limit else text
+
+
+def _prepare_media_delivery_copy(file_path: Path) -> Path:
+    exports_dir = RUNTIME_DIR / "exports"
+    exports_dir.mkdir(parents=True, exist_ok=True)
+    stamped_name = f"{file_path.stem}-{_stamp_for_export()}{file_path.suffix}"
+    target_path = exports_dir / stamped_name
+    shutil.copyfile(file_path, target_path)
+    return target_path
 
 
 def _select_latest_display_task(session_tasks: list[HubTask]) -> HubTask | None:
@@ -602,7 +616,8 @@ def send_weixin_media(target_sender_id: str, path: str) -> ToolActionResult:
         if not token:
             return ToolActionResult(ok=False, summary="微信账号 token 为空，请先登录")
         base_url = str(account.get("baseUrl") or DEFAULT_WEIXIN_BASE_URL).strip()
-        file_path = bridge._resolve_shareable_project_file(cleaned_path)
+        original_file_path = bridge._resolve_shareable_project_file(cleaned_path)
+        file_path = _prepare_media_delivery_copy(original_file_path)
         context_token = bridge.context_tokens.get(cleaned_sender_id, "")
         response = bridge._send_media_file(base_url, token, cleaned_sender_id, context_token, file_path)
     except Exception as exc:  # noqa: BLE001
@@ -613,6 +628,7 @@ def send_weixin_media(target_sender_id: str, path: str) -> ToolActionResult:
         data={
             "target_sender_id": cleaned_sender_id,
             "path": str(file_path),
+            "source_path": str(original_file_path),
             "file_name": file_path.name,
             "response": response,
         },

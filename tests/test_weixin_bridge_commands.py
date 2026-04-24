@@ -1874,6 +1874,17 @@ class WeixinBridgeCommandTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "sendmessage returned ret=-2"):
                 bridge._send_media_file("https://example.com", "token", "sender-test", "ctx", image_path)
 
+    def test_deliver_text_now_rejects_sendmessage_error_code(self) -> None:
+        bridge = FakeBridge(BridgeConfig.load())
+
+        def fake_post(_url, _body, *, token, timeout_ms):
+            return {"ret": -2}
+
+        bridge._post_json = fake_post  # type: ignore[method-assign]
+
+        with self.assertRaisesRegex(RuntimeError, "sendmessage returned ret=-2"):
+            bridge._deliver_text_now("https://example.com", "token", "sender-test", "ctx", "hello")
+
     def test_rename_command_updates_current_session(self) -> None:
         reply, handled = self.bridge._handle_control_command("sender-test", "/use deep-dive")
         self.assertTrue(handled)

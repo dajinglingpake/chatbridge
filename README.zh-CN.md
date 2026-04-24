@@ -15,10 +15,10 @@ ChatBridge 最初是一个桌面控制应用，现在也支持在无图形界面
 技术上可以理解为五层：
 
 - **入口层**：微信 iLink Bot API、NiceGUI Web UI、MCP JSON-RPC 工具入口。
-- **应用层**：`WeixinBridge` 负责微信消息、Slash 命令、任务反馈和 `/sendfile` 媒体发送；`AgentHub` 负责任务队列、会话和 Agent 调度；`App Service` 负责服务生命周期。
+- **应用层**：`WeixinBridge` 负责微信消息、Slash 命令和文本回复入队；`AgentHub` 负责任务队列、会话、Agent 调度与 `ctx%` 聚合；`App Service` 负责 Hub / Bridge 生命周期。
 - **后端适配层**：`agent_backends/` 统一封装 Codex、Claude、OpenCode 的 CLI 调用差异。
-- **状态层**：配置、账号、任务状态、事件日志、会话文件、导出文件和工作目录都保留在项目本地目录中，便于调试和部署。
-- **媒体层**：MCP 工具 `send_weixin_media(target_sender_id, path)` 是主入口；微信侧 `/sendfile` 复用同一实现。两者都会读取项目内允许的图片或文件，调用 iLink `getuploadurl` 获取上传地址，使用 AES-128-ECB 加密上传到 WeChat CDN，再通过 `sendmessage` 发送 `image_item` 或 `file_item`。
+- **状态层**：除了项目内的配置、账号、任务状态、事件日志、会话文件、导出文件和工作目录，`ctx%` 还会读取 Codex 原生本地状态库 `~/.codex/state_*.sqlite` 和对应的 `rollout-*.jsonl`。
+- **出站消息与媒体层**：文本回复和通知统一进入 `Text Outbox`，由 Bridge 后台发送线程串行发往微信；MCP 工具 `send_weixin_media(target_sender_id, path)` 是媒体主入口，微信侧 `/sendfile` 复用同一实现，调用 iLink `getuploadurl`、上传到 WeChat CDN，再通过 `sendmessage` 发送 `text_item`、`image_item` 或 `file_item`。
 
 ## 仓库状态
 

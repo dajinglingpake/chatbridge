@@ -53,6 +53,8 @@ class McpServiceTests(unittest.TestCase):
 
     def test_send_weixin_media_sends_allowed_project_file(self) -> None:
         target_file = self.app_dir / "docs" / "diagram.png"
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+        target_file.write_bytes(b"png-data")
         fake_bridge = SimpleNamespace(
             context_tokens={"sender-a": "ctx-a"},
             _load_account=lambda: {"token": "token-a", "baseUrl": "https://example.com"},
@@ -63,14 +65,15 @@ class McpServiceTests(unittest.TestCase):
             with patch("core.mcp_service.BridgeConfig.load", return_value=SimpleNamespace()):
                 result = send_weixin_media("sender-a", "docs/diagram.png")
         self.assertTrue(result.ok)
-        fake_bridge._send_media_file.assert_called_once_with(
-            "https://example.com",
-            "token-a",
-            "sender-a",
-            "ctx-a",
-            target_file,
-        )
-        self.assertEqual("diagram.png", result.data["file_name"])
+        args = fake_bridge._send_media_file.call_args.args
+        self.assertEqual(("https://example.com", "token-a", "sender-a", "ctx-a"), args[:4])
+        sent_file = args[4]
+        self.assertNotEqual(target_file, sent_file)
+        self.assertEqual(target_file.read_bytes(), sent_file.read_bytes())
+        self.assertEqual(target_file.suffix, sent_file.suffix)
+        self.assertIn(".runtime/exports/", str(sent_file))
+        self.assertEqual(str(target_file), result.data["source_path"])
+        self.assertEqual(sent_file.name, result.data["file_name"])
 
     def test_send_weixin_media_rejects_missing_path(self) -> None:
         result = send_weixin_media("sender-a", "")

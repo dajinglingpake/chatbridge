@@ -15,10 +15,10 @@ ChatBridge provides a single public entrypoint with parameter-controlled web mod
 Technically, the system has five layers:
 
 - **Entry layer**: WeChat iLink Bot API, NiceGUI Web UI, and MCP JSON-RPC tools.
-- **Application layer**: `WeixinBridge` handles WeChat messages, slash commands, task feedback, and `/sendfile`; `AgentHub` handles task queues, sessions, and agent dispatch; `App Service` handles service lifecycle.
+- **Application layer**: `WeixinBridge` handles WeChat messages, slash commands, and queued text replies; `AgentHub` handles task queues, sessions, agent dispatch, and `ctx%` aggregation; `App Service` handles Hub / Bridge lifecycle.
 - **Backend adapter layer**: `agent_backends/` normalizes Codex, Claude, and OpenCode CLI differences.
-- **State layer**: config, account files, task state, event logs, session files, exports, and work directories stay local to the project.
-- **Media layer**: MCP tool `send_weixin_media(target_sender_id, path)` is the primary entrypoint; WeChat `/sendfile` reuses the same implementation. Both read allowed project files, call iLink `getuploadurl`, upload AES-128-ECB encrypted bytes to WeChat CDN, then send `image_item` or `file_item` with `sendmessage`.
+- **State layer**: in addition to project-local config, accounts, task state, event logs, session files, exports, and work directories, `ctx%` reads Codex native local state from `~/.codex/state_*.sqlite` and the matching `rollout-*.jsonl`.
+- **Outbound messaging and media layer**: text replies and notices flow through a shared `Text Outbox`, then the Bridge sender worker serializes delivery to WeChat; MCP tool `send_weixin_media(target_sender_id, path)` is the primary media entrypoint, WeChat `/sendfile` reuses the same implementation, and both call iLink `getuploadurl`, upload to WeChat CDN, then send `text_item`, `image_item`, or `file_item` with `sendmessage`.
 
 ## Repository Status
 
