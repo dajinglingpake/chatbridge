@@ -70,11 +70,13 @@ python3 ./main.py --host 0.0.0.0 --port 8765
 首次运行时，应用会自动：
 
 - 创建 `.runtime/`
+- 安装 `requirements.txt` 中的 Python 依赖
 - 执行环境检测
 - 在可能的情况下自动安装或补齐缺失的 Windows 工具链
   - `nvm for Windows`
   - `Node.js 24.14.1`
   - `Codex CLI`
+  - `Claude Code`
   - `OpenCode CLI`
 
 之后统一 UI 会继续告诉用户下一步应该做什么。
@@ -85,6 +87,7 @@ python3 ./main.py --host 0.0.0.0 --port 8765
 
 - Node.js / npm
 - Codex CLI
+- Claude Code
 - OpenCode CLI
 
 推荐安装路径：
@@ -140,8 +143,13 @@ accounts/
 - 日志
 - PID 文件
 - 状态文件
-- 会话文件
 - Python 字节码缓存
+
+持久会话文件应保存在：
+
+```text
+sessions/
+```
 
 这些都是可丢弃的运行时产物，不应被提交。
 

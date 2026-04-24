@@ -20,15 +20,6 @@ Technically, the system has five layers:
 - **State layer**: in addition to project-local config, accounts, task state, event logs, session files, exports, and work directories, `ctx%` reads Codex native local state from `~/.codex/state_*.sqlite` and the matching `rollout-*.jsonl`.
 - **Outbound messaging and media layer**: text replies and notices flow through a shared `Text Outbox`, then the Bridge sender worker serializes delivery to WeChat; MCP tool `send_weixin_media(target_sender_id, path)` is the primary media entrypoint, WeChat `/sendfile` reuses the same implementation, and both call iLink `getuploadurl`, upload to WeChat CDN, then send `text_item`, `image_item`, or `file_item` with `sendmessage`.
 
-## WeChat Protocol Notes
-
-Current implementation: [weixin_hub_bridge.py](weixin_hub_bridge.py) calls the iLink HTTP APIs directly (`getupdates`, `sendmessage`, `getuploadurl`, `getconfig`, `sendtyping`).
-
-References:
-
-- Tencent `openclaw-weixin`: <https://github.com/Tencent/openclaw-weixin>
-- `wechat-ilink-client`: <https://github.com/photon-hq/wechat-ilink-client>
-
 ## Repository Status
 
 This repository is intended to be pushed to GitHub as normal source code.
@@ -229,14 +220,7 @@ The repo already ignores:
 - `config/agent_hub.json`: primary Agent Hub config
 - `config/weixin_bridge.json`: primary WeChat bridge config
 - `agent_backends/`: backend interface and isolated implementations; new `*_backend.py` files are auto-discovered
-- `weixin_hub_bridge.py`: WeChat bridge
-
-## Notes
-
-- The project now has a shared UI direction for Windows, Linux, and headless mode
-- `main.py` is the public entrypoint, and `ui_main.py` is the shared bootstrap module
-- The preferred Node path is `nvm for Windows` with `Node.js 24.14.1`
-- Hub and bridge communicate through local runtime IPC
+- `weixin_hub_bridge.py`: WeChat bridge; protocol references: Tencent `openclaw-weixin`, `wechat-ilink-client`
 
 ## WeChat Commands
 
@@ -308,6 +292,12 @@ The bridge supports the following WeChat commands:
   Toggle all notices at once
 - `/notify service-on|service-off`
   Toggle service lifecycle notices
+- `/notify config-on|config-off`
+  Toggle configuration change notices
+- `/notify task-on|task-off`
+  Toggle task notices
+- `/notify test`
+  Send a notice-path test message
 
 ## MCP Management Assistant
 
@@ -325,21 +315,22 @@ This MCP server is designed as an isolated control plane instead of reusing ordi
 - Any bridge command execution must explicitly target a `target_sender_id`
 - Delegating work to other agents or starting new agent sessions will not implicitly move the management assistant into another session
 
-To reduce accidental state changes, the management assistant must explicitly enter and exit control mode:
-
-- `enter_control_mode`
-  Enables state-changing operations and agent delegation
-- `exit_control_mode`
-  Leaves management mode and falls back to read-only queries
-
 Current MCP tools include:
 
-- `get_manager_guide`
-  Show control-plane rules and the recommended workflow
-- `get_management_snapshot`
+- `get_tool_guide`
+  Show built-in bridge tool rules and the recommended workflow
+- `get_command_catalog`
+  Show the bridge command catalog and descriptions
+- `get_sender_snapshot`
   Show the global overview, or a specific sender snapshot via `target_sender_id`
-- `run_sender_command`
+- `list_senders`
+  List all senders with session summaries
+- `execute_sender_command`
   Execute a bridge slash command for a specific sender
+- `restart_services`
+  Restart Hub and Bridge, or restart Bridge only
+- `send_weixin_media`
+  Send an image or file to a target WeChat sender
 - `start_agent_session`
   Start a fresh agent session and send the first instruction
 - `delegate_task`
