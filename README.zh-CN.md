@@ -20,15 +20,6 @@ ChatBridge 最初是一个桌面控制应用，现在也支持在无图形界面
 - **状态层**：除了项目内的配置、账号、任务状态、事件日志、会话文件、导出文件和工作目录，`ctx%` 还会读取 Codex 原生本地状态库 `~/.codex/state_*.sqlite` 和对应的 `rollout-*.jsonl`。
 - **出站消息与媒体层**：文本回复和通知统一进入 `Text Outbox`，由 Bridge 后台发送线程串行发往微信；MCP 工具 `send_weixin_media(target_sender_id, path)` 是媒体主入口，微信侧 `/sendfile` 复用同一实现，调用 iLink `getuploadurl`、上传到 WeChat CDN，再通过 `sendmessage` 发送 `text_item`、`image_item` 或 `file_item`。
 
-## 微信协议说明
-
-当前实现：由 [weixin_hub_bridge.py](weixin_hub_bridge.py) 直接调用 iLink HTTP 接口（`getupdates`、`sendmessage`、`getuploadurl`、`getconfig`、`sendtyping`）。
-
-参考来源：
-
-- Tencent `openclaw-weixin`：<https://github.com/Tencent/openclaw-weixin>
-- `wechat-ilink-client`：<https://github.com/photon-hq/wechat-ilink-client>
-
 ## 仓库状态
 
 这个仓库旨在以普通源码仓库的方式托管到 GitHub。
@@ -142,8 +133,6 @@ Linux / 无桌面环境可以使用 Web 模式：
 python3 ./main.py --host 0.0.0.0 --port 8765
 ```
 
-如果你要开始切统一的 Web/Desktop 双模 UI，可以使用新的 NiceGUI 入口：
-
 ```bash
 python3 ./main.py --host 0.0.0.0 --port 8765
 ```
@@ -217,8 +206,11 @@ Web 模式启动后，终端会打印本地地址和局域网地址，例如 `ht
 - 日志
 - PID 文件
 - 状态快照
-- 会话文件
 - Python 字节码缓存
+
+持久会话文件应保存在：
+
+- `sessions/`
 
 这些内容不应被提交。
 
@@ -252,16 +244,7 @@ Web 模式启动后，终端会打印本地地址和局域网地址，例如 `ht
 - `config/agent_hub.json`：主线 Agent Hub 配置文件
 - `config/weixin_bridge.json`：主线微信桥配置文件
 - `agent_backends/`：Agent 后端接口与独立实现目录，新后端放入这里会被 registry 自动发现
-- `weixin_hub_bridge.py`：微信桥接层
-
-## 说明
-
-- 当前项目已支持基础跨平台运行，桌面模式仍主要面向 Windows
-- 关闭桌面窗口不一定等于干净关闭后台，除非应用主动停止整套服务
-- 桌面应用负责展示当前状态以及推荐的下一步操作
-- 当前统一 UI 主线不再依赖 `PySide6`
-- 推荐的 Node 安装路径在 Windows 上是 `nvm for Windows` + `Node.js 24.14.1`
-- Hub 与 Bridge 通过本地运行时 IPC 通信
+- `weixin_hub_bridge.py`：微信桥接层；协议参考：Tencent `openclaw-weixin`、`wechat-ilink-client`
 
 ## 微信命令
 
@@ -337,6 +320,12 @@ Web 模式启动后，终端会打印本地地址和局域网地址，例如 `ht
   一次性开关全部通知
 - `/notify service-on|service-off`
   开关服务生命周期通知
+- `/notify config-on|config-off`
+  开关配置变更通知
+- `/notify task-on|task-off`
+  开关任务通知
+- `/notify test`
+  发送一条通知链路测试消息
 
 ## MCP 管理助手
 
@@ -354,21 +343,22 @@ Web 模式启动后，终端会打印本地地址和局域网地址，例如 `ht
 - 对目标发送方执行桥命令时，必须显式传入 `target_sender_id`
 - 对其他 Agent 委派任务或启动新会话时，不会隐式把管理助手自己切到别的会话
 
-为了避免误操作，管理助手必须显式进入和退出管理模式：
-
-- `enter_control_mode`
-  进入管理模式，之后才允许执行会修改状态或触发其他 Agent 的操作
-- `exit_control_mode`
-  退出管理模式，之后只保留只读查询
-
 当前 MCP 主要工具包括：
 
-- `get_manager_guide`
-  查看管理助手规则和推荐流程
-- `get_management_snapshot`
+- `get_tool_guide`
+  查看内置桥接工具规则与推荐操作流程
+- `get_command_catalog`
+  查看桥接层命令清单及说明
+- `get_sender_snapshot`
   查看全局总览，或按 `target_sender_id` 查看某个发送方的当前上下文
-- `run_sender_command`
+- `list_senders`
+  列出全局所有发送方及其会话摘要
+- `execute_sender_command`
   对指定发送方执行桥接层 slash 命令
+- `restart_services`
+  重启 Hub 和 Bridge，或只重启 Bridge
+- `send_weixin_media`
+  向指定微信发送方发送图片或文件
 - `start_agent_session`
   显式启动一个新的 Agent 会话，并发送首条指令
 - `delegate_task`
@@ -381,7 +371,7 @@ Web 模式启动后，终端会打印本地地址和局域网地址，例如 `ht
 当前系统里的上下文关系是固定的：
 
 - `Agent`
-  定义默认 backend、默认 model、默认 project(workdir) 和提示词前缀
+  定义默认 backend、默认 model、默认 project(workdir) 和 prompt prefix
 - `Session`
   只属于某个发送方，`/use` 只切这个发送方，不会影响其他发送方
 - `Backend`

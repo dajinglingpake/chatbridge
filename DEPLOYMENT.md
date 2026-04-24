@@ -70,11 +70,13 @@ python3 ./main.py --host 0.0.0.0 --port 8765
 On first run, the app will automatically:
 
 - create `.runtime/`
+- install Python dependencies from `requirements.txt`
 - run environment detection
 - try to auto-install missing Windows toolchain components when possible
   - `nvm for Windows`
   - `Node.js 24.14.1`
   - `Codex CLI`
+  - `Claude Code`
   - `OpenCode CLI`
 
 After that, the shared UI layer will tell the user what the next step is.
@@ -85,6 +87,7 @@ The project still depends on these external tools:
 
 - Node.js / npm
 - Codex CLI
+- Claude Code
 - OpenCode CLI
 
 The preferred installation path is:
