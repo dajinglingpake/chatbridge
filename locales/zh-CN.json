@@ -199,6 +199,8 @@
   "bridge.task.succeeded": "任务执行完成\\n任务 ID: {task_id}\\n会话: {session}\\n会话 ID: {session_id}\\n后端: {backend}\\n模型: {model}\\n工程目录: {workdir}\\n\\n结果:\\n{result}",
   "bridge.task.canceled": "{backend} 任务已取消\\n任务 ID: {task_id}\\n会话: {session}\\n会话 ID: {session_id}\\n原因: {error}\\n\\n{hint}",
   "bridge.task.failed": "{backend} 任务失败\\n任务 ID: {task_id}\\n会话: {session}\\n会话 ID: {session_id}\\n原因: {error}\\n\\n{hint}",
+  "bridge.delivery_retry.header": "(resend={attempt})",
+  "bridge.delivery_failed.notice": "上一条消息发送失败，已停止重试。\\n失败条数: {count}\\n尝试次数: {attempts}\\n原因: {error}\\n摘要: {preview}",
   "ui.summary.checking": "正在检测当前状态...",
   "ui.next_step.initial": "会自动检测环境、微信登录状态和后台进程。",
   "ui.status.checking": "检测中",
