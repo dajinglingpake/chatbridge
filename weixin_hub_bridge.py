@@ -811,6 +811,8 @@ class WeixinBridge:
         try:
             with sender_send_lock(to_user_id):
                 response = self._post_json(f"{base_url}/ilink/bot/sendmessage", body, token=token, timeout_ms=15000)
+            if isinstance(response, dict) and response.get("ret") not in (None, 0):
+                raise RuntimeError(f"sendmessage returned ret={response.get('ret')}: {response}")
             if isinstance(response, dict):
                 print(
                     f"[bridge] sent reply to={to_user_id} ret={response.get('ret')} errcode={response.get('errcode')} errmsg={response.get('errmsg')} preview={preview}",

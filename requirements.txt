@@ -2,3 +2,4 @@ psutil
 qrcode
 nicegui
 cryptography
+Pillow
