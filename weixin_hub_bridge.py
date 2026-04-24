@@ -27,6 +27,7 @@ from core.app_service import schedule_named_action
 from core.context_relations import build_context_relation_lines
 from core.http_json import request_json
 from core.json_store import load_json, save_json
+from core.weixin_delivery_failures import pop_failed_delivery, record_failed_delivery
 from core.runtime_paths import (
     BRIDGE_EVENT_LOG_PATH,
     BRIDGE_MESSAGE_AUDIT_LOG_PATH,
@@ -49,7 +50,7 @@ from core.state_models import (
     WeixinSessionMeta,
 )
 from core.weixin_send_gate import sender_send_lock
-from core.weixin_text_outbox import enqueue_text_message, pop_text_messages, requeue_text_message
+from core.weixin_text_outbox import MAX_RETRY_ATTEMPTS, enqueue_text_message, pop_text_messages, requeue_text_message
 from core.weixin_notifier import broadcast_weixin_notice_by_kind, build_task_followup_hint
 from core.weixin_message_format import format_duration_since, format_weixin_reply, now_iso, prefix_weixin_output
 from local_ipc import create_request, wait_for_response
@@ -73,6 +74,8 @@ SUPPORTED_BACKENDS = set(supported_backend_keys())
 SESSION_PAGE_SIZE = 5
 ACTIVE_TASK_POLL_TIMEOUT_MS = 1000
 TERMINAL_TASK_STATUSES = frozenset({"succeeded", "failed", "canceled", "unknown_after_restart"})
+TYPING_KEEPALIVE_SECONDS = 5
+TYPING_TICKET_TTL_SECONDS = 23 * 60 * 60
 MEDIA_SEND_MAX_BYTES = 25 * 1024 * 1024
 MEDIA_UPLOAD_TYPE_IMAGE = 1
 MEDIA_UPLOAD_TYPE_FILE = 3
@@ -127,6 +130,19 @@ def resolve_bridge_language(config_language: str) -> str:
 
 def _normalize_message_for_dedupe(text: str) -> str:
     return "\n".join(line.rstrip() for line in str(text or "").strip().splitlines()).strip()
+
+
+def _append_delivery_header_suffix(text: str, suffix: str) -> str:
+    lines = str(text or "").splitlines()
+    if not lines or not suffix:
+        return str(text or "")
+    header_parts = lines[0].split(" · ")
+    if header_parts:
+        header_parts[0] = f"{header_parts[0]} {suffix}"
+        lines[0] = " · ".join(header_parts)
+    else:
+        lines[0] = f"{lines[0]} {suffix}"
+    return "\n".join(lines)
 
 
 class WeixinBridge:
@@ -210,26 +226,28 @@ class WeixinBridge:
             except Exception as exc:  # noqa: BLE001
                 print(f"[bridge] send worker account load failed: {exc}", flush=True)
                 for message in messages:
-                    if int(message.get("attempt") or 0) < 3:
-                        requeue_text_message(message)
+                    self._handle_async_send_failure(message, exc)
                 time.sleep(1)
                 continue
             for message in messages:
                 try:
+                    text = str(message.get("text") or "")
+                    attempt = int(message.get("attempt") or 0)
+                    if attempt > 0:
+                        text = self._format_retried_delivery_text(text, attempt)
                     self._deliver_text_now(
                         base_url,
                         token,
                         str(message.get("to_user_id") or ""),
                         str(message.get("context_token") or ""),
-                        str(message.get("text") or ""),
+                        text,
                     )
                 except Exception as exc:  # noqa: BLE001
                     print(
                         f"[bridge] async send failed to={message.get('to_user_id', '')} error={exc}",
                         flush=True,
                     )
-                    if int(message.get("attempt") or 0) < 3:
-                        requeue_text_message(message)
+                    self._handle_async_send_failure(message, exc)
 
     def _notify_service_started(self) -> None:
         if self._has_pending_restart_notice():
@@ -547,6 +565,43 @@ class WeixinBridge:
             source=tracked.source,
         )
 
+    def _ensure_task_typing(
+        self,
+        base_url: str,
+        token: str,
+        tracked: WeixinPendingTaskState,
+    ) -> bool:
+        now_seconds = int(time.time())
+        if tracked.typing_last_sent_at and now_seconds - tracked.typing_last_sent_at < TYPING_KEEPALIVE_SECONDS:
+            return False
+        if (
+            not tracked.typing_ticket
+            or not tracked.typing_ticket_refreshed_at
+            or now_seconds - tracked.typing_ticket_refreshed_at >= TYPING_TICKET_TTL_SECONDS
+        ):
+            tracked.typing_ticket = self._get_typing_ticket(
+                base_url,
+                token,
+                tracked.sender_id,
+                self._resolve_context_token_for_sender(tracked),
+            )
+            tracked.typing_ticket_refreshed_at = now_seconds
+        self._send_typing(base_url, token, tracked.sender_id, tracked.typing_ticket, status=1)
+        tracked.typing_last_sent_at = now_seconds
+        return True
+
+    def _stop_task_typing(
+        self,
+        base_url: str,
+        token: str,
+        tracked: WeixinPendingTaskState,
+    ) -> bool:
+        if not tracked.typing_ticket or not tracked.typing_last_sent_at:
+            return False
+        self._send_typing(base_url, token, tracked.sender_id, tracked.typing_ticket, status=2)
+        tracked.typing_last_sent_at = 0
+        return True
+
     def _notify_task_progress_update(
         self,
         base_url: str,
@@ -608,6 +663,12 @@ class WeixinBridge:
                 print(f"[bridge] pending task payload invalid for {task_id}")
                 continue
             state_updated = False
+            if task.status in {"queued", "running"}:
+                try:
+                    if self._ensure_task_typing(base_url, token, tracked):
+                        state_updated = True
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[bridge] typing keepalive failed for {task_id}: {exc}", flush=True)
             if task.status == "running" and tracked.last_status != "running":
                 self._notify_task_progress(base_url, token, tracked, task)
                 tracked.last_status = "running"
@@ -647,6 +708,7 @@ class WeixinBridge:
                         context_left_percent=self._resolve_task_context_left_percent(task),
                     ),
                 )
+                self._stop_task_typing_best_effort(base_url, token, tracked, task.id)
                 self._append_event_log(
                     event="succeeded",
                     task_id=task.id,
@@ -676,6 +738,7 @@ class WeixinBridge:
                         context_left_percent=self._resolve_task_context_left_percent(task),
                     ),
                 )
+            self._stop_task_typing_best_effort(base_url, token, tracked, task.id)
             self._append_event_log(
                 event="succeeded",
                 task_id=task.id,
@@ -711,6 +774,7 @@ class WeixinBridge:
                     ),
                 ),
             )
+            self._stop_task_typing_best_effort(base_url, token, tracked, task.id)
             self._append_event_log(
                 event="canceled",
                 task_id=task.id,
@@ -744,6 +808,7 @@ class WeixinBridge:
                 ),
             ),
         )
+        self._stop_task_typing_best_effort(base_url, token, tracked, task.id)
         self._append_event_log(
             event="failed",
             task_id=task.id,
@@ -758,6 +823,18 @@ class WeixinBridge:
             source=tracked.source,
         )
         self.state.record_failed()
+
+    def _stop_task_typing_best_effort(
+        self,
+        base_url: str,
+        token: str,
+        tracked: WeixinPendingTaskState,
+        task_id: str,
+    ) -> None:
+        try:
+            self._stop_task_typing(base_url, token, tracked)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[bridge] typing stop failed for {task_id}: {exc}", flush=True)
 
     def _resolve_task_context_left_percent(self, task: HubTask) -> int | None:
         if str(task.backend or "").strip().lower() != "codex":
@@ -788,7 +865,42 @@ class WeixinBridge:
         preview = " ".join(text.split())[:160]
         print(f"[bridge] queued reply to={to_user_id} preview={preview}", flush=True)
 
-    def _deliver_text_now(self, base_url: str, token: str, to_user_id: str, context_token: Any, text: str) -> None:
+    def _format_retried_delivery_text(self, text: str, attempt: int) -> str:
+        if attempt <= 0:
+            return text
+        return _append_delivery_header_suffix(
+            text,
+            self._t("bridge.delivery_retry.header", attempt=attempt),
+        )
+
+    def _handle_async_send_failure(self, message: dict[str, object], error: Exception) -> None:
+        attempt = int(message.get("attempt") or 0)
+        if attempt < MAX_RETRY_ATTEMPTS:
+            requeue_text_message(message)
+            return
+        preview = " ".join(str(message.get("text") or "").split())[:160]
+        record_failed_delivery(
+            to_user_id=str(message.get("to_user_id") or ""),
+            context_token=str(message.get("context_token") or ""),
+            text_preview=preview,
+            attempts=attempt,
+            error=str(error),
+        )
+        print(
+            f"[bridge] dropped exhausted reply to={message.get('to_user_id', '')} attempts={attempt} preview={preview}",
+            flush=True,
+        )
+
+    def _deliver_text_now(
+        self,
+        base_url: str,
+        token: str,
+        to_user_id: str,
+        context_token: Any,
+        text: str,
+        *,
+        flush_failure_notice: bool = True,
+    ) -> None:
         text = format_weixin_reply(text)
         body = {
             "msg": {
@@ -823,6 +935,71 @@ class WeixinBridge:
         except Exception as exc:  # noqa: BLE001
             print(f"[bridge] send reply failed to={to_user_id} error={exc} preview={preview}", flush=True)
             raise
+        if flush_failure_notice:
+            self._flush_failed_delivery_notice(base_url, token, str(to_user_id or ""), str(context_token or ""))
+
+    def _flush_failed_delivery_notice(self, base_url: str, token: str, to_user_id: str, context_token: str) -> None:
+        failed = pop_failed_delivery(to_user_id)
+        if not failed:
+            return
+        notice = self._t(
+            "bridge.delivery_failed.notice",
+            count=int(failed.get("count") or 1),
+            attempts=int(failed.get("attempts") or 0),
+            error=str(failed.get("error") or "-"),
+            preview=str(failed.get("text_preview") or "-"),
+        )
+        try:
+            self._deliver_text_now(
+                base_url,
+                token,
+                to_user_id,
+                context_token or str(failed.get("context_token") or ""),
+                notice,
+                flush_failure_notice=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            record_failed_delivery(
+                to_user_id=to_user_id,
+                context_token=context_token or str(failed.get("context_token") or ""),
+                text_preview=str(failed.get("text_preview") or ""),
+                attempts=int(failed.get("attempts") or 0),
+                error=str(exc),
+            )
+
+    def _get_typing_ticket(self, base_url: str, token: str, to_user_id: str, context_token: str) -> str:
+        response = self._post_json(
+            f"{base_url}/ilink/bot/getconfig",
+            {
+                "ilink_user_id": to_user_id,
+                "context_token": context_token or None,
+                "base_info": {"channel_version": "2.1.1"},
+            },
+            token=token,
+            timeout_ms=15000,
+        )
+        if isinstance(response, dict) and response.get("ret") not in (None, 0):
+            raise RuntimeError(f"getconfig returned ret={response.get('ret')}: {response}")
+        ticket = str((response or {}).get("typing_ticket") or "").strip()
+        if not ticket:
+            raise RuntimeError(f"getconfig returned no typing_ticket: {response}")
+        return ticket
+
+    def _send_typing(self, base_url: str, token: str, to_user_id: str, typing_ticket: str, *, status: int) -> None:
+        with sender_send_lock(to_user_id):
+            response = self._post_json(
+                f"{base_url}/ilink/bot/sendtyping",
+                {
+                    "ilink_user_id": to_user_id,
+                    "typing_ticket": typing_ticket,
+                    "status": status,
+                    "base_info": {"channel_version": "2.1.1"},
+                },
+                token=token,
+                timeout_ms=15000,
+            )
+        if isinstance(response, dict) and response.get("ret") not in (None, 0):
+            raise RuntimeError(f"sendtyping returned ret={response.get('ret')}: {response}")
 
     def _handle_sendfile_command(self, base_url: str, token: str, sender_id: str, context_token: Any, text: str) -> bool:
         raw = self._normalize_command_text(text)

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from bridge_config import BridgeConfig
-from core.state_models import IpcResponseEnvelope
+from core.state_models import IpcResponseEnvelope, WeixinPendingTaskState
 from core.weixin_message_format import format_weixin_reply, prefix_weixin_output
 from weixin_hub_bridge import WeixinBridge
 
@@ -156,8 +156,30 @@ class FeedbackBridge(FakeBridge):
     def _deliver_text_now(self, base_url: str, token: str, to_user_id: str, context_token, text: str) -> None:
         self.sent_texts.append(text)
 
+    def _post_json(self, url: str, body: dict[str, object], token: str = "", timeout_ms: int = 15000) -> dict[str, object]:
+        if url.endswith("/ilink/bot/getconfig"):
+            return {"ret": 0, "typing_ticket": "ticket-feedback"}
+        if url.endswith("/ilink/bot/sendtyping"):
+            return {"ret": 0}
+        raise RuntimeError(f"unexpected url: {url}")
+
     def poll_pending(self) -> None:
         self._poll_pending_tasks("https://example.com", "token")
+
+
+class TypingBridge(FeedbackBridge):
+    def __init__(self, config: BridgeConfig, task_states: list[dict[str, object]]) -> None:
+        self.typing_calls: list[tuple[str, dict[str, object]]] = []
+        super().__init__(config, task_states)
+
+    def _post_json(self, url: str, body: dict[str, object], token: str = "", timeout_ms: int = 15000) -> dict[str, object]:
+        if url.endswith("/ilink/bot/getconfig"):
+            self.typing_calls.append(("getconfig", dict(body)))
+            return {"ret": 0, "typing_ticket": "ticket-typing"}
+        if url.endswith("/ilink/bot/sendtyping"):
+            self.typing_calls.append(("sendtyping", dict(body)))
+            return {"ret": 0}
+        return super()._post_json(url, body, token=token, timeout_ms=timeout_ms)
 
 
 class TimeoutPollingBridge(FakeBridge):
@@ -215,6 +237,22 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         )
         self.assertEqual("running · 3s · ctx 20% · 18:09:46\n\nhello", output)
         self.assertEqual(output, format_weixin_reply(output))
+
+    def test_format_retried_delivery_text_updates_header_only(self) -> None:
+        original = "done · 10s · 18:09:46\n\nfinal output"
+        retried = self.bridge._format_retried_delivery_text(original, 2)
+        self.assertEqual(
+            "done (resend=2) · 10s · 18:09:46\n\nfinal output",
+            retried,
+        )
+
+    def test_format_retried_delivery_text_keeps_generic_reply_header_compact(self) -> None:
+        original = format_weixin_reply("hello", at="2026-04-24T17:04:32")
+        retried = self.bridge._format_retried_delivery_text(original, 5)
+        self.assertEqual(
+            "reply (resend=5) · - · 17:04:32\n\nhello",
+            retried,
+        )
 
     def setUp(self) -> None:
         self._tempdir = tempfile.TemporaryDirectory()
@@ -1085,6 +1123,81 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                 bridge.poll_pending()
             self.assertIn(" · ctx 18% · ", bridge.sent_texts[0].splitlines()[0])
             self.assertIn(" · ctx 18% · ", bridge.sent_texts[1].splitlines()[0])
+
+    def test_poll_pending_tasks_starts_typing_indicator_for_active_task(self) -> None:
+        bridge = TypingBridge(
+            BridgeConfig.load(),
+            [
+                {
+                    "id": "task-feedback-001",
+                    "sender_id": "sender-test",
+                    "session_name": "default",
+                    "status": "running",
+                    "agent_id": "main",
+                    "agent_name": "default",
+                    "backend": "codex",
+                    "prompt": "hello",
+                    "created_at": "2026-04-20T12:00:00",
+                }
+            ],
+        )
+        bridge.pending_tasks["task-feedback-001"] = WeixinPendingTaskState(
+            task_id="task-feedback-001",
+            sender_id="sender-test",
+            session_name="default",
+            backend="codex",
+            context_token="ctx-live",
+        )
+
+        with patch("weixin_hub_bridge.time.time", return_value=100):
+            bridge.poll_pending()
+
+        self.assertEqual(
+            [
+                ("getconfig", {"ilink_user_id": "sender-test", "context_token": "ctx-live", "base_info": {"channel_version": "2.1.1"}}),
+                ("sendtyping", {"ilink_user_id": "sender-test", "typing_ticket": "ticket-typing", "status": 1, "base_info": {"channel_version": "2.1.1"}}),
+            ],
+            bridge.typing_calls,
+        )
+
+    def test_poll_pending_tasks_stops_typing_indicator_on_terminal_status(self) -> None:
+        bridge = TypingBridge(
+            BridgeConfig.load(),
+            [
+                {
+                    "id": "task-feedback-001",
+                    "sender_id": "sender-test",
+                    "session_name": "default",
+                    "status": "succeeded",
+                    "agent_id": "main",
+                    "agent_name": "default",
+                    "backend": "codex",
+                    "prompt": "hello",
+                    "output": "world",
+                    "created_at": "2026-04-20T12:00:00",
+                    "finished_at": "2026-04-20T12:00:03",
+                }
+            ],
+        )
+        tracked = WeixinPendingTaskState(
+            task_id="task-feedback-001",
+            sender_id="sender-test",
+            session_name="default",
+            backend="codex",
+            context_token="ctx-live",
+        )
+        bridge.pending_tasks["task-feedback-001"] = tracked
+        tracked.typing_ticket = "ticket-typing"
+        tracked.typing_last_sent_at = 95
+
+        bridge.poll_pending()
+
+        self.assertEqual(
+            [
+                ("sendtyping", {"ilink_user_id": "sender-test", "typing_ticket": "ticket-typing", "status": 2, "base_info": {"channel_version": "2.1.1"}}),
+            ],
+            bridge.typing_calls,
+        )
 
     def test_handle_message_sends_completion_notice_for_duplicate_final_result_after_progress(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
