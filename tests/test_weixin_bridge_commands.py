@@ -266,8 +266,10 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         self.restart_notice_path = temp_root / ".runtime" / "state" / "weixin_restart_notice.json"
         self.service_action_state_path = temp_root / ".runtime" / "state" / "service_action_state.json"
         self.state_path = temp_root / ".runtime" / "state" / "weixin_hub_bridge_state.json"
+        self.session_dir = temp_root / "sessions"
         self.conversation_path.parent.mkdir(parents=True, exist_ok=True)
         self.event_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.session_dir.mkdir(parents=True, exist_ok=True)
         self._patchers = [
             patch("weixin_hub_bridge.CONVERSATION_PATH", self.conversation_path),
             patch("weixin_hub_bridge.PENDING_TASKS_PATH", self.pending_tasks_path),
@@ -277,6 +279,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
             patch("weixin_hub_bridge.RESTART_NOTICE_PATH", self.restart_notice_path),
             patch("weixin_hub_bridge.SERVICE_ACTION_STATE_FILE", self.service_action_state_path),
             patch("weixin_hub_bridge.STATE_PATH", self.state_path),
+            patch("weixin_hub_bridge.SESSION_DIR", self.session_dir),
             patch("weixin_hub_bridge.load_account_context_tokens", return_value={}),
             patch("weixin_hub_bridge.save_account_context_tokens", return_value=None),
         ]
@@ -322,6 +325,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         self.assertTrue(handled)
         self.assertIn("Available commands:", reply)
         self.assertIn("/restart [bridge|status]", reply)
+        self.assertIn("/clear", reply)
         self.assertIn("\n\nNormal messages:", reply)
         self.assertNotIn("/manage", reply)
 
@@ -1856,6 +1860,25 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         self.assertIn("Deleted: zzz-empty", reply)
         binding = self.bridge.conversations["sender-test"]
         self.assertNotIn("zzz-empty", binding.sessions)
+
+    def test_clear_command_clears_current_agent_session_id(self) -> None:
+        session_file = self.session_dir / "main__default.txt"
+        session_file.write_text("codex-thread-id", encoding="utf-8")
+
+        reply, handled = self.bridge._handle_control_command("sender-test", "/clear")
+
+        self.assertTrue(handled)
+        self.assertIn("Cleared current agent session", reply)
+        self.assertEqual("", session_file.read_text(encoding="utf-8"))
+        binding = self.bridge.conversations["sender-test"]
+        self.assertIn("default", binding.sessions)
+        self.assertEqual("default", binding.current_session)
+
+    def test_clear_command_reports_already_clear_session(self) -> None:
+        reply, handled = self.bridge._handle_control_command("sender-test", "/clear")
+
+        self.assertTrue(handled)
+        self.assertIn("already clear", reply)
 
     def test_preview_command_returns_recent_rounds(self) -> None:
         reply, handled = self.bridge._handle_control_command("sender-test", "/preview deep-dive")

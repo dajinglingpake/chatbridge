@@ -223,7 +223,8 @@ def create_ui() -> None:
             }
         }
         </style>
-        """
+        """,
+        shared=True,
     )
     state = {
         "auto_refresh": True,

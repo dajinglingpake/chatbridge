@@ -256,6 +256,8 @@ The bridge supports the following WeChat commands:
   Rename the current or target session
 - `/delete <name>`
   Delete a specific session
+- `/clear`
+  Clear the native agent session id for the current session; the next normal message starts a fresh backend session
 - `/cancel [task_id]`
   Cancel the latest queued or running task for the current sender, or a specific task
 - `/retry [task_id]`
@@ -360,6 +362,8 @@ The runtime context model is fixed:
   Show details for a specific task
 - `/last`
   Show the latest task for the current sender
+- `/clear`
+  Clear the native agent session id for the current session
 - `/close`
   Close the current session
 - `/reset`

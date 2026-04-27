@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from typing import Callable, Protocol, Self
+from typing import Callable, Protocol
+
+try:
+    from typing import Self
+except ImportError:  # Python 3.10 compatibility
+    from typing_extensions import Self
 
 from agent_backends import supported_backend_options
 from core.navigation import DIAGNOSTICS_PAGE, HOME_PAGE, ISSUES_PAGE, SESSIONS_PAGE

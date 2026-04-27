@@ -233,6 +233,8 @@ def _get_python_command(gui: bool = False) -> str:
         pythonw = shutil_which("pythonw")
         if pythonw:
             return pythonw
+    if sys.executable:
+        return sys.executable
     python = shutil_which("python")
     if python:
         return python
