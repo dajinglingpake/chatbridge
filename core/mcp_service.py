@@ -201,6 +201,7 @@ def get_command_catalog() -> ToolActionResult:
         {"command": "/use <name>", "category": "session", "description": "切换到指定会话"},
         {"command": "/rename <new>", "category": "session", "description": "重命名当前会话"},
         {"command": "/delete <name>", "category": "session", "description": "删除指定会话"},
+        {"command": "/clear", "category": "session", "description": "清空当前会话绑定的底层 Agent 会话 ID"},
         {"command": "/cancel [task_id]", "category": "task", "description": "取消排队任务"},
         {"command": "/retry [task_id]", "category": "task", "description": "重试最近任务或指定任务"},
         {"command": "/task <id>", "category": "task", "description": "查看任务详情"},

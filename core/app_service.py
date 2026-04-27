@@ -27,6 +27,7 @@ from core.weixin_notifier import broadcast_weixin_notice_by_kind
 
 
 ActionRunner = Callable[[], list[str]]
+STOP_NOTICE_DRAIN_SECONDS = 1.0
 
 
 @dataclass
@@ -79,9 +80,25 @@ def run_named_action(action: str) -> ServiceResult:
     runner = actions.get(action)
     if runner is None:
         return ServiceResult(ok=False, message=f"未知操作：{action}")
+    pre_notice = _broadcast_pre_stop_notice(action) if action in {"stop", "emergency-stop"} else None
     result_message = " | ".join(runner())
+    if pre_notice is not None:
+        return ServiceResult(ok=True, message=f"{result_message} | {pre_notice.summary}")
     notice = broadcast_weixin_notice_by_kind("service", f"服务操作: {action}", result_message)
     return ServiceResult(ok=True, message=f"{result_message} | {notice.summary}")
+
+
+def _broadcast_pre_stop_notice(action: str):
+    snapshot = get_runtime_snapshot()
+    detail = (
+        f"即将执行服务停止操作: {action}\n"
+        f"Hub PID: {snapshot.hub_pid or '-'}\n"
+        f"Bridge PID: {snapshot.bridge_pid or '-'}"
+    )
+    notice = broadcast_weixin_notice_by_kind("service", f"服务操作: {action}", detail)
+    if notice.recipient_count > 0 and notice.error != "disabled":
+        time.sleep(STOP_NOTICE_DRAIN_SECONDS)
+    return notice
 
 
 def schedule_named_action(action: str, *, delay_seconds: float = 1.0) -> ServiceResult:

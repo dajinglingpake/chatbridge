@@ -20,6 +20,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
 
 from agent_backends import get_backend_command_guide, supported_backend_keys
+from agent_backends.shared import resolve_session_file
 from agent_hub import HubConfig
 from bridge_config import APP_DIR, CONFIG_PATH, WEIXIN_ACCOUNTS_DIR, BridgeConfig, normalize_backend
 from core.accounts import load_account_context_tokens, save_account_context_tokens
@@ -39,6 +40,7 @@ from core.runtime_paths import (
     LOG_DIR,
     PROJECT_SPACES_PATH as BRIDGE_PROJECT_SPACES_PATH,
     RUNTIME_DIR,
+    SESSION_DIR,
     STATE_DIR,
 )
 from core.state_models import (
@@ -1291,6 +1293,7 @@ class WeixinBridge:
                 self._t("bridge.help.project.sessions"),
                 self._t("bridge.help.project.switch"),
                 self._t("bridge.help.project.reset"),
+                self._t("bridge.help.clear"),
                 self._t("bridge.help.close"),
                 self._t("bridge.help.reset"),
                 "",
@@ -1670,6 +1673,9 @@ class WeixinBridge:
                 config=self._t("bridge.notify.on") if self.config.config_notice_enabled else self._t("bridge.notify.off"),
                 task=self._t("bridge.notify.on") if self.config.task_notice_enabled else self._t("bridge.notify.off"),
             ), True
+
+        if command == "/clear":
+            return self._clear_current_agent_session(current_session), True
 
         if command in {"/close", "/end"}:
             if current_session == "default":
@@ -2688,6 +2694,20 @@ class WeixinBridge:
 
     def _find_agent_config(self, agent_id: str):
         return next((agent for agent in HubConfig.load().agents if agent.id == agent_id), None)
+
+    def _clear_current_agent_session(self, current_session: str) -> str:
+        agent = self._find_agent_config(self.config.backend_id)
+        if agent is None:
+            return self._t("bridge.agent.not_found", agent=self.config.backend_id)
+
+        session_name = current_session or "default"
+        session_file = resolve_session_file(agent, session_name, SESSION_DIR)
+        backend = normalize_backend(getattr(agent, "backend", "") or self.config.default_backend)
+        if not session_file.exists() or not session_file.read_text(encoding="utf-8").strip():
+            return self._t("bridge.session.clear.empty", session=session_name, backend=backend)
+
+        session_file.write_text("", encoding="utf-8")
+        return self._t("bridge.session.clear", session=session_name, backend=backend)
 
     def _render_status(self, binding: WeixinConversationBinding, current_session: str, backend: str) -> str:
         agent = self._find_agent_config(self.config.backend_id)
