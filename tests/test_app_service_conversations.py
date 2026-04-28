@@ -90,6 +90,7 @@ class AppServiceConversationTests(unittest.TestCase):
 
             with (
                 patch.object(app_service, "BRIDGE_CONVERSATIONS_PATH", conversations_path),
+                patch.object(app_service.BridgeConfig, "load", return_value=_bridge_config(default_backend="codex")),
                 patch.object(app_service, "get_runtime_snapshot", return_value=_runtime_snapshot(bridge_running=False)),
                 patch.object(app_service, "broadcast_weixin_notice_by_kind", return_value=_notice_result()),
             ):

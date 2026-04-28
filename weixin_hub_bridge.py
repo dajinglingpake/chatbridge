@@ -23,7 +23,7 @@ from agent_backends import get_backend_command_guide, supported_backend_keys
 from agent_backends.shared import resolve_session_file
 from agent_hub import HubConfig
 from bridge_config import APP_DIR, CONFIG_PATH, WEIXIN_ACCOUNTS_DIR, BridgeConfig, normalize_backend
-from core.accounts import load_account_context_tokens, save_account_context_tokens
+from core.accounts import account_conversation_path, load_account_context_tokens, save_account_context_tokens
 from core.app_service import schedule_named_action
 from core.context_relations import build_context_relation_lines
 from core.http_json import request_json
@@ -154,12 +154,14 @@ class WeixinBridge:
         self.account_path = Path(config.account_file)
         self.sync_path = Path(config.sync_file)
         self._ensure_local_account_storage()
-        self.conversations = self._load_conversations()
         self.context_tokens = load_account_context_tokens(self.account_path)
+        self.conversation_path = account_conversation_path(CONVERSATION_PATH, config.active_account_id, self.account_path)
+        self.conversations = self._load_conversations()
         self.pending_tasks = self._load_pending_tasks()
         self._recent_message_keys: list[str] = []
         self._recent_message_fingerprints: dict[str, float] = {}
         self._send_worker_started = False
+        self._runtime_config_lock = threading.Lock()
         self.state = WeixinBridgeRuntimeState.create(
             now=now_iso(),
             managed_conversations=len(self.conversations),
@@ -213,6 +215,38 @@ class WeixinBridge:
         worker.start()
         self._send_worker_started = True
 
+    def _reload_runtime_config_if_changed(self) -> None:
+        with self._runtime_config_lock:
+            latest = BridgeConfig.load()
+            latest_account_path = Path(latest.account_file)
+            latest_sync_path = Path(latest.sync_file)
+            same_account = latest_account_path == self.account_path and latest_sync_path == self.sync_path
+            same_language = latest.language == self.config.language
+            same_backend = latest.backend_id == self.config.backend_id
+            if same_account and same_language and same_backend:
+                return
+
+            save_account_context_tokens(self.account_path, self.context_tokens)
+            self._save_conversations()
+            previous_account_id = self.config.active_account_id
+            self.config = latest
+            self.localizer = Localizer(resolve_bridge_language(latest.language))
+            self.account_path = latest_account_path
+            self.sync_path = latest_sync_path
+            self._ensure_local_account_storage()
+            self.context_tokens = load_account_context_tokens(self.account_path)
+            self.conversation_path = account_conversation_path(CONVERSATION_PATH, latest.active_account_id, self.account_path)
+            self.conversations = self._load_conversations()
+            self.state.sync_files(
+                managed_conversations=len(self.conversations),
+                account_file=str(self.account_path),
+                sync_file=str(self.sync_path),
+            )
+            print(
+                f"[bridge] runtime config reloaded: account {previous_account_id or '-'} -> {self.config.active_account_id or '-'}",
+                flush=True,
+            )
+
     def _send_worker_loop(self) -> None:
         while True:
             messages = pop_text_messages(limit=20)
@@ -220,6 +254,7 @@ class WeixinBridge:
                 time.sleep(0.2)
                 continue
             try:
+                self._reload_runtime_config_if_changed()
                 account = self._load_account()
                 token = (account.get("token") or "").strip()
                 base_url = (account.get("baseUrl") or DEFAULT_WEIXIN_BASE_URL).strip()
@@ -232,6 +267,9 @@ class WeixinBridge:
                 time.sleep(1)
                 continue
             for message in messages:
+                if not self._message_matches_active_account(message):
+                    self._drop_stale_account_message(message)
+                    continue
                 try:
                     text = str(message.get("text") or "")
                     attempt = int(message.get("attempt") or 0)
@@ -250,6 +288,25 @@ class WeixinBridge:
                         flush=True,
                     )
                     self._handle_async_send_failure(message, exc)
+
+    def _message_matches_active_account(self, message: dict[str, object]) -> bool:
+        message_account_id = str(message.get("account_id") or "").strip()
+        message_account_file = str(message.get("account_file") or "").strip()
+        if message_account_id and message_account_id != self.config.active_account_id:
+            return False
+        if message_account_file and Path(message_account_file) != self.account_path:
+            return False
+        return True
+
+    def _drop_stale_account_message(self, message: dict[str, object]) -> None:
+        preview = " ".join(str(message.get("text") or "").split())[:160]
+        print(
+            "[bridge] dropped stale queued reply "
+            f"message_account={message.get('account_id') or '-'} "
+            f"active_account={self.config.active_account_id or '-'} "
+            f"to={message.get('to_user_id') or '-'} preview={preview}",
+            flush=True,
+        )
 
     def _notify_service_started(self) -> None:
         if self._has_pending_restart_notice():
@@ -306,6 +363,7 @@ class WeixinBridge:
             RESTART_NOTICE_PATH.unlink(missing_ok=True)
 
     def poll_once(self) -> None:
+        self._reload_runtime_config_if_changed()
         account = self._load_account()
         token = (account.get("token") or "").strip()
         if not token:
@@ -863,6 +921,8 @@ class WeixinBridge:
             context_token=str(context_token or ""),
             text=text,
             source="bridge",
+            account_id=self.config.active_account_id,
+            account_file=str(self.account_path),
         )
         preview = " ".join(text.split())[:160]
         print(f"[bridge] queued reply to={to_user_id} preview={preview}", flush=True)
@@ -3055,7 +3115,11 @@ class WeixinBridge:
         )
 
     def _load_conversations(self) -> dict[str, Any]:
-        data = load_json(CONVERSATION_PATH, {}, expect_type=dict)
+        source_path = self.conversation_path
+        if source_path != CONVERSATION_PATH and not source_path.exists() and CONVERSATION_PATH != BRIDGE_CONVERSATIONS_PATH:
+            source_path = CONVERSATION_PATH
+            self.conversation_path = source_path
+        data = load_json(source_path, {}, expect_type=dict)
         if not isinstance(data, dict):
             return {}
         conversations: dict[str, WeixinConversationBinding] = {}
@@ -3074,7 +3138,7 @@ class WeixinBridge:
     def _save_conversations(self) -> None:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         save_json(
-            CONVERSATION_PATH,
+            self.conversation_path,
             {sender_id: binding.to_dict() for sender_id, binding in self.conversations.items()},
         )
 

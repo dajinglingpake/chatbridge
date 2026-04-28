@@ -14,6 +14,24 @@ from core.state_models import JsonObject
 DEFAULT_ILINK_BASE_URL = "https://ilinkai.weixin.qq.com"
 
 
+def _is_qr_bot_account_id(account_id: str) -> bool:
+    return str(account_id or "").strip().endswith("@im.bot")
+
+
+def account_conversation_path(base_path: Path, account_id: str, account_file: str | Path = "") -> Path:
+    cleaned_account_id = str(account_id or "").strip()
+    if not _is_qr_bot_account_id(cleaned_account_id):
+        return base_path
+    account_file_stem = Path(account_file).stem if account_file else ""
+    if account_file_stem and account_file_stem != cleaned_account_id:
+        return base_path
+    raw_stem = account_file_stem or cleaned_account_id
+    safe_stem = "".join(char if char.isalnum() or char in {"@", "-", "_", "."} else "_" for char in raw_stem).strip()
+    if not safe_stem:
+        return base_path
+    return base_path.with_name(f"{base_path.stem}.{safe_stem}{base_path.suffix}")
+
+
 @dataclass
 class AccountOption:
     key: str
@@ -151,6 +169,12 @@ def save_account_from_qr_payload(data: object, base_url: str = "", config: Bridg
     save_json(sync_file, {"get_updates_buf": ""})
 
     resolved_config = config or BridgeConfig.load()
+    if _is_qr_bot_account_id(payload.account_id):
+        resolved_config.accounts = [
+            profile
+            for profile in resolved_config.accounts
+            if not _is_qr_bot_account_id(profile.account_id) or profile.account_id == payload.account_id
+        ]
     new_profile = resolved_config.add_account(payload.account_id, str(account_file), str(sync_file))
     if new_profile is None:
         return None

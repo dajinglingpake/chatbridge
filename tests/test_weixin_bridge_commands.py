@@ -313,6 +313,31 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         else:
             os.environ["CHATBRIDGE_LANG"] = self._original_lang
 
+    def test_message_account_scope_rejects_stale_queued_reply(self) -> None:
+        bridge = object.__new__(WeixinBridge)
+        bridge.config = SimpleNamespace(active_account_id="new@im.bot")
+        bridge.account_path = Path("/tmp/new@im.bot.json")
+
+        self.assertFalse(
+            WeixinBridge._message_matches_active_account(
+                bridge,
+                {
+                    "account_id": "old@im.bot",
+                    "account_file": "/tmp/old@im.bot.json",
+                },
+            )
+        )
+        self.assertTrue(
+            WeixinBridge._message_matches_active_account(
+                bridge,
+                {
+                    "account_id": "new@im.bot",
+                    "account_file": "/tmp/new@im.bot.json",
+                },
+            )
+        )
+        self.assertTrue(WeixinBridge._message_matches_active_account(bridge, {}))
+
     def test_notify_command_renders_multiline_status(self) -> None:
         reply, handled = self.bridge._handle_control_command("sender-test", "/notify")
         self.assertTrue(handled)

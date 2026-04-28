@@ -17,7 +17,7 @@ from env_tools import run_shell_command
 from local_ipc import create_request, wait_for_response
 from runtime_stack import BRIDGE_CONVERSATIONS_PATH, emergency_stop, get_runtime_snapshot, restart_all, restart_bridge, start_all, stop_all, stop_external_agent_process
 
-from core.accounts import activate_account
+from core.accounts import account_conversation_path, activate_account
 from bridge_config import APP_DIR, BridgeConfig, normalize_backend
 from core.json_store import load_json, save_json
 from core.platform_compat import creationflags
@@ -264,13 +264,16 @@ def switch_active_account(account_id: str, restart_if_running: bool = True) -> S
     if not cleaned_account_id:
         return ServiceResult(ok=False, message="切换失败：account_id 不能为空")
     config = BridgeConfig.load()
+    if not any(account.account_id == cleaned_account_id and account.is_usable for account in config.accounts):
+        return ServiceResult(ok=False, message=f"切换失败：账号不存在或文件不完整：{cleaned_account_id}")
     snapshot = get_runtime_snapshot()
-    pre_notice = broadcast_weixin_notice_by_kind("config", "切换微信账号", f"准备切换当前账号到: {cleaned_account_id}", config=config)
     activate_account(cleaned_account_id, config=config)
+    if not restart_if_running:
+        return ServiceResult(ok=True, message=f"已切换当前账号：{cleaned_account_id} | Bridge 将在下一次轮询自动使用新账号（无需重启）")
     if restart_if_running and (snapshot.hub_running or snapshot.bridge_running):
         messages = restart_all()
-        return ServiceResult(ok=True, message=f"已切换当前账号：{cleaned_account_id} | {' | '.join(messages)} | {pre_notice.summary}")
-    return ServiceResult(ok=True, message=f"已切换当前账号：{cleaned_account_id} | {pre_notice.summary}")
+        return ServiceResult(ok=True, message=f"已切换当前账号：{cleaned_account_id} | {' | '.join(messages)}")
+    return ServiceResult(ok=True, message=f"已切换当前账号：{cleaned_account_id}")
 
 
 def run_repair_command(command: str, label: str = "") -> ServiceResult:
@@ -419,7 +422,8 @@ def switch_weixin_session_backend(sender_id: str, backend: str) -> ServiceResult
         return ServiceResult(ok=False, message=f"切换失败：不支持的后端 {cleaned_backend}")
 
     config = BridgeConfig.load()
-    bindings = _read_conversation_bindings(BRIDGE_CONVERSATIONS_PATH, config)
+    conversation_path = _conversation_path_for_config(BRIDGE_CONVERSATIONS_PATH, config)
+    bindings = _read_conversation_bindings(conversation_path, config)
     binding = bindings.get(cleaned_sender_id)
     if binding is None:
         return ServiceResult(ok=False, message=f"切换失败：未找到发送方 {cleaned_sender_id}")
@@ -430,7 +434,7 @@ def switch_weixin_session_backend(sender_id: str, backend: str) -> ServiceResult
     )
     current_meta.backend = cleaned_backend
     bindings[cleaned_sender_id] = binding
-    _save_conversation_bindings(BRIDGE_CONVERSATIONS_PATH, bindings)
+    _save_conversation_bindings(conversation_path, bindings)
 
     snapshot = get_runtime_snapshot()
     message = f"已切换发送方 {cleaned_sender_id} 的当前会话后端为 {cleaned_backend}"
@@ -446,12 +450,14 @@ def reset_weixin_conversation(sender_id: str) -> ServiceResult:
     if not cleaned_sender_id:
         return ServiceResult(ok=False, message="重置失败：sender_id 不能为空")
 
-    bindings = _read_conversation_bindings(BRIDGE_CONVERSATIONS_PATH)
+    config = BridgeConfig.load()
+    conversation_path = _conversation_path_for_config(BRIDGE_CONVERSATIONS_PATH, config)
+    bindings = _read_conversation_bindings(conversation_path, config)
     if cleaned_sender_id not in bindings:
         return ServiceResult(ok=False, message=f"重置失败：未找到发送方 {cleaned_sender_id}")
 
     bindings.pop(cleaned_sender_id, None)
-    _save_conversation_bindings(BRIDGE_CONVERSATIONS_PATH, bindings)
+    _save_conversation_bindings(conversation_path, bindings)
 
     snapshot = get_runtime_snapshot()
     message = f"已重置发送方 {cleaned_sender_id} 的微信会话状态"
@@ -465,6 +471,10 @@ def reset_weixin_conversation(sender_id: str) -> ServiceResult:
 def _read_conversations_file(path: Path) -> JsonObject:
     data = load_json(path, {}, expect_type=dict)
     return data if isinstance(data, dict) else {}
+
+
+def _conversation_path_for_config(path: Path, config: BridgeConfig) -> Path:
+    return account_conversation_path(path, config.active_account_id, config.account_file)
 
 
 def _read_conversation_bindings(path: Path, config: BridgeConfig | None = None) -> dict[str, WeixinConversationBinding]:

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from agent_hub import HubConfig
-from bridge_config import BridgeConfig, WeixinAccountProfile
+from bridge_config import BridgeConfig, WeixinAccountProfile, collapse_qr_bot_profiles
 from core.accounts import DEFAULT_ILINK_BASE_URL, resolve_ilink_base_url
 
 
@@ -82,6 +83,95 @@ class ConfigResilienceTests(unittest.TestCase):
         )
 
         self.assertEqual(DEFAULT_ILINK_BASE_URL, resolve_ilink_base_url(config))
+
+    def test_collapse_qr_bot_profiles_keeps_latest_qr_account(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            old_account = root / "old@im.bot.json"
+            old_sync = root / "old@im.bot.sync.json"
+            new_account = root / "new@im.bot.json"
+            new_sync = root / "new@im.bot.sync.json"
+            named_account = root / "named.json"
+            named_sync = root / "named.sync.json"
+            for path in [old_account, old_sync, new_account, new_sync, named_account, named_sync]:
+                path.write_text("{}", encoding="utf-8")
+            old_time = 1_700_000_000
+            new_time = old_time + 10
+            for path in [old_account, old_sync]:
+                os.utime(path, (old_time, old_time))
+            for path in [new_account, new_sync]:
+                os.utime(path, (new_time, new_time))
+
+            collapsed = collapse_qr_bot_profiles(
+                [
+                    WeixinAccountProfile("old@im.bot", str(old_account), str(old_sync)),
+                    WeixinAccountProfile("new@im.bot", str(new_account), str(new_sync)),
+                    WeixinAccountProfile("named", str(named_account), str(named_sync)),
+                ]
+            )
+
+        self.assertEqual(["named", "new@im.bot"], [profile.account_id for profile in collapsed])
+
+    def test_collapse_qr_bot_profiles_prefers_active_qr_account(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            old_account = root / "old@im.bot.json"
+            old_sync = root / "old@im.bot.sync.json"
+            new_account = root / "new@im.bot.json"
+            new_sync = root / "new@im.bot.sync.json"
+            for path in [old_account, old_sync, new_account, new_sync]:
+                path.write_text("{}", encoding="utf-8")
+            old_time = 1_700_000_020
+            new_time = 1_700_000_010
+            for path in [old_account, old_sync]:
+                os.utime(path, (old_time, old_time))
+            for path in [new_account, new_sync]:
+                os.utime(path, (new_time, new_time))
+
+            collapsed = collapse_qr_bot_profiles(
+                [
+                    WeixinAccountProfile("old@im.bot", str(old_account), str(old_sync)),
+                    WeixinAccountProfile("new@im.bot", str(new_account), str(new_sync)),
+                ],
+                preferred_account_id="new@im.bot",
+            )
+
+        self.assertEqual(["new@im.bot"], [profile.account_id for profile in collapsed])
+
+    def test_bridge_config_load_keeps_active_qr_account_when_old_context_is_newer(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "config" / "weixin_bridge.json"
+            state_path = root / "accounts" / "bridge-account-state.local.json"
+            old_account = root / "accounts" / "old@im.bot.json"
+            old_sync = root / "accounts" / "old@im.bot.sync.json"
+            old_context = root / "accounts" / "old@im.bot.context-tokens.json"
+            new_account = root / "accounts" / "new@im.bot.json"
+            new_sync = root / "accounts" / "new@im.bot.sync.json"
+            for path in [config_path, state_path, old_account, old_sync, old_context, new_account, new_sync]:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("{}", encoding="utf-8")
+            state_path.write_text(json.dumps({"active_account_id": "new@im.bot"}), encoding="utf-8")
+            old_time = 1_700_000_030
+            new_time = 1_700_000_020
+            for path in [old_account, old_sync, old_context]:
+                os.utime(path, (old_time, old_time))
+            for path in [new_account, new_sync]:
+                os.utime(path, (new_time, new_time))
+
+            profiles = [
+                WeixinAccountProfile("old@im.bot", str(old_account), str(old_sync)),
+                WeixinAccountProfile("new@im.bot", str(new_account), str(new_sync)),
+            ]
+            with (
+                patch("bridge_config.CONFIG_PATH", config_path),
+                patch("bridge_config.ACCOUNT_STATE_PATH", state_path),
+                patch("bridge_config.discover_account_profiles", return_value=profiles),
+            ):
+                config = BridgeConfig.load()
+
+        self.assertEqual("new@im.bot", config.active_account_id)
+        self.assertEqual(str(new_account), config.account_file)
 
 
 if __name__ == "__main__":

@@ -48,7 +48,7 @@ def build_repair_commands(checks: dict[str, CheckSnapshot], translate=None) -> l
         if IS_WINDOWS:
             commands.append(("Node 24.14.1", build_nvm_node_command()))
         else:
-            commands.append(("Node.js", "请先使用系统包管理器安装 nodejs 和 npm"))
+            commands.append(("Node.js", label("ui.repair.node.manual", "请先使用系统包管理器安装 nodejs 和 npm")))
         will_have_node = True
 
     if is_missing(checks, "codex") and will_have_node:

@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from starlette.requests import Request
+
 from core.action_defs import AUTO_REFRESH_OFF_ACTION, AUTO_REFRESH_ON_ACTION
 from core.app_service import delete_agent, reset_weixin_conversation, run_named_action, run_repair_command, save_agent, set_weixin_notice_enabled, submit_hub_task, switch_active_account, switch_bridge_agent, switch_weixin_session_backend, terminate_external_agent
 from core.navigation import PRIMARY_PAGES
 from core.shell_schema import APP_SHELL
 from core.view_models import build_web_console_view_model
-from localization import Localizer
-from ui.action_router import execute_primary_action, execute_topbar_action
+from localization import Localizer, normalize_language
+from ui.action_router import execute_topbar_action
 from ui.qr_login import install_qr_login_dialog
 from ui.sections import render_diagnostics_section, render_home_section, render_issues_section, render_sessions_section
 
@@ -30,94 +32,130 @@ def _load_nicegui():
 
 def create_ui() -> None:
     ui = _load_nicegui()
-    localizer = Localizer()
+    localizer_ref = {"value": Localizer()}
+
+    def translate(key: str, **kwargs: object) -> str:
+        return localizer_ref["value"].translate(key, **kwargs)
+
+    def t(key: str, fallback: str = "", **kwargs: object) -> str:
+        value = translate(key, **kwargs)
+        return value if value != key else fallback.format(**kwargs)
+
+    def page_label(page_key: str, fallback: str) -> str:
+        return {
+            "home": t("ui.tab.home", fallback),
+            "issues": t("ui.tab.issues", fallback),
+            "sessions": t("ui.tab.sessions", fallback),
+            "diagnostics": t("ui.tab.logs", fallback),
+        }.get(page_key, fallback)
+
+    def topbar_label(action_key: str, fallback: str) -> str:
+        return {
+            "refresh": t("ui.button.refresh", fallback),
+            "login": t("ui.button.login", fallback),
+            "sessions": t("ui.button.sessions", fallback),
+            "diagnostics": t("ui.button.logs", fallback),
+        }.get(action_key, fallback)
+
     ui.add_head_html(
         """
         <style>
         :root {
-            --cb-bg: #f3efe7;
-            --cb-surface: rgba(255, 252, 246, 0.88);
-            --cb-surface-strong: #fffdf8;
-            --cb-border: rgba(113, 86, 58, 0.16);
-            --cb-ink: #201813;
-            --cb-muted: #736150;
-            --cb-accent: #b85c38;
-            --cb-accent-deep: #8e4325;
-            --cb-accent-soft: rgba(184, 92, 56, 0.12);
-            --cb-ok: #2f6a4f;
-            --cb-warn: #b06b1e;
-            --cb-shadow: 0 22px 50px rgba(58, 39, 23, 0.10);
-            --cb-radius-lg: 24px;
-            --cb-radius-md: 18px;
+            --cb-bg: #f6f7f9;
+            --cb-surface: #ffffff;
+            --cb-surface-muted: #f1f5f4;
+            --cb-surface-raised: #fbfcfd;
+            --cb-border: #dce2e6;
+            --cb-border-strong: #c5cdd3;
+            --cb-ink: #172026;
+            --cb-muted: #65717b;
+            --cb-accent: #176b7a;
+            --cb-accent-deep: #0d4f5c;
+            --cb-accent-soft: #e1f1f3;
+            --cb-ok: #23704f;
+            --cb-warn: #a16207;
+            --cb-danger: #b4233b;
+            --cb-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+            --cb-radius: 8px;
         }
         body {
-            background:
-                radial-gradient(circle at top left, rgba(211, 152, 99, 0.28), transparent 28rem),
-                radial-gradient(circle at top right, rgba(126, 158, 122, 0.18), transparent 26rem),
-                linear-gradient(180deg, #f7f2ea 0%, var(--cb-bg) 100%);
+            background: var(--cb-bg);
             color: var(--cb-ink);
+            font-size: 14px;
         }
         .nicegui-content {
             background: transparent !important;
         }
         .cb-shell-header {
-            backdrop-filter: blur(18px);
-            background: rgba(249, 244, 235, 0.88);
-            border-bottom: 1px solid rgba(113, 86, 58, 0.14);
+            background: var(--cb-surface);
+            border-bottom: 1px solid var(--cb-border);
+            min-height: 64px;
         }
         .cb-shell-nav {
-            backdrop-filter: blur(16px);
-            background: rgba(255, 250, 243, 0.84);
-            border-bottom: 1px solid rgba(113, 86, 58, 0.10);
+            background: var(--cb-surface);
+            border-bottom: 1px solid var(--cb-border);
         }
         .cb-nav-button {
-            min-width: 6.5rem;
+            min-width: 6rem;
+            height: 2.25rem;
         }
         .cb-nav-button.q-btn--outline {
-            border-color: rgba(113, 86, 58, 0.18);
+            border-color: var(--cb-border);
             color: var(--cb-muted);
-            background: rgba(255, 255, 255, 0.45);
+            background: var(--cb-surface);
         }
         .cb-nav-button.cb-nav-active {
-            background: linear-gradient(135deg, var(--cb-accent) 0%, #cf7c50 100%) !important;
-            color: #fff8f2 !important;
-            box-shadow: 0 10px 24px rgba(184, 92, 56, 0.22);
+            background: var(--cb-accent) !important;
+            color: #ffffff !important;
+            border-color: var(--cb-accent) !important;
         }
-        .cb-card, .cb-soft-card, .cb-code {
-            border-radius: var(--cb-radius-lg);
+        .cb-card,
+        .cb-panel,
+        .cb-code {
+            border-radius: var(--cb-radius);
             border: 1px solid var(--cb-border);
             box-shadow: var(--cb-shadow);
         }
         .cb-card {
             background: var(--cb-surface);
-            backdrop-filter: blur(12px);
         }
-        .cb-soft-card {
-            background: linear-gradient(180deg, rgba(255,255,255,0.84), rgba(251,245,236,0.92));
+        .cb-panel {
+            background: var(--cb-surface-raised);
         }
         .cb-hero {
-            background:
-                linear-gradient(135deg, rgba(184, 92, 56, 0.10), rgba(132, 150, 112, 0.14)),
-                rgba(255, 251, 245, 0.92);
+            background: #10252b;
+            border-color: #10252b;
+            color: #ffffff;
         }
         .cb-code {
-            background: #1d1a17;
-            color: #efe5d8;
-            padding: 1rem 1.1rem;
+            background: #111827;
+            color: #e5e7eb;
+            padding: 0.85rem 1rem;
             white-space: pre-wrap;
-            font-size: 0.86rem;
+            font-size: 0.82rem;
             line-height: 1.5;
         }
+        .cb-hero .cb-code {
+            background: rgba(255, 255, 255, 0.08);
+            border-color: rgba(255, 255, 255, 0.14);
+            color: #d8eef2;
+            box-shadow: none;
+        }
+        .cb-hero .cb-panel {
+            background: rgba(255, 255, 255, 0.07);
+            border-color: rgba(255, 255, 255, 0.14);
+            color: #eef8fa;
+            box-shadow: none;
+        }
         .cb-section-title {
-            font-size: 1.35rem;
+            font-size: 1rem;
             font-weight: 700;
-            letter-spacing: -0.01em;
             color: var(--cb-ink);
         }
         .cb-kicker {
             text-transform: uppercase;
-            letter-spacing: 0.12em;
-            font-size: 0.72rem;
+            letter-spacing: 0;
+            font-size: 0.75rem;
             font-weight: 700;
             color: var(--cb-accent);
         }
@@ -128,47 +166,47 @@ def create_ui() -> None:
             display: inline-flex;
             align-items: center;
             gap: 0.35rem;
-            padding: 0.35rem 0.7rem;
+            padding: 0.25rem 0.55rem;
             border-radius: 999px;
             background: var(--cb-accent-soft);
             color: var(--cb-accent-deep);
-            font-size: 0.82rem;
+            font-size: 0.78rem;
             font-weight: 600;
         }
         .cb-chip-ok {
-            background: rgba(47, 106, 79, 0.14);
+            background: #e5f5ec;
             color: var(--cb-ok);
         }
         .cb-chip-warn {
-            background: rgba(176, 107, 30, 0.14);
+            background: #fff3d7;
             color: var(--cb-warn);
         }
         .cb-chip-danger {
-            background: rgba(154, 46, 59, 0.12);
-            color: #9a2e3b;
+            background: #fde7eb;
+            color: var(--cb-danger);
         }
         .cb-table {
             overflow: auto;
         }
         .cb-status-panel {
-            border-radius: 22px;
-            padding: 1rem 1.1rem;
-            border: 1px solid transparent;
+            border-radius: var(--cb-radius);
+            padding: 0.9rem 1rem;
+            border: 1px solid var(--cb-border);
         }
         .cb-status-running {
-            background: linear-gradient(180deg, rgba(217, 243, 228, 0.95), rgba(238, 249, 241, 0.92));
-            border-color: rgba(47, 106, 79, 0.16);
+            background: #eef8f2;
+            border-color: #b7dfc9;
         }
         .cb-status-partial {
-            background: linear-gradient(180deg, rgba(255, 242, 204, 0.95), rgba(255, 248, 230, 0.92));
-            border-color: rgba(176, 107, 30, 0.18);
+            background: #fff8e5;
+            border-color: #f2d487;
         }
         .cb-status-stopped {
-            background: linear-gradient(180deg, rgba(248, 215, 218, 0.95), rgba(253, 239, 240, 0.92));
-            border-color: rgba(154, 46, 59, 0.16);
+            background: #fff0f2;
+            border-color: #efb4bd;
         }
         .cb-stat-value {
-            font-size: 1.85rem;
+            font-size: 1.45rem;
             font-weight: 800;
             line-height: 1;
             color: var(--cb-ink);
@@ -180,32 +218,73 @@ def create_ui() -> None:
             color: var(--cb-muted);
         }
         .q-card {
-            border-radius: var(--cb-radius-lg);
+            border-radius: var(--cb-radius);
         }
         .q-btn {
-            border-radius: 14px;
+            border-radius: 6px;
             text-transform: none;
             font-weight: 700;
             letter-spacing: 0;
+            min-height: 2.25rem;
         }
-        .q-btn.bg-primary,
-        .q-btn.text-white {
-            background: linear-gradient(135deg, var(--cb-accent) 0%, #cf7c50 100%) !important;
+        .q-btn.bg-primary {
+            background: var(--cb-accent) !important;
         }
         .q-field__control,
         .q-field--outlined .q-field__control {
-            border-radius: 14px !important;
-            background: rgba(255, 252, 246, 0.82);
+            border-radius: 6px !important;
+            background: #ffffff;
         }
         .q-table {
-            border-radius: 18px;
+            border-radius: 6px;
             overflow: hidden;
         }
         .q-table thead tr {
-            background: rgba(184, 92, 56, 0.08);
+            background: var(--cb-surface-muted);
         }
         .q-table tbody tr:nth-child(even) {
-            background: rgba(255, 252, 246, 0.56);
+            background: #fafbfc;
+        }
+        .q-tab-panels {
+            border: 0 !important;
+        }
+        .cb-page-title {
+            font-size: 1.35rem;
+            line-height: 1.2;
+            font-weight: 800;
+        }
+        .cb-toolbar-button {
+            height: 2.25rem;
+        }
+        .cb-language-toggle {
+            border: 1px solid var(--cb-border);
+            border-radius: 6px;
+            overflow: hidden;
+        }
+        .cb-language-toggle .q-btn {
+            min-height: 2.25rem;
+        }
+        .cb-language-toggle .q-btn[aria-pressed="true"],
+        .cb-language-toggle .q-btn.q-btn--active,
+        .cb-language-toggle .q-btn.bg-primary {
+            background: var(--cb-accent) !important;
+            color: #fff !important;
+        }
+        .cb-disclosure summary {
+            cursor: pointer;
+            list-style: none;
+        }
+        .cb-disclosure summary::-webkit-details-marker {
+            display: none;
+        }
+        .cb-disclosure summary::after {
+            content: "expand_more";
+            font-family: "Material Icons";
+            font-size: 1.25rem;
+            color: var(--cb-muted);
+        }
+        .cb-disclosure[open] summary::after {
+            content: "expand_less";
         }
         @media (max-width: 1023px) {
             .cb-shell-nav {
@@ -219,7 +298,7 @@ def create_ui() -> None:
                 padding-right: 1rem;
             }
             .cb-card {
-                border-radius: 20px;
+                border-radius: var(--cb-radius);
             }
         }
         </style>
@@ -241,12 +320,14 @@ def create_ui() -> None:
         "load_task_detail": False,
         "checks_in_progress": False,
         "active_page": "home",
+        "language": localizer_ref["value"].language,
+        "qr_login_open": False,
     }
 
     def refresh_model():
         model = build_web_console_view_model(
             APP_DIR,
-            localizer.translate,
+            translate,
             page_key=state["active_page"],
             session_page=state["session_page"],
             task_page=state["task_page"],
@@ -277,20 +358,54 @@ def create_ui() -> None:
         if target is not None:
             state["active_page"] = target.key
         ui.run_javascript(f"window.location.hash = '{anchor}'")
+        nav_view.refresh()
         content_view.refresh()
 
     def refresh_view() -> None:
+        if state["qr_login_open"]:
+            return
+        content_view.refresh()
+
+    def refresh_after_qr_login() -> None:
         content_view.refresh()
 
     def should_auto_refresh() -> bool:
-        if state["active_page"] in {"home", "sessions"}:
-            return True
-        return bool(state["checks_in_progress"])
+        if state["qr_login_open"]:
+            return False
+        return state["active_page"] == "diagnostics" and bool(state["checks_in_progress"])
 
     def notify_only(result_message: str) -> None:
         ui.notify(result_message, position="top")
 
-    open_qr_login = install_qr_login_dialog(ui, notify_only, refresh_view)
+    def switch_language(language: str) -> None:
+        selected = normalize_language(str(language or "").strip())
+        if selected not in {"zh-CN", "en-US"}:
+            return
+        state["language"] = selected
+        localizer_ref["value"] = Localizer(selected)
+        ui.run_javascript(f"window.location.href = '/?lang={selected}'")
+
+    def apply_request_language(request) -> None:
+        selected = normalize_language(str(request.query_params.get("lang") or ""))
+        if selected in {"zh-CN", "en-US"} and selected != state["language"]:
+            state["language"] = selected
+            localizer_ref["value"] = Localizer(selected)
+
+    def mark_qr_login_open() -> None:
+        state["qr_login_open"] = True
+
+    def mark_qr_login_closed() -> None:
+        state["qr_login_open"] = False
+        content_view.refresh()
+
+    open_qr_login = install_qr_login_dialog(
+        ui,
+        notify_only,
+        refresh_after_qr_login,
+        translate,
+        on_open=mark_qr_login_open,
+        on_close=mark_qr_login_closed,
+    )
 
     @ui.refreshable
     def content_view() -> None:
@@ -300,28 +415,20 @@ def create_ui() -> None:
                 render_home_section(
                     ui,
                     model,
+                    translate,
                     _run_action,
                     _submit_task,
                     _switch_account,
-                    _switch_bridge_agent,
                     _set_weixin_notice_enabled,
-                    _open_weixin_binding,
-                    _open_weixin_binding_task,
-                    _switch_weixin_binding_backend,
-                    _reset_weixin_binding,
-                    _run_primary_action,
                     open_qr_login,
-                    _save_agent,
-                    _delete_agent,
-                    _terminate_external_agent,
-                    _copy_external_session_hint,
                 )
             elif state["active_page"] == "issues":
-                render_issues_section(ui, model, _run_repair_command)
+                render_issues_section(ui, model, translate, _run_repair_command)
             elif state["active_page"] == "sessions":
                 render_sessions_section(
                     ui,
                     model,
+                    translate,
                     _select_session,
                     _set_session_page,
                     _load_selected_session_detail,
@@ -339,6 +446,7 @@ def create_ui() -> None:
                 render_diagnostics_section(
                     ui,
                     model,
+                    translate,
                     _set_checks_page,
                     _switch_bridge_agent,
                     _set_agent_page,
@@ -357,7 +465,7 @@ def create_ui() -> None:
         _notify(result.message)
 
     def _switch_account(account_id: str) -> None:
-        result = switch_active_account(account_id)
+        result = switch_active_account(account_id, restart_if_running=False)
         _notify(result.message)
 
     def _switch_bridge_agent(agent_id: str) -> None:
@@ -402,19 +510,10 @@ def create_ui() -> None:
     def _copy_external_session_hint(session_hint: str) -> None:
         cleaned_hint = session_hint.strip()
         if not cleaned_hint:
-            _notify("当前外部进程没有可复制的会话标识")
+            _notify(t("ui.web.notify.no_session_hint", "当前外部进程没有可复制的会话标识"))
             return
         ui.run_javascript(f"navigator.clipboard.writeText({cleaned_hint!r})")
-        ui.notify(f"已复制会话标识：{cleaned_hint}", position="top")
-
-    def _run_primary_action(action_key: str) -> None:
-        execute_primary_action(
-            action_key,
-            refresh=refresh_view,
-            jump=jump_to,
-            notify=_notify,
-            open_qr_login=open_qr_login,
-        )
+        ui.notify(t("ui.web.notify.session_hint_copied", "已复制会话标识：{hint}", hint=cleaned_hint), position="top")
 
     def _select_session(session_name: str) -> None:
         state["selected_session_name"] = session_name
@@ -459,12 +558,12 @@ def create_ui() -> None:
     def _find_task_by_id(task_id: str) -> None:
         cleaned_id = task_id.strip()
         if not cleaned_id:
-            _notify("请输入 task_id")
+            _notify(t("ui.web.notify.enter_task_id", "请输入 task_id"))
             return
         model = refresh_model()
         matched = next((task for task in model.tasks if task.task_id == cleaned_id), None)
         if matched is None:
-            _notify(f"最近任务中未找到：{cleaned_id}")
+            _notify(t("ui.web.notify.task_not_found", "最近任务中未找到：{task_id}", task_id=cleaned_id))
             return
         state["selected_task_id"] = matched.task_id
         state["selected_session_name"] = matched.session_name
@@ -483,7 +582,7 @@ def create_ui() -> None:
     def _open_weixin_binding(session_name: str) -> None:
         cleaned_name = session_name.strip()
         if not cleaned_name:
-            _notify("当前微信会话没有可定位的会话名")
+            _notify(t("ui.web.notify.no_binding_session", "当前微信会话没有可定位的会话名"))
             return
         state["active_page"] = "sessions"
         state["selected_session_name"] = cleaned_name
@@ -496,7 +595,7 @@ def create_ui() -> None:
     def _open_weixin_binding_task(task_id: str, session_name: str) -> None:
         cleaned_task_id = task_id.strip()
         if not cleaned_task_id:
-            _notify("该发送方还没有最近任务")
+            _notify(t("ui.web.notify.no_latest_task", "该发送方还没有最近任务"))
             return
         state["active_page"] = "sessions"
         state["selected_session_name"] = session_name.strip()
@@ -517,48 +616,73 @@ def create_ui() -> None:
     def toggle_auto_refresh() -> None:
         state["auto_refresh"] = not state["auto_refresh"]
         if auto_refresh_button is not None:
-            auto_refresh_button.text = AUTO_REFRESH_ON_ACTION.label if state["auto_refresh"] else AUTO_REFRESH_OFF_ACTION.label
+            auto_refresh_button.text = t("ui.auto_refresh.on", AUTO_REFRESH_ON_ACTION.label) if state["auto_refresh"] else t("ui.auto_refresh.off", AUTO_REFRESH_OFF_ACTION.label)
         content_view.refresh()
 
-    @ui.page("/")
-    def index_page() -> None:
-        nonlocal auto_refresh_button
-        with ui.header().classes("cb-shell-header items-center justify-between text-slate-800 shadow-none px-5 py-4"):
-            with ui.column().classes("gap-0"):
-                ui.label(APP_SHELL.app_name).classes("text-3xl font-black tracking-tight")
-                ui.label(APP_SHELL.app_subtitle).classes("text-sm cb-muted")
-            with ui.row().classes("gap-2 items-center"):
-                auto_refresh_button = ui.button(
-                    AUTO_REFRESH_ON_ACTION.label if state["auto_refresh"] else AUTO_REFRESH_OFF_ACTION.label,
-                    on_click=lambda: toggle_auto_refresh(),
-                ).props("outline")
-
-        with ui.row().classes("cb-shell-nav w-full gap-2 px-5 py-3 sticky top-[84px] z-40 flex-wrap"):
+    @ui.refreshable
+    def nav_view() -> None:
+        with ui.row().classes("cb-shell-nav w-full gap-2 px-5 py-2 sticky top-[64px] z-40 flex-wrap"):
             for page in PRIMARY_PAGES:
-                props = "color=primary unelevated" if page.key == state["active_page"] else "outline"
+                active = page.key == state["active_page"]
+                props = "color=primary text-color=white unelevated" if active else "outline"
                 icon = {
-                    "home": "⌂",
-                    "issues": "!",
-                    "sessions": "#",
-                    "diagnostics": "≈",
-                }.get(page.key, "•")
+                    "home": "dashboard",
+                    "issues": "report_problem",
+                    "sessions": "forum",
+                    "diagnostics": "monitor_heart",
+                }.get(page.key, "radio_button_unchecked")
                 ui.button(
-                    f"{icon} {page.title}",
+                    page_label(page.key, page.title),
                     on_click=lambda anchor=page.anchor: jump_to(anchor),
-                ).props(props).classes(f"cb-nav-button {'cb-nav-active' if page.key == state['active_page'] else ''}")
+                    icon=icon,
+                ).props(props).classes(f"cb-nav-button {'cb-nav-active' if active else ''}")
             ui.space()
             for action in APP_SHELL.topbar_actions:
+                if action.key != "refresh":
+                    continue
                 ui.button(
-                    action.label,
+                    topbar_label(action.key, action.label),
                     on_click=lambda key=action.key: execute_topbar_action(
                         key,
                         refresh=refresh_view,
                         jump=jump_to,
                         notify=notify_only,
                         open_qr_login=open_qr_login,
+                        translate=translate,
                     ),
-                ).props("outline")
+                    icon={
+                        "refresh": "refresh",
+                        "login": "qr_code_scanner",
+                        "sessions": "forum",
+                        "diagnostics": "monitor_heart",
+                    }.get(action.key, "bolt"),
+                ).props("outline").classes("cb-toolbar-button")
 
+    def shell_view() -> None:
+        nonlocal auto_refresh_button
+        with ui.header().classes("cb-shell-header items-center justify-between text-slate-800 shadow-none px-5 py-3"):
+            with ui.column().classes("gap-0 min-w-0"):
+                ui.label(APP_SHELL.app_name).classes("text-xl font-black")
+                ui.label(t("ui.app.subtitle", APP_SHELL.app_subtitle)).classes("text-sm cb-muted max-w-4xl")
+            with ui.row().classes("gap-2 items-center"):
+                ui.label(t("ui.web.field.language", "语言")).classes("text-sm cb-muted")
+                ui.toggle(
+                    {"zh-CN": "中文", "en-US": "English"},
+                    value=state["language"],
+                    on_change=lambda event: switch_language(str(event.value or "")),
+                    clearable=False,
+                ).props("unelevated color=white text-color=primary toggle-color=primary toggle-text-color=white").classes("cb-language-toggle")
+                auto_refresh_button = ui.button(
+                    t("ui.auto_refresh.on", AUTO_REFRESH_ON_ACTION.label) if state["auto_refresh"] else t("ui.auto_refresh.off", AUTO_REFRESH_OFF_ACTION.label),
+                    on_click=lambda: toggle_auto_refresh(),
+                    icon="sync",
+                ).props("outline").classes("cb-toolbar-button")
+        nav_view()
+
+    @ui.page("/")
+    def index_page(request: Request) -> None:
+        apply_request_language(request)
+        shell_view()
         content_view()
         ui.timer(2.0, lambda: content_view.refresh() if state["auto_refresh"] and should_auto_refresh() else None)
 
