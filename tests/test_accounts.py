@@ -6,8 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from bridge_config import BridgeConfig
-from core.accounts import AccountFilePayload, DEFAULT_ILINK_BASE_URL, QRConfirmedPayload, load_account_file_payload, save_account_from_qr_payload
+from bridge_config import BridgeConfig, WeixinAccountProfile
+from core.accounts import AccountFilePayload, DEFAULT_ILINK_BASE_URL, QRConfirmedPayload, account_conversation_path, load_account_file_payload, save_account_from_qr_payload
 
 
 class AccountPayloadTests(unittest.TestCase):
@@ -42,6 +42,16 @@ class AccountPayloadTests(unittest.TestCase):
         self.assertEqual("", payload.token)
         self.assertEqual("", payload.base_url)
 
+    def test_account_conversation_path_scopes_qr_bot_accounts(self) -> None:
+        base_path = Path("/tmp/weixin_conversations.json")
+
+        self.assertEqual(
+            Path("/tmp/weixin_conversations.abc@im.bot.json"),
+            account_conversation_path(base_path, "abc@im.bot", "/tmp/abc@im.bot.json"),
+        )
+        self.assertEqual(base_path, account_conversation_path(base_path, "wechat-bot", "/tmp/wechat-bot.json"))
+        self.assertEqual(base_path, account_conversation_path(base_path, "abc@im.bot", "/tmp/other.json"))
+
     def test_save_account_from_qr_payload_persists_typed_account_payload(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -74,6 +84,36 @@ class AccountPayloadTests(unittest.TestCase):
                 },
                 payload,
             )
+
+    def test_save_account_from_qr_payload_replaces_previous_qr_bot_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            old_account = root / "accounts" / "old@im.bot.json"
+            old_sync = root / "accounts" / "old@im.bot.sync.json"
+            old_account.parent.mkdir(parents=True, exist_ok=True)
+            old_account.write_text("{}", encoding="utf-8")
+            old_sync.write_text("{}", encoding="utf-8")
+            config = BridgeConfig(
+                active_account_id="old@im.bot",
+                accounts=[WeixinAccountProfile("old@im.bot", str(old_account), str(old_sync))],
+            )
+
+            with (
+                patch("core.accounts.APP_DIR", root),
+                patch.object(BridgeConfig, "load", return_value=config),
+                patch.object(config, "save", return_value=None),
+            ):
+                saved = save_account_from_qr_payload(
+                    {
+                        "ilink_bot_id": "new@im.bot",
+                        "bot_token": "typed-token",
+                    },
+                    base_url=DEFAULT_ILINK_BASE_URL,
+                    config=config,
+                )
+
+            self.assertIsNotNone(saved)
+            self.assertEqual(["new@im.bot"], [profile.account_id for profile in config.accounts])
 
 
 if __name__ == "__main__":

@@ -18,6 +18,62 @@ Translator = Callable[..., str]
 ItemT = TypeVar("ItemT")
 
 
+def _t(t: Translator, key: str, fallback: str, **kwargs: object) -> str:
+    value = t(key, **kwargs)
+    return value if value != key else fallback.format(**kwargs)
+
+
+def _task_status_label(t: Translator, status: str) -> str:
+    cleaned = (status or "").strip().lower()
+    if not cleaned:
+        return _t(t, "bridge.task.status.unknown", "未知")
+    value = t(f"bridge.task.status.{cleaned}")
+    return value if value != f"bridge.task.status.{cleaned}" else status
+
+
+def _short_account_id(account_id: str) -> str:
+    cleaned = str(account_id or "").strip()
+    if len(cleaned) <= 12:
+        return cleaned
+    return f"{cleaned[:6]}...{cleaned[-6:]}"
+
+
+def _account_display_label(t: Translator, account_id: str) -> str:
+    cleaned = str(account_id or "").strip()
+    if not cleaned:
+        return _t(t, "ui.web.value.unset", "未设置")
+    if cleaned.endswith("@im.bot"):
+        return _t(t, "ui.account.display.bot", "微信 Bot 账号 ({account})", account=_short_account_id(cleaned))
+    return cleaned
+
+
+def _checks_progress_label(t: Translator, progress_text: str) -> str:
+    text = (progress_text or "").strip()
+    if not text:
+        return ""
+    if text == "环境检查已完成":
+        return _t(t, "ui.diagnostics.progress.done", "环境检查已完成")
+    prefix = "环境检查进行中："
+    marker = "，当前步骤："
+    if not text.startswith(prefix) or marker not in text:
+        return text
+    ratio, step_label = text[len(prefix) :].split(marker, 1)
+    if "/" not in ratio:
+        return text
+    current, total = ratio.split("/", 1)
+    step_key = {
+        "Python": "python",
+        "Node 环境": "node_runtime",
+        "Agent CLI": "agent_clis",
+        "Python 依赖": "psutil",
+        "微信账号文件": "weixin_account",
+        "项目文件": "project_files",
+        "已完成": "done",
+    }.get(step_label.strip(), "")
+    translated_step = _t(t, f"ui.diagnostics.step.{step_key}", step_label.strip()) if step_key else step_label.strip()
+    return _t(t, "ui.diagnostics.progress.running", "环境检查进行中：{current}/{total}，当前步骤：{step}", current=current, total=total, step=translated_step)
+
+
 @dataclass
 class HomeViewModel:
     badge_text: str
@@ -112,6 +168,7 @@ class WebConsoleViewModel:
     home: HomeViewModel
     log_dir: str
     active_account_id: str
+    active_account_label: str
     bridge_agent_id: str
     service_notice_enabled: bool
     config_notice_enabled: bool
@@ -177,6 +234,7 @@ class IssuePanelViewModel:
 @dataclass
 class AccountSelectionViewModel:
     active_account_id: str
+    active_account_label: str
     options: list[AccountOptionViewModel]
 
 
@@ -279,7 +337,10 @@ def build_account_selection_view_model(t: Translator, config: BridgeConfig | Non
     for index, item in enumerate(built_options):
         if item.key != "existing" or item.account is None:
             continue
-        label = f"{item.account.account_id} {'(active)' if item.account.account_id == config.active_account_id else ''}"
+        if not item.account.is_usable:
+            continue
+        active_marker = _t(t, "ui.account.option.active", "[当前]") if item.account.account_id == config.active_account_id else ""
+        label = f"{active_marker} {_account_display_label(t, item.account.account_id)}".strip()
         options.append(
             AccountOptionViewModel(
                 account_id=item.account.account_id,
@@ -287,7 +348,11 @@ def build_account_selection_view_model(t: Translator, config: BridgeConfig | Non
                 selected=index == active_index,
             )
         )
-    return AccountSelectionViewModel(active_account_id=config.active_account_id, options=options)
+    return AccountSelectionViewModel(
+        active_account_id=config.active_account_id,
+        active_account_label=_account_display_label(t, config.active_account_id),
+        options=options,
+    )
 
 
 def build_diagnostics_view_model(checks: dict[str, CheckSnapshot], diag_at: str, t: Translator) -> DiagnosticsViewModel:
@@ -385,12 +450,12 @@ def build_web_console_view_model_from_dashboard(
         if not resolved_session_name and all_session_rows:
             resolved_session_name = all_session_rows[0].name
         if load_session_detail and resolved_session_name:
-            session_detail = build_session_detail_view_model(hub_state, session_dir, resolved_session_name)
+            session_detail = build_session_detail_view_model(hub_state, session_dir, resolved_session_name, t=t)
         else:
             session_detail = SessionDetailViewModel(
                 rows=[],
-                detail_text="点击“加载会话详情”后再读取会话文件和最近对话。",
-                conversation_text="当前为了避免切页卡顿，默认不自动加载会话详情和会话预览。",
+                detail_text=_t(t, "ui.web.sessions.lazy_detail", "点击“加载会话详情”后再读取会话文件和最近对话。"),
+                conversation_text=_t(t, "ui.web.sessions.lazy_preview", "当前为了避免切页卡顿，默认不自动加载会话详情和会话预览。"),
             )
         session_total_count = len(all_session_rows)
         session_rows, session_page, session_total_pages = paginate_items(all_session_rows, session_page, 10)
@@ -420,7 +485,7 @@ def build_web_console_view_model_from_dashboard(
                 )
             )
     if not agent_options:
-        agent_options.append(AgentOptionViewModel(agent_id="main", label="默认会话 (main)"))
+        agent_options.append(AgentOptionViewModel(agent_id="main", label=_t(t, "ui.web.agents.default_option", "默认会话 (main)")))
     all_agent_entries = agent_entries
     agent_total_count = len(all_agent_entries)
     agent_entries, agent_page, agent_total_pages = paginate_items(all_agent_entries, agent_page, 10)
@@ -440,7 +505,7 @@ def build_web_console_view_model_from_dashboard(
                 backend=backend,
                 session_hint=process.session_hint,
                 command_line=command_line,
-                managed_label="外部 / 未接管",
+                managed_label=_t(t, "ui.web.external.unmanaged", "外部 / 未接管"),
             )
         )
     external_agent_processes.sort(key=lambda item: (item.backend, item.session_hint or "~", item.pid))
@@ -470,7 +535,7 @@ def build_web_console_view_model_from_dashboard(
                     session_count=len(sessions),
                     updated_at=updated_at,
                     latest_task_id=latest_task.id if latest_task is not None else "",
-                    latest_task_status=latest_task.status if latest_task is not None else "",
+                    latest_task_status=_task_status_label(t, latest_task.status) if latest_task is not None else "",
                     latest_task_session=(latest_task.session_name or current_session) if latest_task is not None else current_session,
                 )
             )
@@ -487,8 +552,8 @@ def build_web_console_view_model_from_dashboard(
     tasks: list[TaskViewModel] = []
     resolved_task_id = ""
     task_total_pages = 1
-    task_detail_lines = ["先切换到会话模块查看任务详情。"] if normalized_page_key != "sessions" else ["先在上方选中一个任务。"]
-    task_result_lines = ["这里会显示该任务的完整输出或错误。"]
+    task_detail_lines = [_t(t, "ui.web.tasks.switch_to_sessions", "先切换到会话模块查看任务详情。")] if normalized_page_key != "sessions" else [_t(t, "ui.web.tasks.select_task_first", "先在上方选中一个任务。")]
+    task_result_lines = [_t(t, "ui.web.tasks.output_placeholder", "这里会显示该任务的完整输出或错误。")]
     if normalized_page_key == "sessions":
         task_status_options = sorted({task.status for task in raw_tasks if task.status})
         task_agent_options = sorted({(task.agent_name or task.agent_id) for task in raw_tasks if (task.agent_name or task.agent_id)})
@@ -519,7 +584,7 @@ def build_web_console_view_model_from_dashboard(
                     created_at=task.created_at,
                     agent_name=task.agent_name or task.agent_id,
                     backend=task.backend,
-                    status=task.status,
+                    status=_task_status_label(t, task.status),
                     session_name=task.session_name or "default",
                     prompt_summary=summarize_text(task.prompt),
                     result_summary=summarize_text(task.output or task.error),
@@ -532,23 +597,23 @@ def build_web_console_view_model_from_dashboard(
         selected_task = next((task for task in filtered_raw_tasks if task.id == resolved_task_id), None)
         if selected_task is not None and load_task_detail:
             task_detail_lines = [
-                f"任务 ID: {selected_task.id}",
-                f"创建时间: {selected_task.created_at}",
-                f"完成时间: {selected_task.finished_at or '-'}",
+                _t(t, "ui.web.task_detail.id", "任务 ID: {value}", value=selected_task.id),
+                _t(t, "ui.web.task_detail.created_at", "创建时间: {value}", value=selected_task.created_at),
+                _t(t, "ui.web.task_detail.finished_at", "完成时间: {value}", value=selected_task.finished_at or "-"),
                 f"Agent: {selected_task.agent_name or selected_task.agent_id}",
-                f"后端: {selected_task.backend}",
-                f"状态: {selected_task.status}",
-                f"会话: {selected_task.session_name or 'default'}",
-                f"来源: {selected_task.source or '-'}",
+                _t(t, "ui.web.task_detail.backend", "后端: {value}", value=selected_task.backend),
+                _t(t, "ui.web.task_detail.status", "状态: {value}", value=_task_status_label(t, selected_task.status)),
+                _t(t, "ui.web.task_detail.session", "会话: {value}", value=selected_task.session_name or "default"),
+                _t(t, "ui.web.task_detail.source", "来源: {value}", value=selected_task.source or "-"),
                 "",
-                "输入:",
+                _t(t, "ui.web.task_detail.input", "输入:"),
                 selected_task.prompt or "(empty)",
             ]
             task_result = selected_task.output or selected_task.error or "(empty)"
             task_result_lines = [task_result]
         elif selected_task is not None:
-            task_detail_lines = ["点击“加载任务详情”后再读取完整输入和输出。"]
-            task_result_lines = ["当前为了避免卡顿，默认不自动展示完整输出。"]
+            task_detail_lines = [_t(t, "ui.web.tasks.lazy_detail", "点击“加载任务详情”后再读取完整输入和输出。")]
+            task_result_lines = [_t(t, "ui.web.tasks.lazy_output", "当前为了避免卡顿，默认不自动展示完整输出。")]
 
     all_checks: list[CheckViewModel] = []
     for check in checks_map.values():
@@ -556,7 +621,7 @@ def build_web_console_view_model_from_dashboard(
             CheckViewModel(
                 label=str(check.label),
                 detail=str(check.detail),
-                status_text="OK" if check.ok else "MISSING",
+                status_text=_t(t, "ui.diagnostics.ok", "OK") if check.ok else _t(t, "ui.diagnostics.missing", "缺失"),
                 ok=bool(check.ok),
             )
         )
@@ -580,12 +645,13 @@ def build_web_console_view_model_from_dashboard(
             snapshot=dashboard.snapshot,
             checks=checks_map,
             bridge_state=bridge_state,
-            active_account_id=dashboard.active_account_id,
+            active_account_id=account_selection.active_account_label,
             accounts_dir=app_dir / "accounts",
             t=t,
         ),
         log_dir=dashboard.snapshot.log_dir,
         active_account_id=account_selection.active_account_id,
+        active_account_label=account_selection.active_account_label,
         bridge_agent_id=bridge_config.backend_id,
         service_notice_enabled=bridge_config.service_notice_enabled,
         config_notice_enabled=bridge_config.config_notice_enabled,
@@ -594,7 +660,7 @@ def build_web_console_view_model_from_dashboard(
         repair_commands=repair_commands,
         checks=checks,
         checks_in_progress=dashboard.checks_in_progress,
-        checks_progress_text=dashboard.checks_progress_text,
+        checks_progress_text=_checks_progress_label(t, dashboard.checks_progress_text),
         log_sections=log_sections,
         tasks=tasks,
         session_rows=session_rows,

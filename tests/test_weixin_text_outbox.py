@@ -45,6 +45,23 @@ class WeixinTextOutboxTests(unittest.TestCase):
         self.assertEqual(1, len(retried))
         self.assertEqual("hello", retried[0]["text"])
 
+    def test_enqueue_text_message_records_account_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            outbox_path = Path(temp_dir) / "weixin_text_outbox.jsonl"
+            with patch("core.weixin_text_outbox.OUTBOX_PATH", outbox_path):
+                enqueue_text_message(
+                    to_user_id="sender-test",
+                    context_token="ctx",
+                    text="hello",
+                    account_id="bot-a",
+                    account_file="/tmp/bot-a.json",
+                )
+                queued = pop_text_messages(limit=10)
+
+        self.assertEqual(1, len(queued))
+        self.assertEqual("bot-a", queued[0]["account_id"])
+        self.assertEqual("/tmp/bot-a.json", queued[0]["account_file"])
+
 
 if __name__ == "__main__":
     unittest.main()

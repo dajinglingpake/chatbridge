@@ -15,13 +15,23 @@ RETRY_MAX_SECONDS = 60
 MAX_RETRY_ATTEMPTS = 6
 
 
-def enqueue_text_message(*, to_user_id: str, context_token: str, text: str, source: str = "") -> None:
+def enqueue_text_message(
+    *,
+    to_user_id: str,
+    context_token: str,
+    text: str,
+    source: str = "",
+    account_id: str = "",
+    account_file: str = "",
+) -> None:
     payload = {
         "id": uuid.uuid4().hex,
         "to_user_id": str(to_user_id or "").strip(),
         "context_token": str(context_token or "").strip(),
         "text": str(text or ""),
         "source": str(source or "").strip(),
+        "account_id": str(account_id or "").strip(),
+        "account_file": str(account_file or "").strip(),
         "attempt": 0,
         "created_at": int(time.time()),
         "retry_not_before": 0,

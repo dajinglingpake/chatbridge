@@ -84,6 +84,32 @@ def discover_account_profiles(account_dir: Path = WEIXIN_ACCOUNTS_DIR) -> list[W
     return profiles
 
 
+def _is_qr_bot_account(profile: WeixinAccountProfile) -> bool:
+    return profile.account_id.endswith("@im.bot")
+
+
+def _profile_latest_mtime(profile: WeixinAccountProfile) -> float:
+    paths = [
+        Path(profile.account_file),
+        Path(profile.sync_file),
+        Path(profile.account_file).with_name(f"{Path(profile.account_file).stem}.context-tokens.json"),
+    ]
+    mtimes = [path.stat().st_mtime for path in paths if path.exists()]
+    return max(mtimes) if mtimes else 0.0
+
+
+def collapse_qr_bot_profiles(accounts: list[WeixinAccountProfile], preferred_account_id: str = "") -> list[WeixinAccountProfile]:
+    qr_accounts = [profile for profile in accounts if _is_qr_bot_account(profile)]
+    if len(qr_accounts) <= 1:
+        return accounts
+    preferred = str(preferred_account_id or "").strip()
+    preferred_qr_account = next((profile for profile in qr_accounts if profile.account_id == preferred and profile.is_usable), None)
+    latest_qr_account = preferred_qr_account or max(qr_accounts, key=_profile_latest_mtime)
+    collapsed = [profile for profile in accounts if not _is_qr_bot_account(profile)]
+    collapsed.append(latest_qr_account)
+    return [collapsed[key] for key in sorted(range(len(collapsed)), key=lambda index: collapsed[index].account_id)]
+
+
 def _normalize_profile(raw: object) -> WeixinAccountProfile | None:
     if not isinstance(raw, dict):
         return None
@@ -122,6 +148,7 @@ def select_active_account_id(accounts: list[WeixinAccountProfile], preferred: st
 
 def build_account_profiles(raw: dict[str, object]) -> tuple[list[WeixinAccountProfile], str]:
     runtime_state = load_account_runtime_state()
+    preferred = str(runtime_state.get("active_account_id") or raw.get("active_account_id") or raw.get("account_id") or "").strip()
     configured = [_normalize_profile(item) for item in raw.get("accounts", []) or []]
     configured_profiles = [profile for profile in configured if profile is not None]
     legacy_account_id = str(raw.get("account_id") or "").strip() or "wechat-bot"
@@ -133,10 +160,12 @@ def build_account_profiles(raw: dict[str, object]) -> tuple[list[WeixinAccountPr
         }
     )
     discovered_profiles = discover_account_profiles()
-    accounts = merge_account_profiles(configured_profiles, [legacy_profile] if legacy_profile else [], discovered_profiles)
+    accounts = collapse_qr_bot_profiles(
+        merge_account_profiles(configured_profiles, [legacy_profile] if legacy_profile else [], discovered_profiles),
+        preferred_account_id=preferred,
+    )
     if not accounts:
         accounts = [default_account_profile()]
-    preferred = str(runtime_state.get("active_account_id") or raw.get("active_account_id") or raw.get("account_id") or "").strip()
     active_account_id = select_active_account_id(accounts, preferred)
     return accounts, active_account_id
 

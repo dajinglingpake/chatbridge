@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from bridge_config import BridgeConfig
-from core.accounts import AccountFilePayload, DEFAULT_ILINK_BASE_URL, load_account_context_tokens, load_account_file_payload
+from core.accounts import AccountFilePayload, DEFAULT_ILINK_BASE_URL, account_conversation_path, load_account_context_tokens, load_account_file_payload
 from core.json_store import load_json
 from core.weixin_text_outbox import enqueue_text_message
 from core.weixin_message_format import format_weixin_reply
@@ -48,7 +48,7 @@ def broadcast_weixin_notice_by_kind(kind: str, title: str, detail: str, config: 
         return NoticeResult(sent_count=0, recipient_count=0, error="disabled")
     if kind not in {"service", "task"} and not cfg.config_notice_enabled:
         return NoticeResult(sent_count=0, recipient_count=0, error="disabled")
-    recipients = _load_recipients(Path(cfg.account_file))
+    recipients = _load_recipients(Path(cfg.account_file), account_id=cfg.active_account_id)
     if not recipients:
         return NoticeResult(sent_count=0, recipient_count=0)
     account = _load_account_payload(Path(cfg.account_file))
@@ -66,7 +66,15 @@ def broadcast_weixin_notice_by_kind(kind: str, title: str, detail: str, config: 
             print(f"[notifier] skip recipient={recipient.sender_id} reason=missing_context_token", flush=True)
             continue
         try:
-            response = _send_text(base_url, token, recipient.sender_id, recipient.context_token, message)
+            response = _send_text(
+                base_url,
+                token,
+                recipient.sender_id,
+                recipient.context_token,
+                message,
+                account_id=cfg.active_account_id,
+                account_file=cfg.account_file,
+            )
             if isinstance(response, dict) and response.get("ret") not in (None, 0):
                 raise RuntimeError(f"sendmessage returned ret={response.get('ret')}: {response}")
             print(
@@ -120,8 +128,9 @@ def _load_recipient_ids() -> list[str]:
     return [cleaned for sender_id in payload.keys() if (cleaned := str(sender_id).strip()) and _is_real_weixin_sender(cleaned)]
 
 
-def _load_recipients(account_path: Path | None) -> list[NoticeRecipient]:
-    payload = load_json(BRIDGE_CONVERSATIONS_PATH, {}, expect_type=dict)
+def _load_recipients(account_path: Path | None, *, account_id: str = "") -> list[NoticeRecipient]:
+    conversation_path = account_conversation_path(BRIDGE_CONVERSATIONS_PATH, account_id, account_path or "")
+    payload = load_json(conversation_path, {}, expect_type=dict)
     if not isinstance(payload, dict):
         return []
     context_tokens = load_account_context_tokens(account_path) if account_path is not None else {}
@@ -139,12 +148,23 @@ def _load_recipients(account_path: Path | None) -> list[NoticeRecipient]:
     return recipients
 
 
-def _send_text(base_url: str, token: str, to_user_id: str, context_token: str, text: str) -> dict:
+def _send_text(
+    base_url: str,
+    token: str,
+    to_user_id: str,
+    context_token: str,
+    text: str,
+    *,
+    account_id: str = "",
+    account_file: str = "",
+) -> dict:
     del base_url, token
     enqueue_text_message(
         to_user_id=to_user_id,
         context_token=context_token,
         text=text[:4000],
         source="notice",
+        account_id=account_id,
+        account_file=account_file,
     )
     return {"ret": 0, "queued": True}

@@ -6,6 +6,7 @@ import time
 from typing import Callable, Iterable, TypeVar, cast
 
 from bridge_config import BridgeConfig, normalize_backend
+from core.accounts import account_conversation_path
 from env_tools import collect_check_step, collect_lightweight_checks, get_full_check_sequence, get_full_check_step_label
 from core.state_models import CheckSnapshot, ExternalAgentProcessState, HubStateSnapshot, RuntimeSnapshot, WeixinBridgeRuntimeState, WeixinConversationBinding
 from runtime_stack import (
@@ -233,7 +234,8 @@ def _read_bridge_state(path: Path) -> WeixinBridgeRuntimeState:
 
 
 def _read_bridge_conversations(path: Path, bridge_config: BridgeConfig) -> dict[str, WeixinConversationBinding]:
-    payload = read_json(path)
+    active_path = account_conversation_path(path, bridge_config.active_account_id, bridge_config.account_file)
+    payload = read_json(active_path)
     bindings: dict[str, WeixinConversationBinding] = {}
     for sender_id, raw_binding in payload.items():
         cleaned_sender_id = str(sender_id or "").strip()
