@@ -8,7 +8,7 @@ except ImportError:  # Python 3.10 compatibility
     from typing_extensions import Self
 
 from agent_backends import supported_backend_options
-from core.navigation import DIAGNOSTICS_PAGE, HOME_PAGE, ISSUES_PAGE, SESSIONS_PAGE
+from core.navigation import DIAGNOSTICS_PAGE, HOME_PAGE, SESSIONS_PAGE
 from core.view_models import WebConsoleViewModel
 
 
@@ -86,21 +86,6 @@ def _responsive_grid(ui: UIFactoryLike, classes: str) -> UIElementLike:
 
 def _panel(ui: UIFactoryLike, classes: str = "") -> UIElementLike:
     return ui.element("div").classes(f"cb-panel w-full p-4 {classes}".strip())
-
-
-def _metric(ui: UIFactoryLike, label: str, value: object, classes: str = "") -> None:
-    with _panel(ui, classes):
-        ui.label(label).classes("cb-stat-label")
-        ui.label(str(value)).classes("text-base font-bold text-slate-900 break-all")
-
-
-def _command_reference_text(text: str) -> str:
-    lines = text.splitlines()
-    for index, line in enumerate(lines):
-        normalized = line.strip().lower()
-        if normalized.endswith("命令:") or normalized.endswith("commands:"):
-            return "\n".join(lines[index:])
-    return text
 
 
 def _render_disclosure_code(ui: UIFactoryLike, title: str, content: str) -> None:
@@ -247,13 +232,6 @@ def render_home_section(
 ) -> None:
     with ui.element("section").props(f"id={HOME_PAGE.anchor}").classes("w-full"):
         _render_page_intro(ui, _tr(t, "ui.tab.home", HOME_PAGE.title), _tr(t, "ui.page.home.description", HOME_PAGE.description), "Console")
-        with ui.card().classes("cb-card cb-hero w-full p-6"):
-            with ui.column().classes("gap-3 max-w-4xl"):
-                ui.label(_tr(t, "ui.web.home.overview", "控制台总览")).classes("cb-kicker")
-                ui.label(model.home.badge_text).classes("text-2xl font-black")
-                ui.label(model.home.summary_text).classes("text-lg text-slate-100 font-semibold")
-                ui.label(model.home.primary_hint).classes("text-sm text-slate-300 max-w-2xl")
-
         with _responsive_grid(ui, "grid-cols-1"):
             with ui.card().classes("cb-card w-full p-5"):
                 _render_card_title(ui, _tr(t, "ui.web.home.service_controls", "服务控制"))
@@ -263,21 +241,13 @@ def render_home_section(
                         with ui.column().classes("gap-2 grow"):
                             ui.label(_tr(t, "ui.web.home.system_status", "系统状态")).classes("cb-kicker")
                             ui.label(model.home.summary_text).classes("text-base font-bold text-slate-900")
+                            ui.label(model.home.primary_hint).classes("text-sm cb-muted")
                         ui.label(model.home.badge_text).classes(f"{badge_class} self-start")
-                with _responsive_grid(ui, "grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 mb-4"):
-                    for label, value in (
-                        (_tr(t, "ui.web.metric.primary_action", "主动作"), model.home.primary_label),
-                        (_tr(t, "ui.web.metric.default_account", "默认账号"), model.active_account_label),
-                        (_tr(t, "ui.web.metric.default_agent", "默认 Agent"), model.bridge_agent_id or "main"),
-                        (_tr(t, "ui.web.metric.status", "状态标签"), model.home.badge_text),
-                    ):
-                        _metric(ui, label, value)
                 with ui.row().classes("gap-2 pt-4 flex-wrap"):
                     ui.button(_tr(t, "ui.primary.start.label", "启动服务"), on_click=lambda: on_run_action("start"), icon="play_arrow")
                     ui.button(_tr(t, "ui.primary.stop.label", "停止服务"), on_click=lambda: on_run_action("stop"), icon="stop")
                     ui.button(_tr(t, "ui.web.action.restart", "重启服务"), on_click=lambda: on_run_action("restart"), icon="restart_alt")
                     ui.button(_tr(t, "ui.web.action.emergency_stop", "紧急停止"), on_click=lambda: on_run_action("emergency-stop"), color="negative", icon="warning")
-                _render_disclosure_code(ui, _tr(t, "ui.web.home.runtime_details", "运行明细"), model.home.overview_text)
 
         with _responsive_grid(ui, "grid-cols-1 xl:grid-cols-2"):
             with ui.card().classes("cb-card w-full p-5"):
@@ -340,43 +310,23 @@ def render_home_section(
                     icon="notifications_active",
                 ).props("color=primary unelevated")
 
-        with ui.card().classes("cb-card w-full p-5"):
-            _render_card_title(ui, _tr(t, "ui.web.home.command_reference", "命令速查"))
-            _render_disclosure_code(ui, _tr(t, "ui.web.home.command_reference_title", "微信命令、上下文关系和账号目录"), _command_reference_text(model.home.quickstart_text))
 
-
-def render_issues_section(ui: UIFactoryLike, model: WebConsoleViewModel, t: Translator, on_run_repair_command) -> None:
-    with ui.element("section").props(f"id={ISSUES_PAGE.anchor}").classes("w-full"):
-        _render_page_intro(ui, _tr(t, "ui.tab.issues", ISSUES_PAGE.title), _tr(t, "ui.page.issues.description", ISSUES_PAGE.description), "Health")
-        with ui.card().classes("cb-card w-full p-5"):
-            if model.checks_in_progress:
-                chip_class, level_text = _severity_variant(model.checks_progress_text, t)
-                with ui.row().classes("gap-2 items-center flex-wrap mb-3"):
+def _render_repair_suggestions(ui: UIFactoryLike, model: WebConsoleViewModel, t: Translator, on_run_repair_command) -> None:
+    if not model.repair_commands:
+        return
+    with ui.card().classes("cb-card w-full p-5"):
+        _render_card_title(ui, _tr(t, "ui.web.repairs.title", "修复建议"))
+        for item in model.repair_commands:
+            with _panel(ui):
+                chip_class, level_text = _severity_variant(item.label, t)
+                with ui.row().classes("gap-2 items-center flex-wrap"):
                     ui.label(level_text).classes(chip_class)
-                    ui.label(model.checks_progress_text).classes("text-sm text-amber-700 font-semibold")
-            if model.issues:
-                for item in model.issues:
-                    chip_class, level_text = _severity_variant(f"{item.title} {item.detail}", t)
-                    with ui.row().classes("gap-2 items-center flex-wrap"):
-                        ui.label(level_text).classes(chip_class)
-                        ui.label(item.title).classes("text-lg font-bold")
-                    _render_code_block(ui, item.detail)
-            else:
-                ui.label(_tr(t, "ui.web.issues.empty", "当前没有需要手动处理的异常。")).classes("cb-muted")
-            if model.repair_commands:
-                ui.separator()
-                ui.label(_tr(t, "ui.web.issues.repairs", "修复建议")).classes("cb-section-title")
-                for item in model.repair_commands:
-                    with _panel(ui):
-                        chip_class, level_text = _severity_variant(item.label, t)
-                        with ui.row().classes("gap-2 items-center flex-wrap"):
-                            ui.label(level_text).classes(chip_class)
-                            ui.label(item.label).classes("font-semibold text-slate-900")
-                        _render_code_block(ui, item.command)
-                        if item.runnable:
-                            ui.button(_tr(t, "ui.web.action.run_repair", "执行修复"), on_click=lambda cmd=item.command, label=item.label: on_run_repair_command(cmd, label), icon="build")
-                        else:
-                            ui.label(_tr(t, "ui.web.issues.manual_repair", "当前平台下这条修复建议需要手动执行。")).classes("text-sm cb-muted")
+                    ui.label(item.label).classes("font-semibold text-slate-900")
+                _render_code_block(ui, item.command)
+                if item.runnable:
+                    ui.button(_tr(t, "ui.web.action.run_repair", "执行修复"), on_click=lambda cmd=item.command, label=item.label: on_run_repair_command(cmd, label), icon="build")
+                else:
+                    ui.label(_tr(t, "ui.web.repairs.manual", "当前平台下这条修复建议需要手动执行。")).classes("text-sm cb-muted")
 
 
 def render_sessions_section(
@@ -401,14 +351,10 @@ def render_sessions_section(
         with _responsive_grid(ui, "grid-cols-1 xl:grid-cols-2"):
             with ui.card().classes("cb-card w-full p-5"):
                 _render_card_title(ui, _tr(t, "ui.web.sessions.overview", "会话概览"))
-                session_options = {row.name: row.name for row in model.session_rows}
-                ui.select(
-                    session_options,
-                    value=model.selected_session_name or None,
-                    label=_tr(t, "ui.web.field.select_session", "选择会话"),
-                    on_change=lambda event: on_select_session(event.value or ""),
-                ).classes("w-full")
-                _render_session_summary_cards(ui, model, t, on_select_session)
+                if model.session_rows:
+                    _render_session_summary_cards(ui, model, t, on_select_session)
+                else:
+                    ui.label(_tr(t, "ui.web.sessions.empty", "当前没有会话记录。")).classes("text-sm cb-muted")
                 _render_pagination(
                     ui,
                     t,
@@ -467,20 +413,6 @@ def render_sessions_section(
             with ui.row().classes("w-full gap-2 flex-wrap"):
                 task_lookup = ui.input(label=_tr(t, "ui.web.field.lookup_task", "按 task_id 快速定位"), placeholder="task-xxxxxxxxxx").classes("w-full sm:min-w-[18rem] sm:w-auto")
                 ui.button(_tr(t, "ui.web.action.locate_task", "定位任务"), on_click=lambda: on_find_task_by_id(task_lookup.value or ""), icon="search").props("outline")
-            task_options = {
-                task.task_id: f"{task.created_at} | {task.agent_name} | {task.status} | {task.session_name}"
-                for task in model.tasks
-                if task.task_id
-            }
-            ui.select(
-                task_options,
-                value=model.selected_task_id or None,
-                label=_tr(t, "ui.web.field.select_task", "选择任务"),
-                on_change=lambda event: on_select_task(
-                    event.value or "",
-                    next((task.session_name for task in model.tasks if task.task_id == (event.value or "")), ""),
-                ),
-            ).classes("w-full")
             _render_task_summary_cards(ui, model, t, on_select_task)
             _render_pagination(
                 ui,
@@ -571,6 +503,7 @@ def render_diagnostics_section(
     on_delete_agent,
     on_terminate_external_agent,
     on_copy_external_session_hint,
+    on_run_repair_command,
 ) -> None:
     with ui.element("section").props(f"id={DIAGNOSTICS_PAGE.anchor}").classes("w-full"):
         _render_page_intro(ui, _tr(t, "ui.tab.logs", DIAGNOSTICS_PAGE.title), _tr(t, "ui.page.logs.description", DIAGNOSTICS_PAGE.description), "Diagnostics")
@@ -615,6 +548,7 @@ def render_diagnostics_section(
                     ui.label(title).classes("font-semibold text-slate-700")
                     _render_code_block(ui, content, "max-h-60 overflow-auto")
                     ui.separator()
+        _render_repair_suggestions(ui, model, t, on_run_repair_command)
         with ui.card().classes("cb-card w-full p-5"):
             _render_card_title(ui, _tr(t, "ui.web.agents.title", "Agent 管理"))
             ui.label(_tr(t, "ui.web.agents.default", "微信桥当前默认 Agent：{agent}", agent=model.bridge_agent_id or "main")).classes("text-sm cb-muted")

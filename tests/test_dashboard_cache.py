@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -62,6 +64,43 @@ class DashboardCacheTests(unittest.TestCase):
         self.assertEqual({"fresh"}, set(results.keys()))
         self.assertFalse(in_progress)
         self.assertIn("已完成", text)
+
+    def test_tail_text_hides_stale_log(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "service.err.log"
+            path.write_text("old traceback\n", encoding="utf-8")
+            os.utime(path, (100.0, 100.0))
+
+            self.assertEqual("(empty)", dashboard.tail_text(path, stale_before=101.0))
+
+    def test_tail_text_suppresses_expected_timeout_noise(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "bridge.out.log"
+            path.write_text(
+                "startup\n"
+                "[bridge] poll error: The read operation timed out\n"
+                "real event\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual("startup\nreal event", dashboard.tail_text(path, suppress_expected_noise=True))
+
+    def test_tail_text_starts_at_last_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "bridge.out.log"
+            path.write_text(
+                "old run\n"
+                "Weixin Hub Bridge started at 2026-04-28T10:00:00\n"
+                "old error\n"
+                "Weixin Hub Bridge started at 2026-04-28T11:00:00\n"
+                "current event\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                "Weixin Hub Bridge started at 2026-04-28T11:00:00\ncurrent event",
+                dashboard.tail_text(path, start_marker="Weixin Hub Bridge started at"),
+            )
 
 
 if __name__ == "__main__":

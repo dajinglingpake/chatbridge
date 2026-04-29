@@ -105,6 +105,19 @@ SHOWFILE_ALLOWED_EXTENSIONS = frozenset(
         ".yml",
     }
 )
+_PERMANENT_DELIVERY_ERROR_MARKERS = (
+    "sendmessage returned ret=-2",
+    "errcode=-14",
+    "session timeout",
+    "missing context token",
+)
+
+
+def _is_permanent_delivery_error(error: Exception | str) -> bool:
+    message = str(error).lower()
+    return any(marker in message for marker in _PERMANENT_DELIVERY_ERROR_MARKERS)
+
+
 SHOWFILE_BLOCKED_PATH_PARTS = frozenset({".git", ".runtime", ".venv", "__pycache__", "accounts", "sessions"})
 PERMISSION_MODE_PRESETS: tuple[tuple[str, str], ...] = (
     ("default", "Default"),
@@ -281,12 +294,18 @@ class WeixinBridge:
                         str(message.get("to_user_id") or ""),
                         str(message.get("context_token") or ""),
                         text,
+                        log_failure=False,
                     )
                 except Exception as exc:  # noqa: BLE001
-                    print(
-                        f"[bridge] async send failed to={message.get('to_user_id', '')} error={exc}",
-                        flush=True,
-                    )
+                    attempt = int(message.get("attempt") or 0)
+                    permanent = _is_permanent_delivery_error(exc)
+                    if not permanent and attempt == 0:
+                        print(
+                            "[bridge] async send "
+                            f"retry scheduled to={message.get('to_user_id', '')} "
+                            f"attempt={attempt + 1}/{MAX_RETRY_ATTEMPTS + 1} error={exc}",
+                            flush=True,
+                        )
                     self._handle_async_send_failure(message, exc)
 
     def _message_matches_active_account(self, message: dict[str, object]) -> bool:
@@ -937,19 +956,21 @@ class WeixinBridge:
 
     def _handle_async_send_failure(self, message: dict[str, object], error: Exception) -> None:
         attempt = int(message.get("attempt") or 0)
-        if attempt < MAX_RETRY_ATTEMPTS:
+        permanent = _is_permanent_delivery_error(error)
+        if not permanent and attempt < MAX_RETRY_ATTEMPTS:
             requeue_text_message(message)
             return
         preview = " ".join(str(message.get("text") or "").split())[:160]
+        attempts = attempt + 1
         record_failed_delivery(
             to_user_id=str(message.get("to_user_id") or ""),
             context_token=str(message.get("context_token") or ""),
             text_preview=preview,
-            attempts=attempt,
+            attempts=attempts,
             error=str(error),
         )
         print(
-            f"[bridge] dropped exhausted reply to={message.get('to_user_id', '')} attempts={attempt} preview={preview}",
+            f"[bridge] dropped undeliverable reply to={message.get('to_user_id', '')} attempts={attempts} preview={preview}",
             flush=True,
         )
 
@@ -962,6 +983,7 @@ class WeixinBridge:
         text: str,
         *,
         flush_failure_notice: bool = True,
+        log_failure: bool = True,
     ) -> None:
         text = format_weixin_reply(text)
         body = {
@@ -995,7 +1017,8 @@ class WeixinBridge:
             else:
                 print(f"[bridge] sent reply to={to_user_id} preview={preview}", flush=True)
         except Exception as exc:  # noqa: BLE001
-            print(f"[bridge] send reply failed to={to_user_id} error={exc} preview={preview}", flush=True)
+            if log_failure:
+                print(f"[bridge] send reply failed to={to_user_id} error={exc} preview={preview}", flush=True)
             raise
         if flush_failure_notice:
             self._flush_failed_delivery_notice(base_url, token, str(to_user_id or ""), str(context_token or ""))

@@ -8,10 +8,10 @@ from typing import Callable, TypeVar
 from bridge_config import BridgeConfig
 from core.accounts import build_account_options
 from core.actions import RepairCommand, build_repair_command_models
-from core.app_state import build_badge, build_issues, build_overview_lines, build_quickstart_lines, build_summary_text, decide_primary_action
+from core.app_state import build_badge, build_summary_text, decide_primary_action
 from core.dashboard import DashboardState, load_dashboard_state
 from core.sessions import SessionRow, build_session_detail, build_session_rows
-from core.state_models import CheckSnapshot, HubStateSnapshot, HubTask, RuntimeSnapshot, WeixinBridgeRuntimeState
+from core.state_models import CheckSnapshot, HubStateSnapshot, HubTask, RuntimeSnapshot
 
 
 Translator = Callable[..., str]
@@ -78,19 +78,8 @@ def _checks_progress_label(t: Translator, progress_text: str) -> str:
 class HomeViewModel:
     badge_text: str
     badge_style: str
-    overview_text: str
     summary_text: str
-    primary_action: str
-    primary_label: str
     primary_hint: str
-    quickstart_text: str
-    quickstart_status: str
-
-
-@dataclass
-class IssueViewModel:
-    title: str
-    detail: str
 
 
 @dataclass
@@ -173,7 +162,6 @@ class WebConsoleViewModel:
     service_notice_enabled: bool
     config_notice_enabled: bool
     task_notice_enabled: bool
-    issues: list[IssueViewModel]
     repair_commands: list[RepairCommand]
     checks: list[CheckViewModel]
     checks_in_progress: bool
@@ -221,17 +209,6 @@ class SessionDetailViewModel:
 
 
 @dataclass
-class IssuePanelViewModel:
-    summary_text: str
-    detail_text: str
-    show_repair_button: bool
-    show_manage_accounts_button: bool
-    show_login_button: bool
-    show_cleanup_button: bool
-    show_open_dir_button: bool
-
-
-@dataclass
 class AccountSelectionViewModel:
     active_account_id: str
     active_account_label: str
@@ -267,25 +244,15 @@ def paginate_items(items: list[ItemT], page: int, page_size: int) -> tuple[list[
 def build_home_view_model(
     snapshot: RuntimeSnapshot,
     checks: dict[str, CheckSnapshot],
-    bridge_state: WeixinBridgeRuntimeState,
-    active_account_id: str,
-    accounts_dir: Path,
     t: Translator,
 ) -> HomeViewModel:
     badge = build_badge(snapshot, t)
-    overview_lines = build_overview_lines(snapshot, bridge_state, active_account_id, t)
-    primary_action, primary_label, primary_hint = decide_primary_action(snapshot, checks, t)
-    quickstart_lines, quickstart_status = build_quickstart_lines(snapshot, checks, accounts_dir, t)
+    _, _, primary_hint = decide_primary_action(snapshot, checks, t)
     return HomeViewModel(
         badge_text=badge.text,
         badge_style=badge.style,
-        overview_text="\n".join(overview_lines),
         summary_text=build_summary_text(snapshot, checks, t),
-        primary_action=primary_action,
-        primary_label=primary_label,
         primary_hint=primary_hint,
-        quickstart_text="\n".join(quickstart_lines),
-        quickstart_status=quickstart_status,
     )
 
 
@@ -301,32 +268,6 @@ def build_session_detail_view_model(
         rows=detail.rows,
         detail_text="\n".join(detail.detail_lines).strip(),
         conversation_text="\n".join(detail.conversation_lines).strip(),
-    )
-
-
-def build_issue_panel_view_model(
-    snapshot: RuntimeSnapshot,
-    bridge_state: WeixinBridgeRuntimeState,
-    checks: dict[str, CheckSnapshot],
-    t: Translator,
-) -> IssuePanelViewModel:
-    issues = build_issues(snapshot, bridge_state, checks, t)
-    if not issues:
-        summary_text = t("ui.issue.none.summary")
-        detail_text = t("ui.issue.none.detail")
-    else:
-        summary_text = t("ui.issue.summary.count", count=len(issues))
-        detail_text = "\n\n".join(f"[{issue.title}]\n{issue.detail}" for issue in issues)
-
-    issue_kinds = {issue.kind for issue in issues}
-    return IssuePanelViewModel(
-        summary_text=summary_text,
-        detail_text=detail_text,
-        show_repair_button="dependencies" in issue_kinds,
-        show_manage_accounts_button=True,
-        show_login_button="login" in issue_kinds,
-        show_cleanup_button="processes" in issue_kinds,
-        show_open_dir_button=True,
     )
 
 
@@ -435,7 +376,6 @@ def build_web_console_view_model_from_dashboard(
     normalized_page_key = (page_key or "home").strip().lower()
     checks_map = dashboard.checks
     hub_state = dashboard.hub_state
-    bridge_state = dashboard.bridge_state
     bridge_conversations = dashboard.bridge_conversations
     session_dir = app_dir / "sessions"
     session_rows: list[SessionRow] = []
@@ -628,11 +568,7 @@ def build_web_console_view_model_from_dashboard(
     checks_total_count = len(all_checks)
     checks, checks_page, checks_total_pages = paginate_items(all_checks, checks_page, 10)
 
-    issues = [
-        IssueViewModel(title=item.title, detail=item.detail)
-        for item in build_issues(dashboard.snapshot, bridge_state, checks_map, t)
-    ] if normalized_page_key in {"issues", "home", "diagnostics"} else []
-    repair_commands = build_repair_command_models(checks_map, t) if normalized_page_key == "issues" else []
+    repair_commands = build_repair_command_models(checks_map, t) if normalized_page_key == "diagnostics" else []
     log_sections = [
         ("Hub stdout", dashboard.logs.get("hub_out", "(empty)")),
         ("Hub stderr", dashboard.logs.get("hub_err", "(empty)")),
@@ -644,9 +580,6 @@ def build_web_console_view_model_from_dashboard(
         home=build_home_view_model(
             snapshot=dashboard.snapshot,
             checks=checks_map,
-            bridge_state=bridge_state,
-            active_account_id=account_selection.active_account_label,
-            accounts_dir=app_dir / "accounts",
             t=t,
         ),
         log_dir=dashboard.snapshot.log_dir,
@@ -656,7 +589,6 @@ def build_web_console_view_model_from_dashboard(
         service_notice_enabled=bridge_config.service_notice_enabled,
         config_notice_enabled=bridge_config.config_notice_enabled,
         task_notice_enabled=bridge_config.task_notice_enabled,
-        issues=issues,
         repair_commands=repair_commands,
         checks=checks,
         checks_in_progress=dashboard.checks_in_progress,

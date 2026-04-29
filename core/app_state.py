@@ -34,7 +34,7 @@ def _fallback_text(key: str, **kwargs: object) -> str:
         "ui.overview.active_account": "当前账号: {account}",
         "ui.overview.none_agents": "没有检测到残留 Agent 进程。",
         "ui.overview.bridge_state": "微信桥状态:",
-        "ui.summary.missing": "当前有 {count} 项未就绪：{items}",
+        "ui.summary.missing": "当前有 {count} 项需要处理，详情集中在诊断页。",
         "ui.summary.ready_running": "环境已就绪，微信桥和会话后台都在运行。",
         "ui.summary.ready_waiting": "环境已就绪，等待启动后台服务。",
         "ui.primary.stop.label": "停止服务",
@@ -174,9 +174,9 @@ def build_summary_text(
     checks: dict[str, CheckSnapshot],
     translator: Callable[..., str] | None = None,
 ) -> str:
-    missing = [item.label for item in checks.values() if not item.ok]
-    if missing:
-        return _t(translator, "ui.summary.missing", count=len(missing), items="、".join(missing[:4]))
+    missing_count = sum(1 for item in checks.values() if not item.ok)
+    if missing_count:
+        return _t(translator, "ui.summary.missing", count=missing_count)
     if snapshot.hub_running and snapshot.bridge_running:
         return _t(translator, "ui.summary.ready_running")
     return _t(translator, "ui.summary.ready_waiting")

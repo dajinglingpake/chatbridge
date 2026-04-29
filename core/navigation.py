@@ -15,14 +15,7 @@ HOME_PAGE = PageDefinition(
     key="home",
     title="首页",
     anchor="home",
-    description="状态总览、主动作、任务提交和账号切换。",
-)
-
-ISSUES_PAGE = PageDefinition(
-    key="issues",
-    title="异常",
-    anchor="issues",
-    description="当前需要处理的问题和修复建议。",
+    description="服务状态、任务提交、账号切换和通知设置。",
 )
 
 SESSIONS_PAGE = PageDefinition(
@@ -41,7 +34,6 @@ DIAGNOSTICS_PAGE = PageDefinition(
 
 PRIMARY_PAGES: tuple[PageDefinition, ...] = (
     HOME_PAGE,
-    ISSUES_PAGE,
     SESSIONS_PAGE,
     DIAGNOSTICS_PAGE,
 )
