@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from core.weixin_delivery_failures import pop_failed_delivery, record_failed_delivery
+from weixin_hub_bridge import _is_permanent_delivery_error
 
 
 class WeixinDeliveryFailuresTests(unittest.TestCase):
@@ -32,6 +33,11 @@ class WeixinDeliveryFailuresTests(unittest.TestCase):
         assert payload is not None
         self.assertEqual(2, payload["count"])
         self.assertEqual("done · 11s", payload["text_preview"])
+
+    def test_permanent_delivery_error_matches_invalid_session_failures(self) -> None:
+        self.assertTrue(_is_permanent_delivery_error("sendmessage returned ret=-2: {'ret': -2}"))
+        self.assertTrue(_is_permanent_delivery_error("errcode=-14 errmsg=session timeout"))
+        self.assertFalse(_is_permanent_delivery_error("timed out"))
 
 
 if __name__ == "__main__":

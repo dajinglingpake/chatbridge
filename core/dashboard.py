@@ -5,6 +5,11 @@ from pathlib import Path
 import time
 from typing import Callable, Iterable, TypeVar, cast
 
+try:
+    import psutil
+except ImportError:  # pragma: no cover - optional dependency
+    psutil = None
+
 from bridge_config import BridgeConfig, normalize_backend
 from core.accounts import account_conversation_path
 from env_tools import collect_check_step, collect_lightweight_checks, get_full_check_sequence, get_full_check_step_label
@@ -91,12 +96,13 @@ _CACHE_TTLS = {
 _RUNTIME_CACHE: dict[str, RuntimeCacheEntry] = {}
 _FULL_CHECK_PROGRESS_KEY = "checks:full:progress"
 CacheValueT = TypeVar("CacheValueT")
+_EXPECTED_LOG_NOISE_MARKERS = ("[bridge] poll error: the read operation timed out",)
 
 
 def _page_load_profile(page_key: str) -> PageLoadProfile:
     normalized = (page_key or "home").strip().lower()
     return PageLoadProfile(
-        checks_mode="light" if normalized == "home" else ("full" if normalized in {"issues", "diagnostics"} else "none"),
+        checks_mode="light" if normalized == "home" else ("full" if normalized == "diagnostics" else "none"),
         logs=normalized == "diagnostics",
         external_agent_processes=normalized == "diagnostics",
         bridge_conversations=normalized == "sessions",
@@ -139,13 +145,48 @@ def _get_progressive_full_checks(app_dir: Path, bridge_config: BridgeConfig) -> 
     return results, (not completed), progress_text
 
 
-def tail_text(path: Path, max_lines: int = 80) -> str:
+def _process_started_at(pid: int | None) -> float | None:
+    if pid is None or psutil is None:
+        return None
+    try:
+        return float(psutil.Process(pid).create_time())
+    except (psutil.Error, ProcessLookupError, OSError):
+        return None
+
+
+def _without_expected_log_noise(lines: list[str]) -> list[str]:
+    filtered: list[str] = []
+    for line in lines:
+        lowered = line.lower()
+        if any(marker in lowered for marker in _EXPECTED_LOG_NOISE_MARKERS):
+            continue
+        filtered.append(line)
+    return filtered
+
+
+def tail_text(
+    path: Path,
+    max_lines: int = 80,
+    *,
+    stale_before: float | None = None,
+    suppress_expected_noise: bool = False,
+    start_marker: str = "",
+) -> str:
     if not path.exists():
         return "(empty)"
     try:
+        if stale_before is not None and path.stat().st_mtime < stale_before:
+            return "(empty)"
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return "(unreadable)"
+    if start_marker:
+        for index in range(len(lines) - 1, -1, -1):
+            if start_marker in lines[index]:
+                lines = lines[index:]
+                break
+    if suppress_expected_noise:
+        lines = _without_expected_log_noise(lines)
     return "\n".join(lines[-max_lines:]) if lines else "(empty)"
 
 
@@ -170,14 +211,20 @@ def load_dashboard_state(app_dir: Path, page_key: str = "home") -> DashboardStat
     else:
         checks = {}
     active_account_id = bridge_config.active_account_id
+    hub_started_at = _process_started_at(snapshot.hub_pid)
+    bridge_started_at = _process_started_at(snapshot.bridge_pid)
     logs = (
         _read_cached(
             "logs",
             lambda: {
-                "hub_out": tail_text(HUB_OUT_LOG),
-                "hub_err": tail_text(HUB_ERR_LOG),
-                "bridge_out": tail_text(BRIDGE_OUT_LOG),
-                "bridge_err": tail_text(BRIDGE_ERR_LOG),
+                "hub_out": tail_text(HUB_OUT_LOG, start_marker="ChatBridge backend started"),
+                "hub_err": tail_text(HUB_ERR_LOG, stale_before=hub_started_at),
+                "bridge_out": tail_text(
+                    BRIDGE_OUT_LOG,
+                    suppress_expected_noise=True,
+                    start_marker="Weixin Hub Bridge started at",
+                ),
+                "bridge_err": tail_text(BRIDGE_ERR_LOG, stale_before=bridge_started_at),
             },
             _CACHE_TTLS["logs"],
         )

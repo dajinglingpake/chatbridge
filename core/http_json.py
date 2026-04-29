@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import urllib.error
 import urllib.request
 
@@ -24,5 +25,7 @@ def request_json(request: urllib.request.Request, *, timeout: float) -> JsonObje
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
+    except (TimeoutError, socket.timeout) as exc:
+        raise RuntimeError("timed out") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(str(exc.reason or exc)) from exc

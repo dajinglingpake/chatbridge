@@ -4,15 +4,13 @@ from pathlib import Path
 
 from starlette.requests import Request
 
-from core.action_defs import AUTO_REFRESH_OFF_ACTION, AUTO_REFRESH_ON_ACTION
 from core.app_service import delete_agent, reset_weixin_conversation, run_named_action, run_repair_command, save_agent, set_weixin_notice_enabled, submit_hub_task, switch_active_account, switch_bridge_agent, switch_weixin_session_backend, terminate_external_agent
 from core.navigation import PRIMARY_PAGES
 from core.shell_schema import APP_SHELL
 from core.view_models import build_web_console_view_model
 from localization import Localizer, normalize_language
-from ui.action_router import execute_topbar_action
 from ui.qr_login import install_qr_login_dialog
-from ui.sections import render_diagnostics_section, render_home_section, render_issues_section, render_sessions_section
+from ui.sections import render_diagnostics_section, render_home_section, render_sessions_section
 
 
 APP_DIR = Path(__file__).resolve().parent.parent
@@ -44,18 +42,9 @@ def create_ui() -> None:
     def page_label(page_key: str, fallback: str) -> str:
         return {
             "home": t("ui.tab.home", fallback),
-            "issues": t("ui.tab.issues", fallback),
             "sessions": t("ui.tab.sessions", fallback),
             "diagnostics": t("ui.tab.logs", fallback),
         }.get(page_key, fallback)
-
-    def topbar_label(action_key: str, fallback: str) -> str:
-        return {
-            "refresh": t("ui.button.refresh", fallback),
-            "login": t("ui.button.login", fallback),
-            "sessions": t("ui.button.sessions", fallback),
-            "diagnostics": t("ui.button.logs", fallback),
-        }.get(action_key, fallback)
 
     ui.add_head_html(
         """
@@ -92,8 +81,8 @@ def create_ui() -> None:
             min-height: 64px;
         }
         .cb-shell-nav {
-            background: var(--cb-surface);
-            border-bottom: 1px solid var(--cb-border);
+            background: transparent;
+            border-bottom: 0;
         }
         .cb-nav-button {
             min-width: 6rem;
@@ -286,12 +275,6 @@ def create_ui() -> None:
         .cb-disclosure[open] summary::after {
             content: "expand_less";
         }
-        @media (max-width: 1023px) {
-            .cb-shell-nav {
-                top: 0;
-                position: static;
-            }
-        }
         @media (max-width: 767px) {
             .cb-shell-header {
                 padding-left: 1rem;
@@ -361,15 +344,12 @@ def create_ui() -> None:
         nav_view.refresh()
         content_view.refresh()
 
-    def refresh_view() -> None:
-        if state["qr_login_open"]:
-            return
-        content_view.refresh()
-
     def refresh_after_qr_login() -> None:
         content_view.refresh()
 
     def should_auto_refresh() -> bool:
+        if not state["auto_refresh"]:
+            return False
         if state["qr_login_open"]:
             return False
         return state["active_page"] == "diagnostics" and bool(state["checks_in_progress"])
@@ -422,8 +402,6 @@ def create_ui() -> None:
                     _set_weixin_notice_enabled,
                     open_qr_login,
                 )
-            elif state["active_page"] == "issues":
-                render_issues_section(ui, model, translate, _run_repair_command)
             elif state["active_page"] == "sessions":
                 render_sessions_section(
                     ui,
@@ -454,6 +432,7 @@ def create_ui() -> None:
                     _delete_agent,
                     _terminate_external_agent,
                     _copy_external_session_hint,
+                    _run_repair_command,
                 )
 
     def _notify(result_message: str) -> None:
@@ -613,21 +592,20 @@ def create_ui() -> None:
         result = reset_weixin_conversation(sender_id)
         _notify(result.message)
 
-    def toggle_auto_refresh() -> None:
-        state["auto_refresh"] = not state["auto_refresh"]
-        if auto_refresh_button is not None:
-            auto_refresh_button.text = t("ui.auto_refresh.on", AUTO_REFRESH_ON_ACTION.label) if state["auto_refresh"] else t("ui.auto_refresh.off", AUTO_REFRESH_OFF_ACTION.label)
-        content_view.refresh()
+    def _set_auto_refresh(enabled: bool) -> None:
+        state["auto_refresh"] = bool(enabled)
+        nav_view.refresh()
+        if state["auto_refresh"] and should_auto_refresh():
+            content_view.refresh()
 
     @ui.refreshable
     def nav_view() -> None:
-        with ui.row().classes("cb-shell-nav w-full gap-2 px-5 py-2 sticky top-[64px] z-40 flex-wrap"):
+        with ui.row().classes("cb-shell-nav w-full gap-2 items-center flex-wrap"):
             for page in PRIMARY_PAGES:
                 active = page.key == state["active_page"]
                 props = "color=primary text-color=white unelevated" if active else "outline"
                 icon = {
                     "home": "dashboard",
-                    "issues": "report_problem",
                     "sessions": "forum",
                     "diagnostics": "monitor_heart",
                 }.get(page.key, "radio_button_unchecked")
@@ -637,56 +615,29 @@ def create_ui() -> None:
                     icon=icon,
                 ).props(props).classes(f"cb-nav-button {'cb-nav-active' if active else ''}")
             ui.space()
-            for action in APP_SHELL.topbar_actions:
-                if action.key != "refresh":
-                    continue
-                ui.button(
-                    topbar_label(action.key, action.label),
-                    on_click=lambda key=action.key: execute_topbar_action(
-                        key,
-                        refresh=refresh_view,
-                        jump=jump_to,
-                        notify=notify_only,
-                        open_qr_login=open_qr_login,
-                        translate=translate,
-                    ),
-                    icon={
-                        "refresh": "refresh",
-                        "login": "qr_code_scanner",
-                        "sessions": "forum",
-                        "diagnostics": "monitor_heart",
-                    }.get(action.key, "bolt"),
-                ).props("outline").classes("cb-toolbar-button")
+            ui.label(t("ui.web.field.language", "语言")).classes("text-sm cb-muted")
+            ui.toggle(
+                {"zh-CN": "中文", "en-US": "English"},
+                value=state["language"],
+                on_change=lambda event: switch_language(str(event.value or "")),
+                clearable=False,
+            ).props("unelevated color=white text-color=primary toggle-color=primary toggle-text-color=white").classes("cb-language-toggle")
+            ui.switch(
+                t("ui.auto_refresh.label", "自动刷新"),
+                value=bool(state["auto_refresh"]),
+                on_change=lambda event: _set_auto_refresh(bool(event.value)),
+            ).props("color=primary").classes("cb-auto-refresh")
 
     def shell_view() -> None:
-        nonlocal auto_refresh_button
-        with ui.header().classes("cb-shell-header items-center justify-between text-slate-800 shadow-none px-5 py-3"):
-            with ui.column().classes("gap-0 min-w-0"):
-                ui.label(APP_SHELL.app_name).classes("text-xl font-black")
-                ui.label(t("ui.app.subtitle", APP_SHELL.app_subtitle)).classes("text-sm cb-muted max-w-4xl")
-            with ui.row().classes("gap-2 items-center"):
-                ui.label(t("ui.web.field.language", "语言")).classes("text-sm cb-muted")
-                ui.toggle(
-                    {"zh-CN": "中文", "en-US": "English"},
-                    value=state["language"],
-                    on_change=lambda event: switch_language(str(event.value or "")),
-                    clearable=False,
-                ).props("unelevated color=white text-color=primary toggle-color=primary toggle-text-color=white").classes("cb-language-toggle")
-                auto_refresh_button = ui.button(
-                    t("ui.auto_refresh.on", AUTO_REFRESH_ON_ACTION.label) if state["auto_refresh"] else t("ui.auto_refresh.off", AUTO_REFRESH_OFF_ACTION.label),
-                    on_click=lambda: toggle_auto_refresh(),
-                    icon="sync",
-                ).props("outline").classes("cb-toolbar-button")
-        nav_view()
+        with ui.header().classes("cb-shell-header text-slate-800 shadow-none px-5 py-3"):
+            nav_view()
 
     @ui.page("/")
     def index_page(request: Request) -> None:
         apply_request_language(request)
         shell_view()
         content_view()
-        ui.timer(2.0, lambda: content_view.refresh() if state["auto_refresh"] and should_auto_refresh() else None)
-
-    auto_refresh_button = None
+        ui.timer(2.0, lambda: content_view.refresh() if should_auto_refresh() else None)
 
 
 def run_ui(host: str = "0.0.0.0", port: int = 8765, native: bool = False) -> None:
