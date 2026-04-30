@@ -157,11 +157,14 @@ def _find_rollout_path_for_session(session_id: str) -> Path | None:
     state_db_path = _resolve_codex_state_db_path()
     if state_db_path is None:
         return None
-    with sqlite3.connect(str(state_db_path)) as connection:
+    connection = sqlite3.connect(str(state_db_path))
+    try:
         row = connection.execute(
             "select rollout_path from threads where id = ? limit 1",
             (session_id,),
         ).fetchone()
+    finally:
+        connection.close()
     if row is None or not row[0]:
         return None
     return Path(str(row[0])).expanduser()
@@ -323,36 +326,72 @@ def _load_latest_token_usage(session_log_path: Path) -> _TokenUsage | None:
         return None
     latest_total_tokens: int | None = None
     latest_context_window: int | None = None
-    with session_log_path.open("r", encoding="utf-8", errors="replace") as handle:
-        for raw_line in handle:
-            raw_line = raw_line.strip()
-            if not raw_line:
-                continue
-            try:
-                record = json.loads(raw_line)
-            except json.JSONDecodeError:
-                continue
-            if str(record.get("type") or "") != "event_msg":
-                continue
-            payload = dict(record.get("payload") or {})
-            if str(payload.get("type") or "") != "token_count":
-                continue
-            info = dict(payload.get("info") or {})
-            # total_token_usage is cumulative for the whole session. The status
-            # panel needs the current resumed thread window usage.
-            total = dict(info.get("last_token_usage") or {})
-            total_tokens = total.get("total_tokens")
-            if isinstance(total_tokens, int):
-                latest_total_tokens = total_tokens
-            context_window = info.get("model_context_window")
-            if isinstance(context_window, int):
-                latest_context_window = context_window
+    for raw_line in _iter_lines_reverse(session_log_path):
+        raw_line = raw_line.strip()
+        if not raw_line:
+            continue
+        try:
+            record = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        token_usage = _extract_token_usage(record)
+        if token_usage is None:
+            continue
+        if latest_total_tokens is None:
+            latest_total_tokens = token_usage.total_tokens
+        if latest_context_window is None and token_usage.model_context_window is not None:
+            latest_context_window = token_usage.model_context_window
+        if latest_total_tokens is not None and latest_context_window is not None:
+            break
     if latest_total_tokens is None:
         return None
     return _TokenUsage(
         total_tokens=latest_total_tokens,
         model_context_window=latest_context_window,
     )
+
+
+def _extract_token_usage(record: object) -> _TokenUsage | None:
+    if not isinstance(record, dict):
+        return None
+    if str(record.get("type") or "") != "event_msg":
+        return None
+    payload = dict(record.get("payload") or {})
+    if str(payload.get("type") or "") != "token_count":
+        return None
+    info = dict(payload.get("info") or {})
+    # total_token_usage is cumulative for the whole session. The status panel
+    # needs the current resumed thread window usage.
+    total = dict(info.get("last_token_usage") or {})
+    total_tokens = total.get("total_tokens")
+    if not isinstance(total_tokens, int):
+        return None
+    context_window = info.get("model_context_window")
+    return _TokenUsage(
+        total_tokens=total_tokens,
+        model_context_window=context_window if isinstance(context_window, int) else None,
+    )
+
+
+def _iter_lines_reverse(path: Path, chunk_size: int = 64 * 1024):
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        position = handle.tell()
+        pending = b""
+        while position > 0:
+            read_size = min(chunk_size, position)
+            position -= read_size
+            handle.seek(position)
+            buffer = handle.read(read_size) + pending
+            lines = buffer.splitlines()
+            if position > 0:
+                pending = lines[0] if lines else buffer
+                complete_lines = lines[1:]
+            else:
+                pending = b""
+                complete_lines = lines
+            for raw_line in reversed(complete_lines):
+                yield raw_line.decode("utf-8", errors="replace")
 
 
 def _render_status_panel(snapshot: _StatusSnapshot) -> str:
