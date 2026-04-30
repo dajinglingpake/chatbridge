@@ -23,6 +23,16 @@ from core.platform_compat import IS_WINDOWS, creationflags, resolve_command, ter
 from runtime_stack import discover_external_agent_processes
 
 
+def _configure_process_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="replace")
+
+
+_configure_process_stdio()
+
+
 APP_DIR = Path(__file__).resolve().parent
 RUNTIME_DIR = APP_DIR / ".runtime"
 STATE_DIR = RUNTIME_DIR / "state"

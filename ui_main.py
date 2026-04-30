@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import importlib.util
+import json
 import os
 import socket
 import site
@@ -14,6 +15,9 @@ from pathlib import Path
 APP_DIR = Path(__file__).resolve().parent
 VENV_DIR = APP_DIR / ".venv"
 REQUIREMENTS_PATH = APP_DIR / "requirements.txt"
+IMPORT_NAME_OVERRIDES = {
+    "Pillow": "PIL",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -58,9 +62,31 @@ def _activate_venv_in_process() -> None:
     importlib.invalidate_caches()
 
 
-def _has_ui_dependency() -> bool:
+def _requirement_import_name(requirement: str) -> str:
+    cleaned = requirement.strip()
+    for marker in ("==", ">=", "<=", "~=", "!=", ">", "<", "["):
+        if marker in cleaned:
+            cleaned = cleaned.split(marker, 1)[0]
+    return IMPORT_NAME_OVERRIDES.get(cleaned, cleaned.replace("-", "_"))
+
+
+def _required_dependency_modules() -> list[str]:
+    if not REQUIREMENTS_PATH.exists():
+        return ["nicegui"]
+    modules: list[str] = []
+    for raw_line in REQUIREMENTS_PATH.read_text(encoding="utf-8").splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line or line.startswith(("-", "git+", "http://", "https://")):
+            continue
+        module = _requirement_import_name(line)
+        if module and module not in modules:
+            modules.append(module)
+    return modules or ["nicegui"]
+
+
+def _missing_required_dependency_modules() -> list[str]:
     importlib.invalidate_caches()
-    return importlib.util.find_spec("nicegui") is not None
+    return [module for module in _required_dependency_modules() if importlib.util.find_spec(module) is None]
 
 
 def _clean_subprocess_env() -> dict[str, str]:
@@ -102,17 +128,29 @@ def _without_debugger_subprocess_patch():
             patched_module.CreateProcess = patched_create_process
 
 
-def _venv_has_ui_dependency(python_executable: str) -> bool:
+def _venv_missing_required_dependency_modules(python_executable: str) -> list[str]:
+    modules = _required_dependency_modules()
+    script = (
+        "import importlib.util, json; "
+        f"modules = {json.dumps(modules)}; "
+        "print(json.dumps([module for module in modules if importlib.util.find_spec(module) is None]))"
+    )
     with _without_debugger_subprocess_patch():
         completed = subprocess.run(
-            [python_executable, "-I", "-c", "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('nicegui') else 1)"],
+            [python_executable, "-I", "-c", script],
             cwd=str(APP_DIR),
             capture_output=True,
             text=True,
             env=_clean_subprocess_env(),
             check=False,
         )
-    return completed.returncode == 0
+    if completed.returncode != 0:
+        return modules
+    try:
+        payload = json.loads(completed.stdout or "[]")
+    except json.JSONDecodeError:
+        return modules
+    return [str(item) for item in payload]
 
 
 def _run_command(argv: list[str]) -> None:
@@ -184,7 +222,12 @@ def ensure_ui_dependencies(launcher_path: Path | None = None) -> None:
     if not _is_running_in_project_venv() and _is_debugger_attached():
         _activate_venv_in_process()
 
-    if not _has_ui_dependency():
+    missing_modules = (
+        _missing_required_dependency_modules()
+        if _is_running_in_project_venv()
+        else _venv_missing_required_dependency_modules(installer_python)
+    )
+    if missing_modules:
         _ensure_venv_pip(installer_python)
         print(f"[chatbridge] Installing Python dependencies from {REQUIREMENTS_PATH.name}", file=sys.stderr)
         _run_command(_python_module_cmd(installer_python, "pip", "install", "--upgrade", "pip"))
@@ -195,8 +238,11 @@ def ensure_ui_dependencies(launcher_path: Path | None = None) -> None:
                 _activate_venv_in_process()
             else:
                 os.execv(installer_python, [installer_python, entry_script, *sys.argv[1:]])
-        if not _has_ui_dependency() and not _venv_has_ui_dependency(installer_python):
-            raise RuntimeError("nicegui is still unavailable after installing requirements into the local virtual environment")
+        missing_modules = _missing_required_dependency_modules()
+        venv_missing_modules = _venv_missing_required_dependency_modules(installer_python)
+        if missing_modules and venv_missing_modules:
+            missing_text = ", ".join(venv_missing_modules)
+            raise RuntimeError(f"Python dependencies are still unavailable after installing requirements: {missing_text}")
         return
 
     if not _is_running_in_project_venv():

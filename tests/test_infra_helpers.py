@@ -6,6 +6,8 @@ import urllib.request
 from pathlib import Path
 from unittest.mock import patch
 
+import env_tools
+import ui_main
 from core.http_json import decode_json_bytes, request_json
 from core.json_store import load_json
 
@@ -33,6 +35,26 @@ class InfraHelperTests(unittest.TestCase):
                 request_json(request, timeout=0.1)
 
         self.assertEqual("timed out", str(context.exception))
+
+    def test_ui_dependency_modules_are_loaded_from_requirements(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            requirements_path = Path(temp_dir) / "requirements.txt"
+            requirements_path.write_text("nicegui\ncryptography\nPillow\n", encoding="utf-8")
+
+            with patch.object(ui_main, "REQUIREMENTS_PATH", requirements_path):
+                self.assertEqual(["nicegui", "cryptography", "PIL"], ui_main._required_dependency_modules())
+
+    def test_python_dependency_check_reports_missing_requirement(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            requirements_path = Path(temp_dir) / "requirements.txt"
+            requirements_path.write_text("definitely-missing-chatbridge-package\n", encoding="utf-8")
+
+            with patch.object(env_tools, "REQUIREMENTS_PATH", requirements_path):
+                result = env_tools._python_dependencies_check()
+
+        self.assertFalse(result.ok)
+        self.assertEqual("psutil", result.key)
+        self.assertIn("definitely_missing_chatbridge_package", result.detail)
 
 
 if __name__ == "__main__":

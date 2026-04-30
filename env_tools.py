@@ -15,6 +15,10 @@ from core.platform_compat import IS_WINDOWS, command_candidates, creationflags, 
 
 DEFAULT_NODE_VERSION = "24.14.1"
 WEIXIN_ACCOUNTS_DIR = Path(__file__).resolve().parent / "accounts"
+REQUIREMENTS_PATH = Path(__file__).resolve().parent / "requirements.txt"
+IMPORT_NAME_OVERRIDES = {
+    "Pillow": "PIL",
+}
 
 
 @dataclass
@@ -118,6 +122,46 @@ def _project_files_check(project_dir: Path) -> CheckResult:
     )
 
 
+def _requirement_import_name(requirement: str) -> str:
+    cleaned = requirement.strip()
+    for marker in ("==", ">=", "<=", "~=", "!=", ">", "<", "["):
+        if marker in cleaned:
+            cleaned = cleaned.split(marker, 1)[0]
+    return IMPORT_NAME_OVERRIDES.get(cleaned, cleaned.replace("-", "_"))
+
+
+def _required_dependency_modules() -> list[str]:
+    if not REQUIREMENTS_PATH.exists():
+        return ["psutil"]
+    modules: list[str] = []
+    for raw_line in REQUIREMENTS_PATH.read_text(encoding="utf-8").splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line or line.startswith(("-", "git+", "http://", "https://")):
+            continue
+        module = _requirement_import_name(line)
+        if module and module not in modules:
+            modules.append(module)
+    return modules or ["psutil"]
+
+
+def _python_dependencies_check() -> CheckResult:
+    modules = _required_dependency_modules()
+    missing = [module for module in modules if importlib.util.find_spec(module) is None]
+    if missing:
+        return CheckResult(
+            key="psutil",
+            label="Python Dependencies",
+            ok=False,
+            detail=f"missing: {', '.join(missing)}",
+        )
+    return CheckResult(
+        key="psutil",
+        label="Python Dependencies",
+        ok=True,
+        detail=f"installed: {', '.join(modules)}",
+    )
+
+
 def _weixin_account_check(config: BridgeConfig) -> CheckResult:
     active_account = config.get_active_account()
     return CheckResult(
@@ -166,8 +210,7 @@ def collect_check_step(step_key: str, project_dir: Path, config: BridgeConfig | 
         with ThreadPoolExecutor(max_workers=len(binary_specs)) as executor:
             return list(executor.map(lambda spec: _binary_check(*spec), binary_specs))
     if step_key == "psutil":
-        psutil_ok = importlib.util.find_spec("psutil") is not None
-        return [CheckResult(key="psutil", label="psutil", ok=psutil_ok, detail="installed" if psutil_ok else "missing")]
+        return [_python_dependencies_check()]
     if step_key == "weixin_account":
         return [_weixin_account_check(bridge_config)]
     if step_key == "project_files":
@@ -188,8 +231,7 @@ def collect_lightweight_checks(project_dir: Path, config: BridgeConfig | None = 
         )
     )
 
-    psutil_ok = importlib.util.find_spec("psutil") is not None
-    results.append(CheckResult(key="psutil", label="psutil", ok=psutil_ok, detail="installed" if psutil_ok else "missing"))
+    results.append(_python_dependencies_check())
 
     bridge_config = config or BridgeConfig.load()
     results.append(_weixin_account_check(bridge_config))
