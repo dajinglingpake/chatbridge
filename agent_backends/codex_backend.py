@@ -52,6 +52,7 @@ class CodexBackend(AgentBackend):
         proc = subprocess.Popen(
             argv,
             cwd=str(workdir),
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

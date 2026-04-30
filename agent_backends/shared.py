@@ -24,6 +24,7 @@ def run_process(argv: list[str], cwd: Path, context: BackendContext) -> ProcessR
     proc = subprocess.Popen(
         argv,
         cwd=str(cwd),
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,

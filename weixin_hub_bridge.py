@@ -8,6 +8,7 @@ import os
 import random
 import secrets
 import subprocess
+import sys
 import threading
 import time
 import unicodedata
@@ -57,6 +58,16 @@ from core.weixin_notifier import broadcast_weixin_notice_by_kind, build_task_fol
 from core.weixin_message_format import format_duration_since, format_weixin_reply, now_iso, prefix_weixin_output
 from local_ipc import create_request, wait_for_response
 from localization import Localizer
+
+
+def _configure_process_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="replace")
+
+
+_configure_process_stdio()
 
 
 EXPORT_DIR = RUNTIME_DIR / "exports"
@@ -592,7 +603,7 @@ class WeixinBridge:
                 "bridge_conversations_path": str(CONVERSATION_PATH),
                 "bridge_event_log_path": str(EVENT_LOG_PATH),
             },
-            timeout_seconds=15,
+            timeout_seconds=60,
         )
         if not response.ok:
             raise RuntimeError(str(response.error or "submit_task failed"))
