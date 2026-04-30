@@ -44,6 +44,7 @@ SUPPORTED_BACKENDS = set(supported_backend_keys())
 WECHAT_SOURCE = "wechat"
 MCP_SERVER_NAME = "operations"
 MCP_SERVER_PATH = APP_DIR / "tools" / "operations_server.py"
+PERF_LOG_MIN_SECONDS = 0.25
 
 
 def now_iso() -> str:
@@ -677,8 +678,11 @@ class MultiCodexHub:
     def process_ipc_once(self) -> None:
         ensure_ipc_dirs()
         for request_path in sorted(REQUEST_DIR.glob("*.json")):
+            request_started = time.perf_counter()
+            action = "unknown"
             try:
                 request = read_request(request_path)
+                action = request.action or "unknown"
                 response = self._dispatch_request(request)
             except Exception as exc:  # noqa: BLE001
                 request_id = request_path.stem
@@ -687,6 +691,12 @@ class MultiCodexHub:
                 request_id = request.id or request_path.stem
             write_response(request_id, response)
             mark_processed(request_path)
+            elapsed_ms = int((time.perf_counter() - request_started) * 1000)
+            if elapsed_ms >= int(PERF_LOG_MIN_SECONDS * 1000):
+                print(
+                    f"[hub-perf] ipc action={action} request_id={request_id} duration_ms={elapsed_ms} ok={response.ok}",
+                    flush=True,
+                )
 
     def _dispatch_request(self, request: IpcRequestEnvelope) -> IpcResponseEnvelope:
         action = request.action

@@ -89,6 +89,7 @@ ACTIVE_TASK_POLL_TIMEOUT_MS = 1000
 TERMINAL_TASK_STATUSES = frozenset({"succeeded", "failed", "canceled", "unknown_after_restart"})
 TYPING_KEEPALIVE_SECONDS = 5
 TYPING_TICKET_TTL_SECONDS = 23 * 60 * 60
+PERF_LOG_MIN_SECONDS = 0.25
 MEDIA_SEND_MAX_BYTES = 25 * 1024 * 1024
 MEDIA_UPLOAD_TYPE_IMAGE = 1
 MEDIA_UPLOAD_TYPE_FILE = 3
@@ -735,12 +736,15 @@ class WeixinBridge:
         if not self.pending_tasks:
             return
         for task_id, tracked in list(self.pending_tasks.items()):
+            poll_started = time.perf_counter()
             try:
                 data = self._ipc_request("get_task", {"task_id": task_id}, timeout_seconds=5)
             except Exception as exc:  # noqa: BLE001
+                self._log_perf("pending_task_poll", poll_started, task_id=task_id, status="ipc_failed")
                 print(f"[bridge] pending task poll failed for {task_id}: {exc}")
                 continue
             if not data.ok:
+                self._log_perf("pending_task_poll", poll_started, task_id=task_id, status="not_ok")
                 error_text = str(data.error or "unknown error")
                 print(f"[bridge] pending task poll failed for {task_id}: {error_text}")
                 if "task not found" in error_text.lower():
@@ -750,6 +754,7 @@ class WeixinBridge:
                 continue
             task = HubTask.from_dict(data.payload.get("task"), default_backend=self.config.default_backend)
             if task is None:
+                self._log_perf("pending_task_poll", poll_started, task_id=task_id, status="invalid_payload")
                 print(f"[bridge] pending task payload invalid for {task_id}")
                 continue
             state_updated = False
@@ -773,6 +778,7 @@ class WeixinBridge:
                 self._notify_task_terminal(base_url, token, tracked, task)
                 self.pending_tasks.pop(task_id, None)
                 self._save_pending_tasks()
+            self._log_perf("pending_task_poll", poll_started, task_id=task_id, status=task.status)
 
     def _notify_task_terminal(
         self,
@@ -781,6 +787,7 @@ class WeixinBridge:
         tracked: WeixinPendingTaskState,
         task: HubTask,
     ) -> None:
+        terminal_started = time.perf_counter()
         context_token = self._resolve_context_token_for_sender(tracked)
         if task.status == "succeeded":
             output = task.output.strip()
@@ -813,6 +820,7 @@ class WeixinBridge:
                     source=tracked.source,
                 )
                 self.state.record_handled()
+                self._log_perf("notify_terminal", terminal_started, task_id=task.id, status=task.status, deduped="true")
                 return
             if output:
                 self._send_text(
@@ -843,6 +851,7 @@ class WeixinBridge:
                 source=tracked.source,
             )
             self.state.record_handled()
+            self._log_perf("notify_terminal", terminal_started, task_id=task.id, status=task.status)
             return
         if task.status == "canceled":
             self._send_text(
@@ -878,6 +887,7 @@ class WeixinBridge:
                 error=(task.error or "").strip()[:240],
                 source=tracked.source,
             )
+            self._log_perf("notify_terminal", terminal_started, task_id=task.id, status=task.status)
             return
         self._send_text(
             base_url,
@@ -913,6 +923,7 @@ class WeixinBridge:
             source=tracked.source,
         )
         self.state.record_failed()
+        self._log_perf("notify_terminal", terminal_started, task_id=task.id, status=task.status)
 
     def _stop_task_typing_best_effort(
         self,
@@ -929,19 +940,36 @@ class WeixinBridge:
     def _resolve_task_context_left_percent(self, task: HubTask) -> int | None:
         if str(task.backend or "").strip().lower() != "codex":
             return None
+        started_at = time.perf_counter()
         try:
             response = self._ipc_request("task_context_left", {"task_id": task.id}, timeout_seconds=5)
         except Exception:
-            return task.context_left_percent
+            self._log_perf("context_left_lookup", started_at, task_id=task.id, status="timeout_or_failed")
+            return self._normalize_context_left_percent(task.context_left_percent)
+        self._log_perf("context_left_lookup", started_at, task_id=task.id, status="ok" if response.ok else "not_ok")
         if not response.ok:
-            return task.context_left_percent
-        value = response.payload.get("context_left_percent")
+            return self._normalize_context_left_percent(task.context_left_percent)
+        resolved = self._normalize_context_left_percent(response.payload.get("context_left_percent"))
+        if resolved is None:
+            return self._normalize_context_left_percent(task.context_left_percent)
+        return resolved
+
+    @staticmethod
+    def _normalize_context_left_percent(value: object) -> int | None:
         try:
             if value is None or value == "":
-                return task.context_left_percent
+                return None
             return max(0, min(100, int(value)))
         except (TypeError, ValueError):
-            return task.context_left_percent
+            return None
+
+    def _log_perf(self, label: str, started_at: float, **fields: object) -> None:
+        elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+        if elapsed_ms < int(PERF_LOG_MIN_SECONDS * 1000):
+            return
+        rendered_fields = " ".join(f"{key}={value}" for key, value in fields.items() if value is not None)
+        suffix = f" {rendered_fields}" if rendered_fields else ""
+        print(f"[bridge-perf] {label} duration_ms={elapsed_ms}{suffix}", flush=True)
 
     def _send_text(self, base_url: str, token: str, to_user_id: str, context_token: Any, text: str) -> None:
         text = format_weixin_reply(text)
