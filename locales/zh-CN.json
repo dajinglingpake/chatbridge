@@ -168,6 +168,7 @@
   "bridge.session.default_close_blocked": "默认会话不能结束。可以发送 /new <name> 创建新会话，或 /reset 重置状态。",
   "bridge.session.closed": "已结束会话: {session}",
   "bridge.session.clear": "已清空当前 Agent 会话\\n会话: {session}\\n后端: {backend}\\n下一条普通消息会开启新的后端会话。",
+  "bridge.session.clear.canceled": "已同时取消当前会话中的活动任务: {count}",
   "bridge.session.clear.empty": "当前 Agent 会话已经是空的\\n会话: {session}\\n后端: {backend}",
   "bridge.status": "当前设置\\n当前助手: {agent}\\n助手默认后端: {agent_backend}\\n助手默认模型: {model}\\n助手默认目录: {workdir}\\n当前会话: {session}\\n当前后端: {backend}\\n当前模型: {current_model}\\n当前项目: {current_project}\\n当前目录: {project_workdir}\\n会话数量: {count}",
   "bridge.status.relation": "说明: 会话里的后端、模型、目录优先；没单独设置时跟随当前助手默认值。",

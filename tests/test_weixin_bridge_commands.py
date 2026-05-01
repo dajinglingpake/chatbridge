@@ -1154,6 +1154,42 @@ class WeixinBridgeCommandTests(unittest.TestCase):
             self.assertIn(" · ctx 18% · ", bridge.sent_texts[0].splitlines()[0])
             self.assertIn(" · ctx 18% · ", bridge.sent_texts[1].splitlines()[0])
 
+    def test_handle_message_uses_live_context_when_task_payload_has_no_cached_value(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            event_log_path = Path(temp_dir) / "weixin_bridge_events.jsonl"
+            bridge = FeedbackBridge(
+                BridgeConfig.load(),
+                [
+                    {
+                        "id": "task-feedback-001",
+                        "sender_id": "sender-test",
+                        "session_name": "default",
+                        "status": "running",
+                        "agent_id": "main",
+                        "agent_name": "default",
+                        "backend": "codex",
+                        "prompt": "hello",
+                        "progress_text": "正在分析仓库结构",
+                        "progress_seq": 1,
+                        "created_at": "2026-04-20T12:00:00",
+                    },
+                ],
+            )
+            bridge.task_context_left_response = IpcResponseEnvelope(ok=True, payload={"context_left_percent": 17})
+            with patch("weixin_hub_bridge.EVENT_LOG_PATH", event_log_path):
+                bridge._handle_message(
+                    "https://example.com",
+                    "token",
+                    {
+                        "message_type": 1,
+                        "from_user_id": "sender-test",
+                        "context_token": "ctx",
+                        "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
+                    },
+                )
+                bridge.poll_pending()
+            self.assertIn(" · ctx 17% · ", bridge.sent_texts[0].splitlines()[0])
+
     def test_poll_pending_tasks_starts_typing_indicator_for_active_task(self) -> None:
         bridge = TypingBridge(
             BridgeConfig.load(),
@@ -1899,6 +1935,40 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         binding = self.bridge.conversations["sender-test"]
         self.assertIn("default", binding.sessions)
         self.assertEqual("default", binding.current_session)
+
+    def test_clear_command_cancels_active_current_session_task(self) -> None:
+        session_file = self.session_dir / "main__default.txt"
+        session_file.write_text("codex-thread-id", encoding="utf-8")
+        self.bridge._state_payload.payload["tasks"].append(
+            {
+                "id": "task-running-clear",
+                "sender_id": "sender-test",
+                "session_name": "default",
+                "status": "running",
+                "agent_id": "main",
+                "agent_name": "default",
+                "backend": "codex",
+                "prompt": "stuck",
+                "created_at": "2026-04-20T12:10:00",
+                "started_at": "2026-04-20T12:10:00",
+            }
+        )
+        self.bridge.pending_tasks["task-running-clear"] = WeixinPendingTaskState(
+            task_id="task-running-clear",
+            sender_id="sender-test",
+            session_name="default",
+            backend="codex",
+        )
+
+        reply, handled = self.bridge._handle_control_command("sender-test", "/clear")
+
+        self.assertTrue(handled)
+        self.assertIn("Cleared current agent session", reply)
+        self.assertIn("Also canceled active tasks", reply)
+        self.assertEqual("", session_file.read_text(encoding="utf-8"))
+        self.assertNotIn("task-running-clear", self.bridge.pending_tasks)
+        matching = next(task for task in self.bridge._state_payload.payload["tasks"] if task["id"] == "task-running-clear")
+        self.assertEqual("canceled", matching["status"])
 
     def test_clear_command_reports_already_clear_session(self) -> None:
         reply, handled = self.bridge._handle_control_command("sender-test", "/clear")

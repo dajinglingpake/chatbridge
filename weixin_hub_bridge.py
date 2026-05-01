@@ -85,11 +85,13 @@ ILINK_APP_ID = "bot"
 ILINK_APP_CLIENT_VERSION = (2 << 16) | (1 << 8) | 1
 SUPPORTED_BACKENDS = set(supported_backend_keys())
 SESSION_PAGE_SIZE = 5
-ACTIVE_TASK_POLL_TIMEOUT_MS = 1000
+ACTIVE_TASK_POLL_TIMEOUT_MS = 500
 TERMINAL_TASK_STATUSES = frozenset({"succeeded", "failed", "canceled", "unknown_after_restart"})
 TYPING_KEEPALIVE_SECONDS = 5
 TYPING_TICKET_TTL_SECONDS = 23 * 60 * 60
 PERF_LOG_MIN_SECONDS = 0.25
+ACTIVE_GETUPDATES_SLOW_LOG_SECONDS = 1.0
+CONTEXT_LEFT_QUERY_TIMEOUT_SECONDS = 2.0
 MEDIA_SEND_MAX_BYTES = 25 * 1024 * 1024
 MEDIA_UPLOAD_TYPE_IMAGE = 1
 MEDIA_UPLOAD_TYPE_FILE = 3
@@ -296,6 +298,13 @@ class WeixinBridge:
                     self._drop_stale_account_message(message)
                     continue
                 try:
+                    queue_delay_ms = self._message_queue_delay_ms(message)
+                    if queue_delay_ms is not None and queue_delay_ms >= int(PERF_LOG_MIN_SECONDS * 1000):
+                        print(
+                            f"[bridge-perf] outbox_queue_delay duration_ms={queue_delay_ms} "
+                            f"to={message.get('to_user_id', '')} attempt={int(message.get('attempt') or 0)}",
+                            flush=True,
+                        )
                     text = str(message.get("text") or "")
                     attempt = int(message.get("attempt") or 0)
                     if attempt > 0:
@@ -328,6 +337,19 @@ class WeixinBridge:
         if message_account_file and Path(message_account_file) != self.account_path:
             return False
         return True
+
+    @staticmethod
+    def _message_queue_delay_ms(message: dict[str, object]) -> int | None:
+        created_at_ms = message.get("created_at_ms")
+        try:
+            if created_at_ms not in (None, ""):
+                return max(0, int(time.time() * 1000) - int(created_at_ms))
+            created_at = message.get("created_at")
+            if created_at in (None, ""):
+                return None
+            return max(0, int(time.time()) - int(created_at)) * 1000
+        except (TypeError, ValueError):
+            return None
 
     def _drop_stale_account_message(self, message: dict[str, object]) -> None:
         preview = " ".join(str(message.get("text") or "").split())[:160]
@@ -405,18 +427,41 @@ class WeixinBridge:
         buf = self._load_sync_buf()
 
         payload = {"get_updates_buf": buf, "base_info": {"channel_version": "2.1.1"}}
-        timeout_ms = ACTIVE_TASK_POLL_TIMEOUT_MS if self.pending_tasks else self.config.poll_timeout_ms
+        active_task_poll = bool(self.pending_tasks)
+        timeout_ms = ACTIVE_TASK_POLL_TIMEOUT_MS if active_task_poll else self.config.poll_timeout_ms
         getupdates_started = time.perf_counter()
         try:
             response = self._post_json(f"{base_url}/ilink/bot/getupdates", payload, token=token, timeout_ms=timeout_ms)
         except RuntimeError as exc:
-            self._log_perf("getupdates", getupdates_started, status="timeout" if self._is_expected_getupdates_timeout(exc) else "failed")
-            if self._is_expected_getupdates_timeout(exc):
+            expected_timeout = self._is_expected_getupdates_timeout(exc)
+            if expected_timeout:
+                if active_task_poll:
+                    self._log_perf(
+                        "getupdates",
+                        getupdates_started,
+                        min_seconds=ACTIVE_GETUPDATES_SLOW_LOG_SECONDS,
+                        status="timeout",
+                        active="true",
+                        timeout_ms=timeout_ms,
+                    )
                 self.state.mark_poll(now=now_iso())
                 self._save_state()
                 return
+            self._log_perf("getupdates", getupdates_started, force=True, status="failed", active=str(active_task_poll).lower(), timeout_ms=timeout_ms)
             raise
-        self._log_perf("getupdates", getupdates_started, status="ok", messages=len(response.get("msgs") or []), timeout_ms=timeout_ms)
+        message_count = len(response.get("msgs") or [])
+        if message_count:
+            self._log_perf("getupdates", getupdates_started, force=True, status="ok", messages=message_count, timeout_ms=timeout_ms)
+        elif active_task_poll:
+            self._log_perf(
+                "getupdates",
+                getupdates_started,
+                min_seconds=ACTIVE_GETUPDATES_SLOW_LOG_SECONDS,
+                status="ok",
+                messages=0,
+                active="true",
+                timeout_ms=timeout_ms,
+            )
         self.state.mark_poll(now=now_iso())
         if response.get("ret") not in (None, 0):
             raise RuntimeError(f"weixin getupdates failed: ret={response.get('ret')} errcode={response.get('errcode')} errmsg={response.get('errmsg')}")
@@ -430,7 +475,8 @@ class WeixinBridge:
 
         self._poll_pending_tasks(base_url, token)
         self._save_state()
-        self._log_perf("poll_once", poll_started, status="ok", pending=len(self.pending_tasks))
+        if message_count or self.pending_tasks:
+            self._log_perf("poll_once", poll_started, force=bool(message_count), status="ok", pending=len(self.pending_tasks), messages=message_count)
 
     def _handle_message(self, base_url: str, token: str, msg: dict[str, Any]) -> None:
         message_started = time.perf_counter()
@@ -769,7 +815,10 @@ class WeixinBridge:
             state_updated = False
             if task.status in {"queued", "running"}:
                 try:
-                    if self._ensure_task_typing(base_url, token, tracked):
+                    typing_started = time.perf_counter()
+                    typing_sent = self._ensure_task_typing(base_url, token, tracked)
+                    self._log_perf("typing_keepalive", typing_started, task_id=task_id, sent=str(typing_sent).lower())
+                    if typing_sent:
                         state_updated = True
                 except Exception as exc:  # noqa: BLE001
                     print(f"[bridge] typing keepalive failed for {task_id}: {exc}", flush=True)
@@ -949,17 +998,33 @@ class WeixinBridge:
     def _resolve_task_context_left_percent(self, task: HubTask) -> int | None:
         if str(task.backend or "").strip().lower() != "codex":
             return None
-        self._request_task_context_left_refresh(task.id)
+        live_percent = self._query_task_context_left_percent(task.id)
+        if live_percent is not None:
+            task.context_left_percent = live_percent
+            return live_percent
         return self._normalize_context_left_percent(task.context_left_percent)
 
-    def _request_task_context_left_refresh(self, task_id: str) -> None:
+    def _query_task_context_left_percent(self, task_id: str) -> int | None:
         started_at = time.perf_counter()
         try:
-            response = self._ipc_request("refresh_task_context_left", {"task_id": task_id}, timeout_seconds=1)
+            response = self._ipc_request(
+                "task_context_left",
+                {"task_id": task_id},
+                timeout_seconds=CONTEXT_LEFT_QUERY_TIMEOUT_SECONDS,
+            )
         except Exception:
-            self._log_perf("context_left_refresh_request", started_at, task_id=task_id, status="timeout_or_failed")
-            return
-        self._log_perf("context_left_refresh_request", started_at, task_id=task_id, status="ok" if response.ok else "not_ok")
+            self._log_perf("context_left_query", started_at, force=True, task_id=task_id, status="timeout_or_failed")
+            return None
+        percent = self._normalize_context_left_percent(response.payload.get("context_left_percent") if response.ok else None)
+        self._log_perf(
+            "context_left_query",
+            started_at,
+            force=True,
+            task_id=task_id,
+            percent=percent,
+            status="ok" if percent is not None else "empty" if response.ok else "not_ok",
+        )
+        return percent
 
     @staticmethod
     def _normalize_context_left_percent(value: object) -> int | None:
@@ -970,9 +1035,18 @@ class WeixinBridge:
         except (TypeError, ValueError):
             return None
 
-    def _log_perf(self, label: str, started_at: float, **fields: object) -> None:
+    def _log_perf(
+        self,
+        label: str,
+        started_at: float,
+        *,
+        force: bool = False,
+        min_seconds: float | None = None,
+        **fields: object,
+    ) -> None:
         elapsed_ms = int((time.perf_counter() - started_at) * 1000)
-        if elapsed_ms < int(PERF_LOG_MIN_SECONDS * 1000):
+        threshold_seconds = PERF_LOG_MIN_SECONDS if min_seconds is None else min_seconds
+        if not force and elapsed_ms < int(threshold_seconds * 1000):
             return
         rendered_fields = " ".join(f"{key}={value}" for key, value in fields.items() if value is not None)
         suffix = f" {rendered_fields}" if rendered_fields else ""
@@ -1807,7 +1881,7 @@ class WeixinBridge:
             ), True
 
         if command == "/clear":
-            return self._clear_current_agent_session(current_session), True
+            return self._clear_current_agent_session(sender_id, current_session), True
 
         if command in {"/close", "/end"}:
             if current_session == "default":
@@ -2827,19 +2901,73 @@ class WeixinBridge:
     def _find_agent_config(self, agent_id: str):
         return next((agent for agent in HubConfig.load().agents if agent.id == agent_id), None)
 
-    def _clear_current_agent_session(self, current_session: str) -> str:
+    def _clear_current_agent_session(self, sender_id: str, current_session: str) -> str:
         agent = self._find_agent_config(self.config.backend_id)
         if agent is None:
             return self._t("bridge.agent.not_found", agent=self.config.backend_id)
 
         session_name = current_session or "default"
+        canceled_count = self._cancel_active_session_tasks(sender_id, session_name)
         session_file = resolve_session_file(agent, session_name, SESSION_DIR)
         backend = normalize_backend(getattr(agent, "backend", "") or self.config.default_backend)
         if not session_file.exists() or not session_file.read_text(encoding="utf-8").strip():
-            return self._t("bridge.session.clear.empty", session=session_name, backend=backend)
+            message = self._t("bridge.session.clear.empty", session=session_name, backend=backend)
+            if canceled_count:
+                message += "\n" + self._t("bridge.session.clear.canceled", count=canceled_count)
+            return message
 
         session_file.write_text("", encoding="utf-8")
-        return self._t("bridge.session.clear", session=session_name, backend=backend)
+        message = self._t("bridge.session.clear", session=session_name, backend=backend)
+        if canceled_count:
+            message += "\n" + self._t("bridge.session.clear.canceled", count=canceled_count)
+        return message
+
+    def _cancel_active_session_tasks(self, sender_id: str, session_name: str) -> int:
+        canceled_count = 0
+        removed_pending = False
+        task_ids = self._active_session_task_ids(sender_id, session_name)
+        for task_id in task_ids:
+            try:
+                response = self._ipc_request("cancel_task", {"task_id": task_id}, timeout_seconds=5)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[bridge] clear failed to cancel task {task_id}: {exc}", flush=True)
+            else:
+                if response.ok:
+                    canceled_count += 1
+                else:
+                    print(f"[bridge] clear could not cancel task {task_id}: {response.error or 'unknown error'}", flush=True)
+            if self.pending_tasks.pop(task_id, None) is not None:
+                removed_pending = True
+        if canceled_count or removed_pending:
+            self._save_pending_tasks()
+        return canceled_count
+
+    def _active_session_task_ids(self, sender_id: str, session_name: str) -> list[str]:
+        target_session = session_name or "default"
+        task_ids: list[str] = []
+        seen: set[str] = set()
+        for task_id, tracked in self.pending_tasks.items():
+            if tracked.sender_id != sender_id:
+                continue
+            if (tracked.session_name or "default") != target_session:
+                continue
+            seen.add(task_id)
+            task_ids.append(task_id)
+        try:
+            sender_tasks = self._load_sender_tasks(sender_id)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[bridge] clear failed to load sender tasks: {exc}", flush=True)
+            return task_ids
+        for task in sender_tasks:
+            if task.status not in {"queued", "running"}:
+                continue
+            if (task.session_name or "default") != target_session:
+                continue
+            if task.id in seen:
+                continue
+            seen.add(task.id)
+            task_ids.append(task.id)
+        return task_ids
 
     def _render_status(self, binding: WeixinConversationBinding, current_session: str, backend: str) -> str:
         agent = self._find_agent_config(self.config.backend_id)

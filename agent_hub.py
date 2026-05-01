@@ -45,6 +45,7 @@ WECHAT_SOURCE = "wechat"
 MCP_SERVER_NAME = "operations"
 MCP_SERVER_PATH = APP_DIR / "tools" / "operations_server.py"
 PERF_LOG_MIN_SECONDS = 0.25
+IPC_IDLE_SLEEP_SECONDS = 0.05
 CONTEXT_REFRESH_MIN_INTERVAL_SECONDS = 8.0
 
 
@@ -922,7 +923,7 @@ def run() -> int:
     print(f"State: {STATE_PATH}")
     while True:
         hub.process_ipc_once()
-        time.sleep(0.3)
+        time.sleep(IPC_IDLE_SLEEP_SECONDS)
     return 0
 
 
