@@ -7,7 +7,35 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from runtime_stack import _managed_subprocess_env, _taskkill, start_managed, stop_managed
+from runtime_stack import _managed_subprocess_env, _taskkill, discover_external_agent_processes, start_managed, stop_managed
+
+
+class FakeProcess:
+    def __init__(self, pid: int, name: str, cmdline: list[str] | None = None, ppid: int | None = None) -> None:
+        self.info = {"pid": pid, "name": name}
+        self.pid = pid
+        self._cmdline = cmdline or []
+        self._ppid = ppid
+        self.cmdline_accessed = False
+
+    def cmdline(self) -> list[str]:
+        self.cmdline_accessed = True
+        return list(self._cmdline)
+
+    def ppid(self) -> int | None:
+        return self._ppid
+
+
+class FakePsutil:
+    Error = Exception
+
+    def __init__(self, processes: list[FakeProcess]) -> None:
+        self.processes = processes
+        self.attrs: list[list[str]] = []
+
+    def process_iter(self, attrs: list[str]):
+        self.attrs.append(list(attrs))
+        return iter(self.processes)
 
 
 class RuntimeStackTests(unittest.TestCase):
@@ -45,6 +73,37 @@ class RuntimeStackTests(unittest.TestCase):
                 with patch("runtime_stack._read_process_proxy_env", return_value={"HTTPS_PROXY": "http://127.0.0.1:7890"}):
                     env = _managed_subprocess_env({})
         self.assertEqual("http://127.0.0.1:7890", env["HTTPS_PROXY"])
+
+    def test_discover_external_agents_skips_cmdline_for_unrelated_processes(self) -> None:
+        unrelated = FakeProcess(101, "chrome.exe", ["chrome.exe", "--type=renderer"])
+        codex = FakeProcess(202, "Codex.exe", ["Codex.exe", "resume", "session-123"])
+        fake_psutil = FakePsutil([unrelated, codex])
+
+        with patch("runtime_stack.psutil", fake_psutil):
+            with patch("runtime_stack.os.getpid", return_value=999):
+                with patch("runtime_stack._managed_root_pids", return_value=set()):
+                    with patch("runtime_stack._has_managed_ancestor", return_value=False):
+                        discovered = discover_external_agent_processes()
+
+        self.assertEqual([["pid", "name"]], fake_psutil.attrs)
+        self.assertFalse(unrelated.cmdline_accessed)
+        self.assertTrue(codex.cmdline_accessed)
+        self.assertEqual([202], [item.pid for item in discovered])
+        self.assertEqual("session-123", discovered[0].session_hint)
+
+    def test_discover_external_agents_reads_host_process_cmdline_when_needed(self) -> None:
+        node = FakeProcess(303, "node.exe", ["node.exe", "C:/tools/codex/index.js", "resume", "session-456"])
+        fake_psutil = FakePsutil([node])
+
+        with patch("runtime_stack.psutil", fake_psutil):
+            with patch("runtime_stack.os.getpid", return_value=999):
+                with patch("runtime_stack._managed_root_pids", return_value=set()):
+                    with patch("runtime_stack._has_managed_ancestor", return_value=False):
+                        discovered = discover_external_agent_processes()
+
+        self.assertTrue(node.cmdline_accessed)
+        self.assertEqual([303], [item.pid for item in discovered])
+        self.assertEqual("session-456", discovered[0].session_hint)
 
     def test_stop_managed_stops_all_duplicate_processes(self) -> None:
         first = SimpleNamespace(pid=101)
