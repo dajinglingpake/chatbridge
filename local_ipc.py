@@ -16,6 +16,7 @@ IPC_DIR = RUNTIME_DIR / "ipc"
 REQUEST_DIR = IPC_DIR / "requests"
 RESPONSE_DIR = IPC_DIR / "responses"
 PROCESSED_DIR = IPC_DIR / "processed"
+IPC_POLL_INTERVAL_SECONDS = 0.05
 
 
 def ensure_ipc_dirs() -> None:
@@ -63,7 +64,7 @@ def wait_for_response(request_id: str, timeout_seconds: float) -> IpcResponseEnv
                 continue
             response_path.unlink(missing_ok=True)
             return response
-        time.sleep(0.25)
+        time.sleep(IPC_POLL_INTERVAL_SECONDS)
     raise TimeoutError(f"ipc request timed out: {request_id}")
 
 

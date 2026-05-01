@@ -168,6 +168,7 @@
   "bridge.session.default_close_blocked": "The default session cannot be closed. Use /new <name> to create one, or /reset to reset the state.",
   "bridge.session.closed": "Closed session: {session}",
   "bridge.session.clear": "Cleared current agent session\\nSession: {session}\\nBackend: {backend}\\nNext normal message will start a fresh backend session.",
+  "bridge.session.clear.canceled": "Also canceled active tasks in this session: {count}",
   "bridge.session.clear.empty": "Current agent session is already clear\\nSession: {session}\\nBackend: {backend}",
   "bridge.status": "Current setup\\nCurrent assistant: {agent}\\nAssistant default backend: {agent_backend}\\nAssistant default model: {model}\\nAssistant default directory: {workdir}\\nCurrent session: {session}\\nCurrent backend: {backend}\\nCurrent model: {current_model}\\nCurrent project: {current_project}\\nCurrent directory: {project_workdir}\\nSession count: {count}",
   "bridge.status.relation": "Note: session backend/model/directory overrides win; when empty, they follow the current assistant defaults.",

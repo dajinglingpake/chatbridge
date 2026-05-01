@@ -24,6 +24,7 @@ def enqueue_text_message(
     account_id: str = "",
     account_file: str = "",
 ) -> None:
+    now_ms = int(time.time() * 1000)
     payload = {
         "id": uuid.uuid4().hex,
         "to_user_id": str(to_user_id or "").strip(),
@@ -33,7 +34,8 @@ def enqueue_text_message(
         "account_id": str(account_id or "").strip(),
         "account_file": str(account_file or "").strip(),
         "attempt": 0,
-        "created_at": int(time.time()),
+        "created_at": int(now_ms / 1000),
+        "created_at_ms": now_ms,
         "retry_not_before": 0,
     }
     _append_payload(payload)
