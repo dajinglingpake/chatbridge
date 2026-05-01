@@ -7,6 +7,7 @@ from starlette.requests import Request
 from core.app_service import delete_agent, reset_weixin_conversation, run_named_action, run_repair_command, save_agent, set_weixin_notice_enabled, submit_hub_task, switch_active_account, switch_bridge_agent, switch_weixin_session_backend, terminate_external_agent
 from core.navigation import PRIMARY_PAGES
 from core.shell_schema import APP_SHELL
+from core.dashboard import refresh_dashboard_cache
 from core.view_models import build_web_console_view_model
 from localization import Localizer, normalize_language
 from ui.qr_login import install_qr_login_dialog
@@ -289,7 +290,6 @@ def create_ui() -> None:
         shared=True,
     )
     state = {
-        "auto_refresh": True,
         "selected_session_name": "",
         "selected_task_id": "",
         "selected_task_status": "",
@@ -347,13 +347,6 @@ def create_ui() -> None:
     def refresh_after_qr_login() -> None:
         content_view.refresh()
 
-    def should_auto_refresh() -> bool:
-        if not state["auto_refresh"]:
-            return False
-        if state["qr_login_open"]:
-            return False
-        return state["active_page"] == "diagnostics" and bool(state["checks_in_progress"])
-
     def notify_only(result_message: str) -> None:
         ui.notify(result_message, position="top")
 
@@ -397,6 +390,7 @@ def create_ui() -> None:
                     model,
                     translate,
                     _run_action,
+                    _refresh_checks,
                     _submit_task,
                     _switch_account,
                     _set_weixin_notice_enabled,
@@ -425,6 +419,9 @@ def create_ui() -> None:
                     ui,
                     model,
                     translate,
+                    _refresh_checks,
+                    _refresh_logs,
+                    _refresh_external_agents,
                     _set_checks_page,
                     _switch_bridge_agent,
                     _set_agent_page,
@@ -462,6 +459,19 @@ def create_ui() -> None:
     def _run_repair_command(command: str, label: str) -> None:
         result = run_repair_command(command, label)
         _notify(result.message)
+
+    def _refresh_checks() -> None:
+        key = "checks_full" if state["active_page"] == "diagnostics" else "checks_light"
+        refresh_dashboard_cache(APP_DIR, key)
+        _notify(t("ui.web.notify.checks_refreshed", "环境检查已刷新"))
+
+    def _refresh_logs() -> None:
+        refresh_dashboard_cache(APP_DIR, "logs")
+        _notify(t("ui.web.notify.logs_refreshed", "运行日志已刷新"))
+
+    def _refresh_external_agents() -> None:
+        refresh_dashboard_cache(APP_DIR, "external_agent_processes")
+        _notify(t("ui.web.notify.external_agents_refreshed", "外部进程列表已刷新"))
 
     def _save_agent(
         agent_id: str,
@@ -592,12 +602,6 @@ def create_ui() -> None:
         result = reset_weixin_conversation(sender_id)
         _notify(result.message)
 
-    def _set_auto_refresh(enabled: bool) -> None:
-        state["auto_refresh"] = bool(enabled)
-        nav_view.refresh()
-        if state["auto_refresh"] and should_auto_refresh():
-            content_view.refresh()
-
     @ui.refreshable
     def nav_view() -> None:
         with ui.row().classes("cb-shell-nav w-full gap-2 items-center flex-wrap"):
@@ -622,11 +626,6 @@ def create_ui() -> None:
                 on_change=lambda event: switch_language(str(event.value or "")),
                 clearable=False,
             ).props("unelevated color=white text-color=primary toggle-color=primary toggle-text-color=white").classes("cb-language-toggle")
-            ui.switch(
-                t("ui.auto_refresh.label", "自动刷新"),
-                value=bool(state["auto_refresh"]),
-                on_change=lambda event: _set_auto_refresh(bool(event.value)),
-            ).props("color=primary").classes("cb-auto-refresh")
 
     def shell_view() -> None:
         with ui.header().classes("cb-shell-header text-slate-800 shadow-none px-5 py-3"):
@@ -637,7 +636,6 @@ def create_ui() -> None:
         apply_request_language(request)
         shell_view()
         content_view()
-        ui.timer(2.0, lambda: content_view.refresh() if should_auto_refresh() else None)
 
 
 def run_ui(host: str = "0.0.0.0", port: int = 8765, native: bool = False) -> None:

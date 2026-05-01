@@ -10,14 +10,45 @@ from pathlib import Path
 
 from agent_backends.base import AgentBackend, AgentLike, BackendContext
 from agent_backends.shared import build_final_prompt, resolve_session_file
+from core.platform_compat import terminate_process_tree
 
 PROGRESS_PUSH_INTERVAL_SECONDS = 1.0
+CODEX_EXIT_TIMEOUT_SECONDS = 10
+CODEX_TRANSIENT_RETRY_ATTEMPTS = 1
+TRANSIENT_ERROR_MARKERS = (
+    "stream disconnected before completion",
+    "error sending request",
+    "timeout waiting for child process to exit",
+    "connection reset",
+    "connection aborted",
+    "temporarily unavailable",
+)
 
 
 class CodexBackend(AgentBackend):
     key = "codex"
 
     def invoke(self, agent: AgentLike, prompt: str, session_name: str, context: BackendContext) -> dict[str, str]:
+        last_error: RuntimeError | None = None
+        for attempt in range(CODEX_TRANSIENT_RETRY_ATTEMPTS + 1):
+            try:
+                return self._invoke_once(agent, prompt, session_name, context)
+            except RuntimeError as exc:
+                last_error = exc
+                if attempt >= CODEX_TRANSIENT_RETRY_ATTEMPTS or not self._is_transient_error(str(exc)):
+                    raise
+                if context.on_progress is not None:
+                    context.on_progress("Codex 连接中断，正在自动重试一次...")
+                time.sleep(1)
+        raise last_error or RuntimeError("Codex failed")
+
+    def _invoke_once(
+        self,
+        agent: AgentLike,
+        prompt: str,
+        session_name: str,
+        context: BackendContext,
+    ) -> dict[str, str]:
         workdir = Path(agent.workdir)
         workdir.mkdir(parents=True, exist_ok=True)
         session_file = resolve_session_file(agent, session_name, context.session_dir)
@@ -119,11 +150,12 @@ class CodexBackend(AgentBackend):
             trailing_chunk, pending_delta = self._take_stream_chunk(pending_delta, force=True)
             if trailing_chunk and trailing_chunk != last_progress:
                 context.on_progress(trailing_chunk)
-        completed_returncode = proc.wait()
+        completed_returncode = self._wait_for_exit(proc)
         stderr_thread.join(timeout=1)
         if not error_message:
             error_message = "".join(stderr_lines).strip()
         if completed_returncode != 0:
+            output_path.unlink(missing_ok=True)
             raise RuntimeError(error_message or f"Codex exited with code {completed_returncode}")
         if not output_path.exists():
             raise RuntimeError("Codex did not produce an output file")
@@ -137,6 +169,24 @@ class CodexBackend(AgentBackend):
         if context_left_percent is not None:
             result["context_left_percent"] = str(context_left_percent)
         return result
+
+    def _wait_for_exit(self, proc: subprocess.Popen) -> int:
+        try:
+            return int(proc.wait(timeout=CODEX_EXIT_TIMEOUT_SECONDS) or 0)
+        except TypeError:
+            return int(proc.wait() or 0)
+        except subprocess.TimeoutExpired as exc:
+            terminate_process_tree(int(getattr(proc, "pid", 0) or 0))
+            try:
+                proc.wait(timeout=3)
+            except Exception:  # noqa: BLE001
+                pass
+            raise RuntimeError("timeout waiting for child process to exit") from exc
+
+    @staticmethod
+    def _is_transient_error(message: str) -> bool:
+        lowered = str(message or "").lower()
+        return any(marker in lowered for marker in TRANSIENT_ERROR_MARKERS)
 
     def _take_stream_chunk(self, buffer: str, *, force: bool) -> tuple[str, str]:
         normalized = buffer.replace("\r", "")

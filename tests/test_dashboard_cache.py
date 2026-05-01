@@ -18,7 +18,29 @@ class DashboardCacheTests(unittest.TestCase):
     def tearDown(self) -> None:
         dashboard._RUNTIME_CACHE.clear()
 
-    def test_get_progressive_full_checks_accumulates_results(self) -> None:
+    def test_load_dashboard_reads_cached_checks_without_collecting(self) -> None:
+        dashboard._RUNTIME_CACHE["checks:full"] = dashboard.RuntimeCacheEntry(
+            cached_at=0.0,
+            payload={"stale": CheckSnapshot(key="stale", label="Stale", ok=True, detail="cached")},
+        )
+
+        with (
+            patch("core.dashboard.collect_check_step") as mocked_collect,
+            patch("core.dashboard.get_runtime_snapshot") as mocked_snapshot,
+            patch("core.dashboard.BridgeConfig.load") as mocked_config,
+            patch("core.dashboard._read_hub_state") as mocked_hub,
+            patch("core.dashboard._read_bridge_state") as mocked_bridge,
+        ):
+            mocked_snapshot.return_value = SimpleNamespace(hub_pid=None, bridge_pid=None)
+            mocked_config.return_value = SimpleNamespace(active_account_id="", default_backend="codex")
+            mocked_hub.return_value = SimpleNamespace(external_agent_processes=[])
+            mocked_bridge.return_value = SimpleNamespace()
+            state = dashboard.load_dashboard_state(Path("."), "diagnostics")
+
+        self.assertEqual({"stale"}, set(state.checks.keys()))
+        mocked_collect.assert_not_called()
+
+    def test_refresh_dashboard_cache_collects_full_checks_on_explicit_request(self) -> None:
         sequence = ["step-a", "step-b"]
         step_results = {
             "step-a": [SimpleNamespace(key="python", label="Python", ok=True, detail="3.11.9")],
@@ -26,44 +48,15 @@ class DashboardCacheTests(unittest.TestCase):
         }
 
         with (
+            patch("core.dashboard.BridgeConfig.load", return_value=object()),
             patch("core.dashboard.get_full_check_sequence", return_value=sequence),
             patch("core.dashboard.collect_check_step", side_effect=lambda step, *_: step_results[step]),
-            patch("core.dashboard.get_full_check_step_label", side_effect=lambda step: f"Label:{step}"),
-            patch("core.dashboard.time.monotonic", side_effect=[10.0, 11.0]),
         ):
-            first_results, first_in_progress, first_text = dashboard._get_progressive_full_checks(Path("."), object())
-            second_results, second_in_progress, second_text = dashboard._get_progressive_full_checks(Path("."), object())
+            dashboard.refresh_dashboard_cache(Path("."), "checks_full")
 
-        self.assertEqual({"python"}, set(first_results.keys()))
-        self.assertIsInstance(first_results["python"], CheckSnapshot)
-        self.assertTrue(first_in_progress)
-        self.assertIn("1/2", first_text)
-        self.assertEqual({"python", "node"}, set(second_results.keys()))
-        self.assertIsInstance(second_results["node"], CheckSnapshot)
-        self.assertFalse(second_in_progress)
-        self.assertIn("2/2", second_text)
-
-    def test_get_progressive_full_checks_resets_expired_cache(self) -> None:
-        dashboard._RUNTIME_CACHE[dashboard._FULL_CHECK_PROGRESS_KEY] = dashboard.RuntimeCacheEntry(
-            cached_at=0.0,
-            payload=dashboard.FullCheckProgressState(
-                results={"stale": CheckSnapshot(key="stale", label="Stale", ok=True, detail="cached")},
-                next_index=1,
-                updated_at=0.0,
-            ),
-        )
-
-        with (
-            patch("core.dashboard.get_full_check_sequence", return_value=["step-a"]),
-            patch("core.dashboard.collect_check_step", return_value=[SimpleNamespace(key="fresh", label="Fresh", ok=True, detail="ok")]),
-            patch("core.dashboard.get_full_check_step_label", side_effect=lambda step: f"Label:{step}"),
-            patch("core.dashboard.time.monotonic", return_value=31.0),
-        ):
-            results, in_progress, text = dashboard._get_progressive_full_checks(Path("."), object())
-
-        self.assertEqual({"fresh"}, set(results.keys()))
-        self.assertFalse(in_progress)
-        self.assertIn("已完成", text)
+        cached = dashboard._RUNTIME_CACHE["checks:full"].payload
+        self.assertEqual({"python", "node"}, set(cached.keys()))
+        self.assertIsInstance(cached["python"], CheckSnapshot)
 
     def test_tail_text_hides_stale_log(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -45,6 +45,7 @@ WECHAT_SOURCE = "wechat"
 MCP_SERVER_NAME = "operations"
 MCP_SERVER_PATH = APP_DIR / "tools" / "operations_server.py"
 PERF_LOG_MIN_SECONDS = 0.25
+CONTEXT_REFRESH_MIN_INTERVAL_SECONDS = 8.0
 
 
 def now_iso() -> str:
@@ -172,6 +173,10 @@ class MultiCodexHub:
         self.started_workers: set[str] = set()
         self.running_task_pids: dict[str, int] = {}
         self.cancel_requested_task_ids: set[str] = set()
+        self.context_refreshing_task_ids: set[str] = set()
+        self.context_refresh_requested_at: dict[str, float] = {}
+        self.external_agent_processes_cache: list[dict[str, Any]] = []
+        self.external_agent_processes_cache_at = 0.0
         self._restore_previous_state()
         for agent in self.config.agents:
             self._ensure_agent(agent)
@@ -375,6 +380,7 @@ class MultiCodexHub:
         bridge_conversations_path: str = "",
         bridge_event_log_path: str = "",
     ) -> dict[str, Any]:
+        started_at = time.perf_counter()
         prompt = (prompt or "").strip()
         if not prompt:
             raise ValueError("prompt is required")
@@ -404,6 +410,13 @@ class MultiCodexHub:
             self.queues[agent.id].put(task)
             self._refresh_runtime_queue_size(agent.id)
             self._save_state()
+        elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+        if elapsed_ms >= int(PERF_LOG_MIN_SECONDS * 1000):
+            print(
+                f"[hub-perf] submit_task task_id={task.id} duration_ms={elapsed_ms} "
+                f"agent_id={agent.id} queue_size={self._queued_task_count(agent.id)}",
+                flush=True,
+            )
         return task.to_dict()
 
     def handle_wechat_message(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -445,6 +458,7 @@ class MultiCodexHub:
                 q.task_done()
 
     def _run_task(self, agent_id: str, task: HubTask) -> None:
+        task_started_at = time.perf_counter()
         agent = next(a for a in self.config.agents if a.id == agent_id)
         with self.lock:
             task.status = "running"
@@ -455,7 +469,14 @@ class MultiCodexHub:
             self.runtimes[agent_id].status = "running"
             self._save_state()
         try:
+            backend_started_at = time.perf_counter()
             result = self._invoke_backend(agent, task)
+            backend_elapsed_ms = int((time.perf_counter() - backend_started_at) * 1000)
+            print(
+                f"[hub-perf] backend_invoke task_id={task.id} backend={task.backend} "
+                f"duration_ms={backend_elapsed_ms} status=succeeded",
+                flush=True,
+            )
             canceled = self._consume_cancel_request(task.id)
             self._clear_running_task_pid(task.id)
             with self.lock:
@@ -483,6 +504,12 @@ class MultiCodexHub:
                 return
             self._notify_task_result(task, succeeded=True)
         except Exception as exc:  # noqa: BLE001
+            task_elapsed_ms = int((time.perf_counter() - task_started_at) * 1000)
+            print(
+                f"[hub-perf] backend_invoke task_id={task.id} backend={task.backend} "
+                f"duration_ms={task_elapsed_ms} status=failed error={str(exc)[:180]}",
+                flush=True,
+            )
             canceled = self._consume_cancel_request(task.id)
             self._clear_running_task_pid(task.id)
             with self.lock:
@@ -659,7 +686,6 @@ class MultiCodexHub:
     def _save_state(self) -> None:
         ensure_ipc_dirs()
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        external_agent_processes = [item.to_dict() for item in discover_external_agent_processes()]
         save_json(
             STATE_PATH,
             {
@@ -671,9 +697,26 @@ class MultiCodexHub:
                 },
                 "agents": self.list_agents(),
                 "tasks": self.list_tasks(),
-                "external_agent_processes": external_agent_processes,
+                "external_agent_processes": self._external_agent_processes_snapshot(),
             },
         )
+
+    def _external_agent_processes_snapshot(self) -> list[dict[str, Any]]:
+        return [dict(item) for item in self.external_agent_processes_cache]
+
+    def refresh_external_agent_processes(self) -> list[dict[str, Any]]:
+        started_at = time.perf_counter()
+        snapshot = [item.to_dict() for item in discover_external_agent_processes()]
+        with self.lock:
+            self.external_agent_processes_cache = snapshot
+            self.external_agent_processes_cache_at = time.monotonic()
+        elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+        if elapsed_ms >= int(PERF_LOG_MIN_SECONDS * 1000):
+            print(
+                f"[hub-perf] external_agent_processes_refresh duration_ms={elapsed_ms} count={len(snapshot)}",
+                flush=True,
+            )
+        return [dict(item) for item in snapshot]
 
     def process_ipc_once(self) -> None:
         ensure_ipc_dirs()
@@ -757,13 +800,22 @@ class MultiCodexHub:
                 ok=True,
                 payload={"context_left_percent": self.get_task_context_left_percent(str(payload.get("task_id") or ""))},
             )
+        if action == "refresh_task_context_left":
+            return IpcResponseEnvelope(
+                ok=True,
+                payload={"context_left_percent": self.request_task_context_left_refresh(str(payload.get("task_id") or ""))},
+            )
+        if action == "refresh_external_agent_processes":
+            return IpcResponseEnvelope(
+                ok=True,
+                payload={"external_agent_processes": self.refresh_external_agent_processes()},
+            )
         if action == "save_agent":
             return IpcResponseEnvelope(ok=True, payload={"agent": asdict(self.create_or_update_agent(payload))})
         if action == "delete_agent":
             self.delete_agent(str(payload.get("agent_id") or ""))
             return IpcResponseEnvelope(ok=True)
         if action == "state":
-            external_agent_processes = [item.to_dict() for item in discover_external_agent_processes()]
             return IpcResponseEnvelope(
                 ok=True,
                 payload={
@@ -775,7 +827,11 @@ class MultiCodexHub:
                     },
                     "agents": self.list_agents(),
                     "tasks": self.list_tasks(),
-                    "external_agent_processes": external_agent_processes,
+                    "external_agent_processes": (
+                        self.refresh_external_agent_processes()
+                        if bool(payload.get("refresh_external_agent_processes"))
+                        else self._external_agent_processes_snapshot()
+                    ),
                 },
             )
         raise ValueError(f"unsupported action: {action}")
@@ -815,6 +871,46 @@ class MultiCodexHub:
             task.context_left_percent = current_percent
             self._save_state()
         return current_percent
+
+    def request_task_context_left_refresh(self, task_id: str) -> int | None:
+        task = self._find_task(task_id)
+        if task is None:
+            raise ValueError("task not found")
+        cached_percent = task.context_left_percent
+        if normalize_backend(task.backend) != "codex":
+            return cached_percent
+        now = time.monotonic()
+        with self.lock:
+            if task_id in self.context_refreshing_task_ids:
+                return cached_percent
+            last_requested_at = self.context_refresh_requested_at.get(task_id, 0.0)
+            if now - last_requested_at < CONTEXT_REFRESH_MIN_INTERVAL_SECONDS:
+                return cached_percent
+            self.context_refresh_requested_at[task_id] = now
+            self.context_refreshing_task_ids.add(task_id)
+        threading.Thread(target=self._refresh_task_context_left_worker, args=(task_id,), daemon=True).start()
+        return cached_percent
+
+    def _refresh_task_context_left_worker(self, task_id: str) -> None:
+        started_at = time.perf_counter()
+        try:
+            percent = self.get_task_context_left_percent(task_id)
+            elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+            print(
+                f"[hub-perf] context_left_refresh task_id={task_id} duration_ms={elapsed_ms} "
+                f"status={'ok' if percent is not None else 'empty'}",
+                flush=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+            print(
+                f"[hub-perf] context_left_refresh task_id={task_id} duration_ms={elapsed_ms} "
+                f"status=failed error={str(exc)[:180]}",
+                flush=True,
+            )
+        finally:
+            with self.lock:
+                self.context_refreshing_task_ids.discard(task_id)
 
 
 def run() -> int:

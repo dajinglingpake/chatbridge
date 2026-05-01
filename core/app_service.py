@@ -89,7 +89,7 @@ def run_named_action(action: str) -> ServiceResult:
 
 
 def _broadcast_pre_stop_notice(action: str):
-    snapshot = get_runtime_snapshot()
+    snapshot = get_runtime_snapshot(include_agent_processes=False)
     detail = (
         f"即将执行服务停止操作: {action}\n"
         f"Hub PID: {snapshot.hub_pid or '-'}\n"
@@ -108,7 +108,7 @@ def schedule_named_action(action: str, *, delay_seconds: float = 1.0) -> Service
 
     safe_delay = max(0.0, float(delay_seconds))
     request_id = f"svc-{uuid.uuid4().hex[:12]}"
-    snapshot = get_runtime_snapshot()
+    snapshot = get_runtime_snapshot(include_agent_processes=False)
     command = [
         sys.executable,
         "-m",
@@ -266,7 +266,7 @@ def switch_active_account(account_id: str, restart_if_running: bool = True) -> S
     config = BridgeConfig.load()
     if not any(account.account_id == cleaned_account_id and account.is_usable for account in config.accounts):
         return ServiceResult(ok=False, message=f"切换失败：账号不存在或文件不完整：{cleaned_account_id}")
-    snapshot = get_runtime_snapshot()
+    snapshot = get_runtime_snapshot(include_agent_processes=False)
     activate_account(cleaned_account_id, config=config)
     if not restart_if_running:
         return ServiceResult(ok=True, message=f"已切换当前账号：{cleaned_account_id} | Bridge 将在下一次轮询自动使用新账号（无需重启）")
@@ -379,7 +379,7 @@ def switch_bridge_agent(agent_id: str, restart_if_running: bool = True) -> Servi
     config.set_backend_agent(cleaned_id)
     config.save()
 
-    snapshot = get_runtime_snapshot()
+    snapshot = get_runtime_snapshot(include_agent_processes=False)
     if restart_if_running and snapshot.bridge_running:
         messages = restart_bridge()
         message = f"已切换微信桥默认 Agent：{cleaned_id} | {' | '.join(messages)}"
@@ -436,7 +436,7 @@ def switch_weixin_session_backend(sender_id: str, backend: str) -> ServiceResult
     bindings[cleaned_sender_id] = binding
     _save_conversation_bindings(conversation_path, bindings)
 
-    snapshot = get_runtime_snapshot()
+    snapshot = get_runtime_snapshot(include_agent_processes=False)
     message = f"已切换发送方 {cleaned_sender_id} 的当前会话后端为 {cleaned_backend}"
     if snapshot.bridge_running:
         restart_messages = restart_bridge()
@@ -459,7 +459,7 @@ def reset_weixin_conversation(sender_id: str) -> ServiceResult:
     bindings.pop(cleaned_sender_id, None)
     _save_conversation_bindings(conversation_path, bindings)
 
-    snapshot = get_runtime_snapshot()
+    snapshot = get_runtime_snapshot(include_agent_processes=False)
     message = f"已重置发送方 {cleaned_sender_id} 的微信会话状态"
     if snapshot.bridge_running:
         restart_messages = restart_bridge()
@@ -545,7 +545,7 @@ def _main(argv: list[str] | None = None) -> int:
     try:
         if delay_seconds > 0:
             time.sleep(delay_seconds)
-        before = get_runtime_snapshot()
+        before = get_runtime_snapshot(include_agent_processes=False)
         _write_action_state(
             request_id=request_id,
             action=action,
@@ -564,7 +564,7 @@ def _main(argv: list[str] | None = None) -> int:
             bridge_pid_before=before.bridge_pid,
         )
         result = run_named_action(action)
-        after = get_runtime_snapshot()
+        after = get_runtime_snapshot(include_agent_processes=False)
         status = "succeeded" if result.ok else "failed"
         _write_action_state(
             request_id=request_id,

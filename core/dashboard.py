@@ -87,14 +87,7 @@ class FullCheckProgressState:
         return now - self.updated_at > ttl_seconds
 
 
-_CACHE_TTLS = {
-    "checks": 30.0,
-    "logs": 5.0,
-    "external_agent_processes": 10.0,
-}
-
 _RUNTIME_CACHE: dict[str, RuntimeCacheEntry] = {}
-_FULL_CHECK_PROGRESS_KEY = "checks:full:progress"
 CacheValueT = TypeVar("CacheValueT")
 _EXPECTED_LOG_NOISE_MARKERS = ("[bridge] poll error: the read operation timed out",)
 
@@ -109,40 +102,74 @@ def _page_load_profile(page_key: str) -> PageLoadProfile:
     )
 
 
-def _read_cached(cache_key: str, loader: Callable[[], CacheValueT], ttl_seconds: float) -> CacheValueT:
-    now = time.monotonic()
+def _read_cached_payload(cache_key: str, default: CacheValueT) -> CacheValueT:
     cached = _RUNTIME_CACHE.get(cache_key)
-    if cached is not None and cached.is_fresh(now=now, ttl_seconds=ttl_seconds):
+    if cached is not None:
         return cast(CacheValueT, cached.payload)
-    payload = loader()
-    _RUNTIME_CACHE[cache_key] = RuntimeCacheEntry(cached_at=now, payload=payload)
-    return payload
+    return default
+
+
+def _write_cached_payload(cache_key: str, payload: object) -> None:
+    _RUNTIME_CACHE[cache_key] = RuntimeCacheEntry(cached_at=time.monotonic(), payload=payload)
+
+
+def refresh_dashboard_cache(app_dir: Path, cache_key: str) -> None:
+    normalized = (cache_key or "").strip().lower()
+    bridge_config = BridgeConfig.load()
+    if normalized == "checks_light":
+        _write_cached_payload("checks:light", _index_checks(collect_lightweight_checks(app_dir, bridge_config)))
+        return
+    if normalized == "checks_full":
+        results = {}
+        for step in get_full_check_sequence():
+            results.update(_index_checks(collect_check_step(step, app_dir, bridge_config)))
+        _write_cached_payload("checks:full", results)
+        return
+    if normalized == "logs":
+        snapshot = get_runtime_snapshot(include_agent_processes=False)
+        hub_started_at = _process_started_at(snapshot.hub_pid)
+        bridge_started_at = _process_started_at(snapshot.bridge_pid)
+        _write_cached_payload("logs", _load_logs(hub_started_at=hub_started_at, bridge_started_at=bridge_started_at))
+        return
+    if normalized == "external_agent_processes":
+        _write_cached_payload("external_agent_processes", discover_external_agent_processes())
+        return
+    raise ValueError(f"unsupported dashboard cache key: {cache_key}")
+
+
+def _read_cached_checks(checks_mode: str) -> dict[str, CheckSnapshot]:
+    if checks_mode == "full":
+        return _read_cached_payload("checks:full", {})
+    if checks_mode == "light":
+        return _read_cached_payload("checks:light", {})
+    return {}
+
+
+def _load_logs(*, hub_started_at: float | None, bridge_started_at: float | None) -> dict[str, str]:
+    return {
+        "hub_out": tail_text(HUB_OUT_LOG, start_marker="ChatBridge backend started"),
+        "hub_err": tail_text(HUB_ERR_LOG, stale_before=hub_started_at),
+        "bridge_out": tail_text(
+            BRIDGE_OUT_LOG,
+            suppress_expected_noise=True,
+            start_marker="Weixin Hub Bridge started at",
+        ),
+        "bridge_err": tail_text(BRIDGE_ERR_LOG, stale_before=bridge_started_at),
+    }
 
 
 def _get_progressive_full_checks(app_dir: Path, bridge_config: BridgeConfig) -> tuple[dict[str, CheckSnapshot], bool, str]:
-    sequence = get_full_check_sequence()
-    if not sequence:
-        return {}, False, "环境检查已完成"
-    now = time.monotonic()
-    ttl_seconds = _CACHE_TTLS["checks"]
-    cached = _RUNTIME_CACHE.get(_FULL_CHECK_PROGRESS_KEY)
-    state = FullCheckProgressState.from_cached_payload(cached.payload if cached is not None else None, now=now)
-    if state.is_expired(now=now, ttl_seconds=ttl_seconds):
-        state = FullCheckProgressState.create(now=now)
+    del app_dir, bridge_config
+    payload = _read_cached_payload("checks:full", {})
+    return payload, False, ""
 
-    next_index = state.next_index
-    results = dict(state.results)
-    if next_index < len(sequence):
-        step_results = _index_checks(collect_check_step(sequence[next_index], app_dir, bridge_config))
-        results.update(step_results)
-        next_index += 1
 
-    state = FullCheckProgressState(results=results, next_index=next_index, updated_at=now)
-    _RUNTIME_CACHE[_FULL_CHECK_PROGRESS_KEY] = RuntimeCacheEntry(cached_at=now, payload=state)
-    completed = next_index >= len(sequence)
-    current_step_label = get_full_check_step_label(sequence[min(next_index, len(sequence) - 1)]) if not completed else "已完成"
-    progress_text = f"环境检查进行中：{min(next_index, len(sequence))}/{len(sequence)}，当前步骤：{current_step_label}"
-    return results, (not completed), progress_text
+def _read_cached(cache_key: str, loader: Callable[[], CacheValueT], ttl_seconds: float) -> CacheValueT:
+    del loader, ttl_seconds
+    payload = _read_cached_payload(cache_key, None)
+    if payload is None:
+        raise KeyError(cache_key)
+    return payload
 
 
 def _process_started_at(pid: int | None) -> float | None:
@@ -192,7 +219,7 @@ def tail_text(
 
 def load_dashboard_state(app_dir: Path, page_key: str = "home") -> DashboardState:
     profile = _page_load_profile(page_key)
-    snapshot = get_runtime_snapshot()
+    snapshot = get_runtime_snapshot(include_agent_processes=False)
     bridge_config = BridgeConfig.load()
     hub_state = _read_hub_state(HUB_STATE_PATH, bridge_config)
     bridge_state = _read_bridge_state(BRIDGE_STATE_PATH)
@@ -203,34 +230,11 @@ def load_dashboard_state(app_dir: Path, page_key: str = "home") -> DashboardStat
     if checks_mode == "full":
         checks, checks_in_progress, checks_progress_text = _get_progressive_full_checks(app_dir, bridge_config)
     elif checks_mode == "light":
-        checks = _read_cached(
-            "checks:light",
-            lambda: _index_checks(collect_lightweight_checks(app_dir, bridge_config)),
-            _CACHE_TTLS["checks"],
-        )
+        checks = _read_cached_checks("light")
     else:
         checks = {}
     active_account_id = bridge_config.active_account_id
-    hub_started_at = _process_started_at(snapshot.hub_pid)
-    bridge_started_at = _process_started_at(snapshot.bridge_pid)
-    logs = (
-        _read_cached(
-            "logs",
-            lambda: {
-                "hub_out": tail_text(HUB_OUT_LOG, start_marker="ChatBridge backend started"),
-                "hub_err": tail_text(HUB_ERR_LOG, stale_before=hub_started_at),
-                "bridge_out": tail_text(
-                    BRIDGE_OUT_LOG,
-                    suppress_expected_noise=True,
-                    start_marker="Weixin Hub Bridge started at",
-                ),
-                "bridge_err": tail_text(BRIDGE_ERR_LOG, stale_before=bridge_started_at),
-            },
-            _CACHE_TTLS["logs"],
-        )
-        if profile.logs
-        else {}
-    )
+    logs = _read_cached_payload("logs", {}) if profile.logs else {}
     return DashboardState(
         snapshot=snapshot,
         bridge_config=bridge_config,
@@ -242,15 +246,7 @@ def load_dashboard_state(app_dir: Path, page_key: str = "home") -> DashboardStat
         checks_progress_text=checks_progress_text,
         active_account_id=active_account_id,
         logs=logs,
-        external_agent_processes=(
-            _read_cached(
-                "external_agent_processes",
-                discover_external_agent_processes,
-                _CACHE_TTLS["external_agent_processes"],
-            )
-            if profile.external_agent_processes
-            else []
-        ),
+        external_agent_processes=_read_cached_payload("external_agent_processes", []) if profile.external_agent_processes else [],
     )
 
 

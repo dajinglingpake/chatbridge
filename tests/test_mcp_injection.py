@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -287,6 +288,81 @@ class McpServerCodexBackendTests(unittest.TestCase):
 
             self.assertEqual("ok", result["output"])
             self.assertEqual("thread-2", result["session_id"])
+
+    def test_codex_backend_retries_transient_stream_disconnect_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            workdir = temp_path / "workspace"
+            workdir.mkdir(parents=True, exist_ok=True)
+            session_dir = temp_path / "sessions"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            output_path = temp_path / "multi-codex-output-fixed.txt"
+            progress: list[str] = []
+
+            agent = SimpleNamespace(
+                id="main",
+                name="Main",
+                workdir=str(workdir),
+                session_file=str(session_dir / "main.txt"),
+                backend="codex",
+                model="",
+                prompt_prefix="",
+            )
+            context = BackendContext(
+                codex_command="codex",
+                claude_command="claude",
+                opencode_command="opencode",
+                session_dir=session_dir,
+                creationflags=0,
+                on_progress=progress.append,
+            )
+            backend = CodexBackend()
+
+            class FakeProcess:
+                def __init__(self, returncode: int) -> None:
+                    self.pid = 4321
+                    self.returncode = returncode
+                    self.stdout = iter(['{"type":"thread.started","thread_id":"thread-retry"}\n'])
+                    self.stderr = iter([])
+
+                def wait(self, timeout: float | None = None) -> int:
+                    return self.returncode
+
+            calls = {"count": 0}
+
+            def fake_popen(argv: list[str], **kwargs):
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    return FakeProcess(1)
+                output_path.write_text("ok after retry", encoding="utf-8")
+                return FakeProcess(0)
+
+            with (
+                patch("agent_backends.codex_backend.tempfile.gettempdir", return_value=str(temp_path)),
+                patch("agent_backends.codex_backend.uuid.uuid4", return_value=SimpleNamespace(hex="fixed")),
+                patch("agent_backends.codex_backend.subprocess.Popen", side_effect=fake_popen),
+            ):
+                with patch.object(CodexBackend, "_wait_for_exit", side_effect=[RuntimeError("stream disconnected before completion"), 0]):
+                    result = backend.invoke(agent, "hello", "", context)
+
+            self.assertEqual("ok after retry", result["output"])
+            self.assertEqual(2, calls["count"])
+            self.assertIn("自动重试", progress[0])
+
+    def test_codex_backend_kills_process_on_exit_timeout(self) -> None:
+        backend = CodexBackend()
+
+        class HangingProcess:
+            pid = 9876
+
+            def wait(self, timeout: float | None = None) -> int:
+                raise subprocess.TimeoutExpired("codex", timeout or 0)
+
+        with patch("agent_backends.codex_backend.terminate_process_tree") as terminate:
+            with self.assertRaisesRegex(RuntimeError, "timeout waiting for child process"):
+                backend._wait_for_exit(HangingProcess())  # type: ignore[arg-type]
+
+        terminate.assert_called_once_with(9876)
 
 if __name__ == "__main__":
     unittest.main()

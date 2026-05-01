@@ -495,7 +495,7 @@ def read_json(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def get_runtime_snapshot() -> RuntimeSnapshot:
+def get_runtime_snapshot(*, include_agent_processes: bool = True) -> RuntimeSnapshot:
     hub = get_managed_status("Hub", HUB_SCRIPT, HUB_PID_FILE)
     bridge = get_managed_status("Bridge", BRIDGE_SCRIPT, BRIDGE_PID_FILE)
     return RuntimeSnapshot(
@@ -503,6 +503,6 @@ def get_runtime_snapshot() -> RuntimeSnapshot:
         bridge_running=bridge.running,
         hub_pid=hub.pid,
         bridge_pid=bridge.pid,
-        codex_processes=list_codex_processes(),
+        codex_processes=list_codex_processes() if include_agent_processes else [],
         log_dir=str(LOG_DIR),
     )
