@@ -40,6 +40,31 @@ from core.state_models import ExternalAgentProcessState, RuntimeSnapshot
 HUB_SCRIPT = APP_DIR / "agent_hub.py"
 BRIDGE_SCRIPT = APP_DIR / "weixin_hub_bridge.py"
 PROXY_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy")
+AGENT_PROCESS_KEYWORDS = ("codex", "claude", "opencode")
+AGENT_PROCESS_HOST_NAMES = {
+    "bash",
+    "bash.exe",
+    "cmd",
+    "cmd.exe",
+    "node",
+    "node.exe",
+    "npm",
+    "npm.cmd",
+    "npx",
+    "npx.cmd",
+    "powershell",
+    "powershell.exe",
+    "pwsh",
+    "pwsh.exe",
+    "python",
+    "python.exe",
+    "pythonw",
+    "pythonw.exe",
+    "sh",
+    "sh.exe",
+    "wsl",
+    "wsl.exe",
+}
 
 @dataclass
 class ManagedStatus:
@@ -52,6 +77,25 @@ class ManagedStatus:
 
 def _normalize_process_text(name: str, cmdline: str) -> str:
     return f"{name} {cmdline}".lower()
+
+
+def _is_agent_process_name(name: str) -> bool:
+    lowered = name.lower()
+    return any(keyword in lowered for keyword in AGENT_PROCESS_KEYWORDS)
+
+
+def _is_agent_process_host_name(name: str) -> bool:
+    lowered = name.lower()
+    return _is_agent_process_name(lowered) or lowered in AGENT_PROCESS_HOST_NAMES
+
+
+def _iter_agent_candidate_processes():
+    if psutil is None:
+        return
+    for proc in psutil.process_iter(["pid", "name"]):
+        name = str(proc.info.get("name") or "")
+        if _is_agent_process_host_name(name):
+            yield proc
 
 
 def infer_agent_backend(name: str, cmdline: str) -> str:
@@ -163,18 +207,18 @@ def discover_external_agent_processes() -> list[ExternalAgentProcessState]:
     managed_root_pids = _managed_root_pids()
     rendered: list[ExternalAgentProcessState] = []
     parent_map: dict[int, int | None] = {}
-    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+    for proc in _iter_agent_candidate_processes():
         pid = proc.info.get("pid")
         if pid in {None, current_pid}:
             continue
         if pid in managed_root_pids:
             continue
-        if _has_managed_ancestor(proc, managed_root_pids):
-            continue
-        cmdline = " ".join(proc.info.get("cmdline") or [])
         name = str(proc.info.get("name") or "")
+        cmdline = _cmdline_text(proc)
         lowered = _normalize_process_text(name, cmdline)
-        if "codex" not in lowered and "claude" not in lowered and "opencode" not in lowered:
+        if not any(keyword in lowered for keyword in AGENT_PROCESS_KEYWORDS):
+            continue
+        if _has_managed_ancestor(proc, managed_root_pids):
             continue
         try:
             parent_map[int(pid)] = proc.ppid()
@@ -444,18 +488,11 @@ def emergency_stop() -> list[str]:
     messages = stop_all()
     if psutil is not None:
         targets: list[int] = []
-        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
-            cmdline = " ".join(proc.info.get("cmdline") or [])
-            name = (proc.info.get("name") or "").lower()
-            lowered = cmdline.lower()
-            if (
-                "codex" in lowered
-                or "claude" in lowered
-                or "opencode" in lowered
-                or name.startswith("codex")
-                or name.startswith("claude")
-                or name.startswith("opencode")
-            ):
+        for proc in _iter_agent_candidate_processes():
+            cmdline = _cmdline_text(proc)
+            name = str(proc.info.get("name") or "")
+            lowered = _normalize_process_text(name, cmdline)
+            if any(keyword in lowered for keyword in AGENT_PROCESS_KEYWORDS):
                 targets.append(proc.info["pid"])
         for pid in sorted(set(targets)):
             _taskkill(pid)
@@ -470,21 +507,14 @@ def list_codex_processes() -> list[str]:
 
     rendered: list[str] = []
     current_pid = os.getpid()
-    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+    for proc in _iter_agent_candidate_processes():
         pid = proc.info.get("pid")
         if pid == current_pid:
             continue
-        cmdline = " ".join(proc.info.get("cmdline") or [])
-        name = (proc.info.get("name") or "").lower()
-        lowered = cmdline.lower()
-        if (
-            "codex" not in lowered
-            and "claude" not in lowered
-            and "opencode" not in lowered
-            and not name.startswith("codex")
-            and not name.startswith("claude")
-            and not name.startswith("opencode")
-        ):
+        cmdline = _cmdline_text(proc)
+        name = str(proc.info.get("name") or "")
+        lowered = _normalize_process_text(name, cmdline)
+        if not any(keyword in lowered for keyword in AGENT_PROCESS_KEYWORDS):
             continue
         rendered.append(f"PID {pid} :: {cmdline or name}")
     return sorted(rendered)
