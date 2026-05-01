@@ -225,6 +225,7 @@ def render_home_section(
     model: WebConsoleViewModel,
     t: Translator,
     on_run_action,
+    on_refresh_checks,
     on_submit_task,
     on_switch_account,
     on_set_weixin_notice_enabled,
@@ -234,7 +235,9 @@ def render_home_section(
         _render_page_intro(ui, _tr(t, "ui.tab.home", HOME_PAGE.title), _tr(t, "ui.page.home.description", HOME_PAGE.description), "Console")
         with _responsive_grid(ui, "grid-cols-1"):
             with ui.card().classes("cb-card w-full p-5"):
-                _render_card_title(ui, _tr(t, "ui.web.home.service_controls", "服务控制"))
+                with ui.row().classes("items-center justify-between gap-2"):
+                    _render_card_title(ui, _tr(t, "ui.web.home.service_controls", "服务控制"))
+                    ui.button(_tr(t, "ui.web.action.refresh_status", "刷新状态"), on_click=on_refresh_checks, icon="refresh").props("outline")
                 status_panel_class, badge_class = _status_variant(f"{model.home.badge_text} {model.home.summary_text}")
                 with ui.element("div").classes(f"cb-status-panel {status_panel_class} w-full mb-4"):
                     with ui.row().classes("w-full items-start justify-between gap-3 flex-wrap"):
@@ -496,6 +499,9 @@ def render_diagnostics_section(
     ui: UIFactoryLike,
     model: WebConsoleViewModel,
     t: Translator,
+    on_refresh_checks,
+    on_refresh_logs,
+    on_refresh_external_agents,
     on_set_checks_page,
     on_switch_bridge_agent,
     on_set_agent_page,
@@ -525,7 +531,9 @@ def render_diagnostics_section(
                     }
                     for check in model.checks
                 ]
-                _render_card_title(ui, _tr(t, "ui.web.diagnostics.checks", "环境检查"))
+                with ui.row().classes("items-center justify-between gap-2"):
+                    _render_card_title(ui, _tr(t, "ui.web.diagnostics.checks", "环境检查"))
+                    ui.button(_tr(t, "ui.web.action.refresh_checks", "刷新检查"), on_click=on_refresh_checks, icon="refresh").props("outline")
                 ui.table(
                     columns=[{"name": key, "label": key, "field": key} for key in [column_project, column_status, column_detail]],
                     rows=rows,
@@ -543,7 +551,9 @@ def render_diagnostics_section(
                     lambda: on_set_checks_page(model.checks_page + 1),
                 )
             with ui.card().classes("cb-card w-full p-5"):
-                _render_card_title(ui, _tr(t, "ui.card.activity", "运行日志"))
+                with ui.row().classes("items-center justify-between gap-2"):
+                    _render_card_title(ui, _tr(t, "ui.card.activity", "运行日志"))
+                    ui.button(_tr(t, "ui.web.action.refresh_logs", "刷新日志"), on_click=on_refresh_logs, icon="refresh").props("outline")
                 for title, content in model.log_sections:
                     ui.label(title).classes("font-semibold text-slate-700")
                     _render_code_block(ui, content, "max-h-60 overflow-auto")
@@ -668,7 +678,9 @@ def render_diagnostics_section(
                     icon="delete",
                 ).props("outline")
         with ui.card().classes("cb-card w-full p-5"):
-            _render_card_title(ui, _tr(t, "ui.web.external.title", "外部终端 Agent 进程"))
+            with ui.row().classes("items-center justify-between gap-2"):
+                _render_card_title(ui, _tr(t, "ui.web.external.title", "外部终端 Agent 进程"))
+                ui.button(_tr(t, "ui.web.action.refresh_external_agents", "刷新外部进程"), on_click=on_refresh_external_agents, icon="refresh").props("outline")
             if model.external_agent_processes:
                 for item in model.external_agent_processes:
                     with _panel(ui):

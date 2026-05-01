@@ -1120,6 +1120,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                         "prompt": "hello",
                         "progress_text": "正在分析仓库结构",
                         "progress_seq": 1,
+                        "context_left_percent": 18,
                         "created_at": "2026-04-20T12:00:00",
                     },
                     {
@@ -1132,11 +1133,11 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                         "backend": "codex",
                         "prompt": "hello",
                         "output": "world",
+                        "context_left_percent": 18,
                         "created_at": "2026-04-20T12:00:00",
                     },
                 ],
             )
-            bridge.task_context_left_response = IpcResponseEnvelope(ok=True, payload={"context_left_percent": 18})
             with patch("weixin_hub_bridge.EVENT_LOG_PATH", event_log_path):
                 bridge._handle_message(
                     "https://example.com",

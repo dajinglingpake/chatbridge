@@ -394,6 +394,7 @@ class WeixinBridge:
             RESTART_NOTICE_PATH.unlink(missing_ok=True)
 
     def poll_once(self) -> None:
+        poll_started = time.perf_counter()
         self._reload_runtime_config_if_changed()
         account = self._load_account()
         token = (account.get("token") or "").strip()
@@ -405,14 +406,17 @@ class WeixinBridge:
 
         payload = {"get_updates_buf": buf, "base_info": {"channel_version": "2.1.1"}}
         timeout_ms = ACTIVE_TASK_POLL_TIMEOUT_MS if self.pending_tasks else self.config.poll_timeout_ms
+        getupdates_started = time.perf_counter()
         try:
             response = self._post_json(f"{base_url}/ilink/bot/getupdates", payload, token=token, timeout_ms=timeout_ms)
         except RuntimeError as exc:
+            self._log_perf("getupdates", getupdates_started, status="timeout" if self._is_expected_getupdates_timeout(exc) else "failed")
             if self._is_expected_getupdates_timeout(exc):
                 self.state.mark_poll(now=now_iso())
                 self._save_state()
                 return
             raise
+        self._log_perf("getupdates", getupdates_started, status="ok", messages=len(response.get("msgs") or []), timeout_ms=timeout_ms)
         self.state.mark_poll(now=now_iso())
         if response.get("ret") not in (None, 0):
             raise RuntimeError(f"weixin getupdates failed: ret={response.get('ret')} errcode={response.get('errcode')} errmsg={response.get('errmsg')}")
@@ -426,8 +430,10 @@ class WeixinBridge:
 
         self._poll_pending_tasks(base_url, token)
         self._save_state()
+        self._log_perf("poll_once", poll_started, status="ok", pending=len(self.pending_tasks))
 
     def _handle_message(self, base_url: str, token: str, msg: dict[str, Any]) -> None:
+        message_started = time.perf_counter()
         if msg.get("message_type") != 1:
             return
 
@@ -588,6 +594,7 @@ class WeixinBridge:
             workdir=task_workdir or self._resolve_session_workdir(session_meta),
         )
 
+        submit_started = time.perf_counter()
         response = self._ipc_request(
             "submit_task",
             {
@@ -606,6 +613,7 @@ class WeixinBridge:
             },
             timeout_seconds=60,
         )
+        self._log_perf("submit_task_ipc", submit_started, sender_id=sender_id, status="ok" if response.ok else "not_ok")
         if not response.ok:
             raise RuntimeError(str(response.error or "submit_task failed"))
         task = response.payload.get("task") or {}
@@ -634,6 +642,7 @@ class WeixinBridge:
         )
         self.pending_tasks[tracked_task.task_id] = tracked_task
         self._save_pending_tasks()
+        self._log_perf("handle_message", message_started, sender_id=sender_id, route="task_submission", task_id=task_id)
 
     def _notify_task_progress(
         self,
@@ -940,19 +949,17 @@ class WeixinBridge:
     def _resolve_task_context_left_percent(self, task: HubTask) -> int | None:
         if str(task.backend or "").strip().lower() != "codex":
             return None
+        self._request_task_context_left_refresh(task.id)
+        return self._normalize_context_left_percent(task.context_left_percent)
+
+    def _request_task_context_left_refresh(self, task_id: str) -> None:
         started_at = time.perf_counter()
         try:
-            response = self._ipc_request("task_context_left", {"task_id": task.id}, timeout_seconds=5)
+            response = self._ipc_request("refresh_task_context_left", {"task_id": task_id}, timeout_seconds=1)
         except Exception:
-            self._log_perf("context_left_lookup", started_at, task_id=task.id, status="timeout_or_failed")
-            return self._normalize_context_left_percent(task.context_left_percent)
-        self._log_perf("context_left_lookup", started_at, task_id=task.id, status="ok" if response.ok else "not_ok")
-        if not response.ok:
-            return self._normalize_context_left_percent(task.context_left_percent)
-        resolved = self._normalize_context_left_percent(response.payload.get("context_left_percent"))
-        if resolved is None:
-            return self._normalize_context_left_percent(task.context_left_percent)
-        return resolved
+            self._log_perf("context_left_refresh_request", started_at, task_id=task_id, status="timeout_or_failed")
+            return
+        self._log_perf("context_left_refresh_request", started_at, task_id=task_id, status="ok" if response.ok else "not_ok")
 
     @staticmethod
     def _normalize_context_left_percent(value: object) -> int | None:
@@ -1024,6 +1031,7 @@ class WeixinBridge:
         flush_failure_notice: bool = True,
         log_failure: bool = True,
     ) -> None:
+        delivery_started = time.perf_counter()
         text = format_weixin_reply(text)
         body = {
             "msg": {
@@ -1055,7 +1063,9 @@ class WeixinBridge:
                 )
             else:
                 print(f"[bridge] sent reply to={to_user_id} preview={preview}", flush=True)
+            self._log_perf("sendmessage", delivery_started, to=to_user_id, status="ok")
         except Exception as exc:  # noqa: BLE001
+            self._log_perf("sendmessage", delivery_started, to=to_user_id, status="failed")
             if log_failure:
                 print(f"[bridge] send reply failed to={to_user_id} error={exc} preview={preview}", flush=True)
             raise
@@ -3145,8 +3155,15 @@ class WeixinBridge:
         return "timed out" in message or "timeout" in message
 
     def _ipc_request(self, action: str, payload: dict[str, Any], timeout_seconds: float) -> IpcResponseEnvelope:
+        started_at = time.perf_counter()
         request_id = create_request(action, payload)
-        return wait_for_response(request_id, timeout_seconds)
+        try:
+            response = wait_for_response(request_id, timeout_seconds)
+        except Exception:
+            self._log_perf("ipc_request", started_at, action=action, request_id=request_id, status="failed")
+            raise
+        self._log_perf("ipc_request", started_at, action=action, request_id=request_id, status="ok" if response.ok else "not_ok")
+        return response
 
     def _save_state(self) -> None:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
