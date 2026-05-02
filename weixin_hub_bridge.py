@@ -56,7 +56,7 @@ from core.weixin_send_gate import sender_send_lock
 from core.weixin_text_outbox import MAX_RETRY_ATTEMPTS, enqueue_text_message, pop_text_messages, requeue_text_message
 from core.weixin_notifier import broadcast_weixin_notice_by_kind, build_task_followup_hint
 from core.weixin_message_format import format_duration_since, format_weixin_reply, now_iso, prefix_weixin_output
-from local_ipc import create_request, wait_for_response
+from local_ipc import BRIDGE_REQUEST_DIR, mark_bridge_processed, create_request, read_request, wait_for_response
 from localization import Localizer
 
 
@@ -89,6 +89,7 @@ ACTIVE_TASK_POLL_TIMEOUT_MS = 500
 TERMINAL_TASK_STATUSES = frozenset({"succeeded", "failed", "canceled", "unknown_after_restart"})
 TYPING_KEEPALIVE_SECONDS = 5
 TYPING_TICKET_TTL_SECONDS = 23 * 60 * 60
+PUSH_RECENT_POLL_SUPPRESSION_SECONDS = 8
 PERF_LOG_MIN_SECONDS = 0.25
 ACTIVE_GETUPDATES_SLOW_LOG_SECONDS = 1.0
 CONTEXT_LEFT_QUERY_TIMEOUT_SECONDS = 2.0
@@ -423,6 +424,7 @@ class WeixinBridge:
         if not token:
             raise RuntimeError("weixin account token is missing; please log in first")
         base_url = (account.get("baseUrl") or DEFAULT_WEIXIN_BASE_URL).strip()
+        self._process_bridge_ipc_once(base_url, token)
         self._poll_pending_tasks(base_url, token)
         buf = self._load_sync_buf()
 
@@ -473,6 +475,7 @@ class WeixinBridge:
         for msg in response.get("msgs") or []:
             self._handle_message(base_url, token, msg)
 
+        self._process_bridge_ipc_once(base_url, token)
         self._poll_pending_tasks(base_url, token)
         self._save_state()
         if message_count or self.pending_tasks:
@@ -688,6 +691,7 @@ class WeixinBridge:
         )
         self.pending_tasks[tracked_task.task_id] = tracked_task
         self._save_pending_tasks()
+        self._start_task_typing_async(base_url, token, tracked_task)
         self._log_perf("handle_message", message_started, sender_id=sender_id, route="task_submission", task_id=task_id)
 
     def _notify_task_progress(
@@ -787,11 +791,57 @@ class WeixinBridge:
             source=tracked.source,
         )
 
+    def _process_bridge_ipc_once(self, base_url: str, token: str) -> None:
+        for request_path in sorted(BRIDGE_REQUEST_DIR.glob("*.json")):
+            started_at = time.perf_counter()
+            action = "unknown"
+            status = "ok"
+            try:
+                request = read_request(request_path)
+                action = request.action or "unknown"
+                if action == "task_update":
+                    self._handle_pushed_task_update(base_url, token, request.payload)
+                else:
+                    status = "ignored"
+            except Exception as exc:  # noqa: BLE001
+                status = "failed"
+                print(f"[bridge] bridge ipc request failed {request_path.name}: {exc}", flush=True)
+            finally:
+                mark_bridge_processed(request_path)
+                self._log_perf("bridge_ipc", started_at, force=True, action=action, status=status)
+
+    def _handle_pushed_task_update(self, base_url: str, token: str, payload: dict[str, object]) -> None:
+        task = HubTask.from_dict(payload.get("task"), default_backend=self.config.default_backend)
+        if task is None:
+            return
+        tracked = self.pending_tasks.get(task.id)
+        if tracked is None:
+            return
+        tracked.last_push_at = int(time.time())
+        state_updated = False
+        if task.status == "running" and tracked.last_status != "running":
+            self._notify_task_progress(base_url, token, tracked, task)
+            tracked.last_status = "running"
+            state_updated = True
+        if task.progress_seq > tracked.last_progress_seq and task.progress_text.strip():
+            self._notify_task_progress_update(base_url, token, tracked, task)
+            tracked.last_progress_seq = task.progress_seq
+            state_updated = True
+        if task.status in TERMINAL_TASK_STATUSES:
+            self._notify_task_terminal(base_url, token, tracked, task)
+            self.pending_tasks.pop(task.id, None)
+            state_updated = True
+        if state_updated:
+            self._save_pending_tasks()
+
     def _poll_pending_tasks(self, base_url: str, token: str) -> None:
         if not self.pending_tasks:
             return
         for task_id, tracked in list(self.pending_tasks.items()):
             poll_started = time.perf_counter()
+            if self._should_skip_task_poll_after_push(tracked):
+                self._log_perf("pending_task_poll", poll_started, task_id=task_id, status="push_recent")
+                continue
             try:
                 data = self._ipc_request("get_task", {"task_id": task_id}, timeout_seconds=5)
             except Exception as exc:  # noqa: BLE001
@@ -813,15 +863,6 @@ class WeixinBridge:
                 print(f"[bridge] pending task payload invalid for {task_id}")
                 continue
             state_updated = False
-            if task.status in {"queued", "running"}:
-                try:
-                    typing_started = time.perf_counter()
-                    typing_sent = self._ensure_task_typing(base_url, token, tracked)
-                    self._log_perf("typing_keepalive", typing_started, task_id=task_id, sent=str(typing_sent).lower())
-                    if typing_sent:
-                        state_updated = True
-                except Exception as exc:  # noqa: BLE001
-                    print(f"[bridge] typing keepalive failed for {task_id}: {exc}", flush=True)
             if task.status == "running" and tracked.last_status != "running":
                 self._notify_task_progress(base_url, token, tracked, task)
                 tracked.last_status = "running"
@@ -837,6 +878,41 @@ class WeixinBridge:
                 self.pending_tasks.pop(task_id, None)
                 self._save_pending_tasks()
             self._log_perf("pending_task_poll", poll_started, task_id=task_id, status=task.status)
+
+    @staticmethod
+    def _should_skip_task_poll_after_push(tracked: WeixinPendingTaskState) -> bool:
+        if not tracked.last_push_at:
+            return False
+        return int(time.time()) - tracked.last_push_at < PUSH_RECENT_POLL_SUPPRESSION_SECONDS
+
+    def _ensure_task_typing_best_effort(
+        self,
+        base_url: str,
+        token: str,
+        tracked: WeixinPendingTaskState,
+        task_id: str,
+    ) -> bool:
+        try:
+            typing_started = time.perf_counter()
+            typing_sent = self._ensure_task_typing(base_url, token, tracked)
+            self._log_perf("typing_keepalive", typing_started, task_id=task_id, sent=str(typing_sent).lower())
+            return typing_sent
+        except Exception as exc:  # noqa: BLE001
+            print(f"[bridge] typing keepalive failed for {task_id}: {exc}", flush=True)
+            return False
+
+    def _start_task_typing_async(self, base_url: str, token: str, tracked: WeixinPendingTaskState) -> None:
+        threading.Thread(
+            target=self._start_task_typing_worker,
+            args=(base_url, token, tracked),
+            daemon=True,
+        ).start()
+
+    def _start_task_typing_worker(self, base_url: str, token: str, tracked: WeixinPendingTaskState) -> None:
+        while tracked.task_id in self.pending_tasks:
+            if self._ensure_task_typing_best_effort(base_url, token, tracked, tracked.task_id):
+                self._save_pending_tasks()
+            time.sleep(TYPING_KEEPALIVE_SECONDS)
 
     def _notify_task_terminal(
         self,

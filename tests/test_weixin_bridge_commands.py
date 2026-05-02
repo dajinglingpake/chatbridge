@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -1190,33 +1191,64 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                 bridge.poll_pending()
             self.assertIn(" · ctx 17% · ", bridge.sent_texts[0].splitlines()[0])
 
-    def test_poll_pending_tasks_starts_typing_indicator_for_active_task(self) -> None:
-        bridge = TypingBridge(
-            BridgeConfig.load(),
-            [
-                {
-                    "id": "task-feedback-001",
-                    "sender_id": "sender-test",
-                    "session_name": "default",
-                    "status": "running",
-                    "agent_id": "main",
-                    "agent_name": "default",
-                    "backend": "codex",
-                    "prompt": "hello",
-                    "created_at": "2026-04-20T12:00:00",
-                }
-            ],
-        )
-        bridge.pending_tasks["task-feedback-001"] = WeixinPendingTaskState(
-            task_id="task-feedback-001",
-            sender_id="sender-test",
-            session_name="default",
-            backend="codex",
-            context_token="ctx-live",
-        )
+    def test_pushed_task_update_sends_progress_without_polling_task_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            event_log_path = Path(temp_dir) / "weixin_bridge_events.jsonl"
+            bridge = FeedbackBridge(BridgeConfig.load(), [])
+            bridge.pending_tasks["task-pushed-001"] = WeixinPendingTaskState(
+                task_id="task-pushed-001",
+                sender_id="sender-test",
+                session_name="default",
+                backend="codex",
+                context_token="ctx",
+            )
+            bridge.task_context_left_response = IpcResponseEnvelope(ok=True, payload={"context_left_percent": 33})
+            with patch("weixin_hub_bridge.EVENT_LOG_PATH", event_log_path):
+                bridge._handle_pushed_task_update(
+                    "https://example.com",
+                    "token",
+                    {
+                        "event": "progress",
+                        "task": {
+                            "id": "task-pushed-001",
+                            "sender_id": "sender-test",
+                            "session_name": "default",
+                            "status": "running",
+                            "agent_id": "main",
+                            "agent_name": "default",
+                            "backend": "codex",
+                            "source": "wechat",
+                            "prompt": "hello",
+                            "progress_text": "正在处理推送进度",
+                            "progress_seq": 1,
+                            "created_at": "2026-04-20T12:00:00",
+                            "started_at": "2026-04-20T12:00:01",
+                        },
+                    },
+                )
+            self.assertEqual(1, len(bridge.sent_texts))
+            self.assertIn(" · ctx 33% · ", bridge.sent_texts[0].splitlines()[0])
+            self.assertIn("正在处理推送进度", bridge.sent_texts[0])
+            self.assertEqual(1, bridge.pending_tasks["task-pushed-001"].last_progress_seq)
+            self.assertGreater(bridge.pending_tasks["task-pushed-001"].last_push_at, 0)
 
+    def test_handle_message_starts_typing_indicator_when_task_is_accepted(self) -> None:
+        bridge = TypingBridge(BridgeConfig.load(), [])
         with patch("weixin_hub_bridge.time.time", return_value=100):
-            bridge.poll_pending()
+            bridge._handle_message(
+                "https://example.com",
+                "token",
+                {
+                    "message_type": 1,
+                    "from_user_id": "sender-test",
+                    "context_token": "ctx-live",
+                    "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
+                },
+            )
+        deadline = time.time() + 1
+        while len(bridge.typing_calls) < 2 and time.time() < deadline:
+            time.sleep(0.01)
+        bridge.pending_tasks.clear()
 
         self.assertEqual(
             [

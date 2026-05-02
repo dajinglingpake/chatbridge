@@ -553,6 +553,7 @@ class WeixinPendingTaskState:
     last_status: str = "queued"
     last_progress_seq: int = 0
     last_progress_text: str = ""
+    last_push_at: int = 0
     typing_ticket: str = ""
     typing_ticket_refreshed_at: int = 0
     typing_last_sent_at: int = 0
@@ -577,6 +578,7 @@ class WeixinPendingTaskState:
             last_status=str(raw.get("last_status") or "queued").strip() or "queued",
             last_progress_seq=int(raw.get("last_progress_seq") or 0),
             last_progress_text=str(raw.get("last_progress_text") or "").strip(),
+            last_push_at=int(raw.get("last_push_at") or 0),
             typing_ticket=str(raw.get("typing_ticket") or "").strip(),
             typing_ticket_refreshed_at=int(raw.get("typing_ticket_refreshed_at") or 0),
             typing_last_sent_at=int(raw.get("typing_last_sent_at") or 0),
