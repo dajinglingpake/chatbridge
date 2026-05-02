@@ -149,6 +149,7 @@ class HubTask:
     permission_mode: str = ""
     bridge_conversations_path: str = ""
     bridge_event_log_path: str = ""
+    context_token: str = ""
     progress_text: str = ""
     progress_at: str = ""
     progress_seq: int = 0
@@ -185,6 +186,7 @@ class HubTask:
             permission_mode=str(raw.get("permission_mode") or "").strip(),
             bridge_conversations_path=str(raw.get("bridge_conversations_path") or "").strip(),
             bridge_event_log_path=str(raw.get("bridge_event_log_path") or "").strip(),
+            context_token=str(raw.get("context_token") or "").strip(),
             progress_text=str(raw.get("progress_text") or ""),
             progress_at=str(raw.get("progress_at") or "").strip(),
             progress_seq=int(raw.get("progress_seq") or 0),
@@ -553,7 +555,6 @@ class WeixinPendingTaskState:
     last_status: str = "queued"
     last_progress_seq: int = 0
     last_progress_text: str = ""
-    last_push_at: int = 0
     typing_ticket: str = ""
     typing_ticket_refreshed_at: int = 0
     typing_last_sent_at: int = 0
@@ -578,7 +579,6 @@ class WeixinPendingTaskState:
             last_status=str(raw.get("last_status") or "queued").strip() or "queued",
             last_progress_seq=int(raw.get("last_progress_seq") or 0),
             last_progress_text=str(raw.get("last_progress_text") or "").strip(),
-            last_push_at=int(raw.get("last_push_at") or 0),
             typing_ticket=str(raw.get("typing_ticket") or "").strip(),
             typing_ticket_refreshed_at=int(raw.get("typing_ticket_refreshed_at") or 0),
             typing_last_sent_at=int(raw.get("typing_last_sent_at") or 0),

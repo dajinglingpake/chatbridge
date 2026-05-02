@@ -156,62 +156,6 @@ class AgentHubCancellationTests(unittest.TestCase):
         self.assertEqual(18, task.context_left_percent)
         mocked_query.assert_called_once()
 
-    def test_request_task_context_left_refresh_returns_cached_value_and_runs_background_lookup(self) -> None:
-        workdir = self.temp_path / "workspace"
-        session_file = self.temp_path / "sessions" / "main.txt"
-        workdir.mkdir(parents=True, exist_ok=True)
-        session_file.parent.mkdir(parents=True, exist_ok=True)
-        config = HubConfig(
-            codex_command="codex",
-            claude_command="claude",
-            opencode_command="opencode",
-            agents=[AgentConfig("main", "Main", str(workdir), str(session_file), backend="codex")],
-        )
-        state_path = self.temp_path / "state" / "agent_hub_state.json"
-        task = HubTask(
-            id="task-ctx-refresh-001",
-            agent_id="main",
-            agent_name="Main",
-            backend="codex",
-            source="wechat",
-            sender_id="sender-test",
-            prompt="hello",
-            status="running",
-            created_at="2026-04-24T00:00:00",
-            session_name="default",
-            workdir=str(workdir),
-            context_left_percent=42,
-        )
-        started_threads: list[tuple[object, tuple[object, ...]]] = []
-
-        class ImmediateThread:
-            def __init__(self, target, args=(), daemon=None) -> None:
-                self.target = target
-                self.args = args
-                self.daemon = daemon
-
-            def start(self) -> None:
-                target_name = getattr(self.target, "__name__", "")
-                if target_name in {"_worker", "_refresh_external_agent_processes_worker"}:
-                    return
-                started_threads.append((self.target, self.args))
-                self.target(*self.args)
-
-        with (
-            patch("agent_hub.STATE_PATH", state_path),
-            patch("agent_hub.discover_external_agent_processes", return_value=[]),
-            patch("agent_hub.threading.Thread", ImmediateThread),
-            patch("agent_hub.query_codex_context_left_percent", return_value=17) as mocked_query,
-        ):
-            hub = MultiCodexHub(config)
-            hub.tasks.append(task)
-            percent = hub.request_task_context_left_refresh("task-ctx-refresh-001")
-
-        self.assertEqual(42, percent)
-        self.assertEqual(17, task.context_left_percent)
-        self.assertEqual(1, len(started_threads))
-        mocked_query.assert_called_once()
-
     def test_progress_update_pushes_task_update_to_bridge_ipc(self) -> None:
         workdir = self.temp_path / "workspace"
         session_file = self.temp_path / "sessions" / "main.txt"

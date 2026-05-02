@@ -19,6 +19,7 @@ PROCESSED_DIR = IPC_DIR / "processed"
 BRIDGE_REQUEST_DIR = IPC_DIR / "bridge_requests"
 BRIDGE_PROCESSED_DIR = IPC_DIR / "bridge_processed"
 IPC_POLL_INTERVAL_SECONDS = 0.05
+PROCESSED_RETENTION_SECONDS = 24 * 60 * 60
 
 
 def ensure_ipc_dirs() -> None:
@@ -91,3 +92,15 @@ def mark_bridge_processed(request_path: Path) -> None:
     ensure_ipc_dirs()
     target = BRIDGE_PROCESSED_DIR / request_path.name
     request_path.replace(target)
+
+
+def cleanup_processed_requests(*, max_age_seconds: int = PROCESSED_RETENTION_SECONDS) -> None:
+    ensure_ipc_dirs()
+    cutoff = time.time() - max_age_seconds
+    for directory in (PROCESSED_DIR, BRIDGE_PROCESSED_DIR):
+        for path in directory.glob("*.json"):
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink(missing_ok=True)
+            except OSError:
+                continue
