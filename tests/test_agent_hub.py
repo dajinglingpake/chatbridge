@@ -212,6 +212,84 @@ class AgentHubCancellationTests(unittest.TestCase):
         self.assertEqual(1, len(started_threads))
         mocked_query.assert_called_once()
 
+    def test_progress_update_pushes_task_update_to_bridge_ipc(self) -> None:
+        workdir = self.temp_path / "workspace"
+        session_file = self.temp_path / "sessions" / "main.txt"
+        workdir.mkdir(parents=True, exist_ok=True)
+        session_file.parent.mkdir(parents=True, exist_ok=True)
+        config = HubConfig(
+            codex_command="codex",
+            claude_command="claude",
+            opencode_command="opencode",
+            agents=[AgentConfig("main", "Main", str(workdir), str(session_file), backend="codex")],
+        )
+        state_path = self.temp_path / "state" / "agent_hub_state.json"
+        task = HubTask(
+            id="task-push-001",
+            agent_id="main",
+            agent_name="Main",
+            backend="codex",
+            source="wechat",
+            sender_id="sender-test",
+            prompt="hello",
+            status="running",
+            created_at="2026-04-24T00:00:00",
+            session_name="default",
+            workdir=str(workdir),
+        )
+        with (
+            patch("agent_hub.STATE_PATH", state_path),
+            patch("agent_hub.discover_external_agent_processes", return_value=[]),
+            patch("agent_hub.create_bridge_request") as mocked_push,
+        ):
+            hub = MultiCodexHub(config)
+            hub.tasks.append(task)
+            hub._update_task_progress("task-push-001", "正在处理")
+
+        mocked_push.assert_called_once()
+        action, payload = mocked_push.call_args.args
+        self.assertEqual("task_update", action)
+        self.assertEqual("progress", payload["event"])
+        self.assertEqual("task-push-001", payload["task"]["id"])
+        self.assertEqual("正在处理", payload["task"]["progress_text"])
+
+    def test_progress_update_still_succeeds_when_bridge_push_fails(self) -> None:
+        workdir = self.temp_path / "workspace"
+        session_file = self.temp_path / "sessions" / "main.txt"
+        workdir.mkdir(parents=True, exist_ok=True)
+        session_file.parent.mkdir(parents=True, exist_ok=True)
+        config = HubConfig(
+            codex_command="codex",
+            claude_command="claude",
+            opencode_command="opencode",
+            agents=[AgentConfig("main", "Main", str(workdir), str(session_file), backend="codex")],
+        )
+        state_path = self.temp_path / "state" / "agent_hub_state.json"
+        task = HubTask(
+            id="task-push-fail-001",
+            agent_id="main",
+            agent_name="Main",
+            backend="codex",
+            source="wechat",
+            sender_id="sender-test",
+            prompt="hello",
+            status="running",
+            created_at="2026-04-24T00:00:00",
+            session_name="default",
+            workdir=str(workdir),
+        )
+        with (
+            patch("agent_hub.STATE_PATH", state_path),
+            patch("agent_hub.discover_external_agent_processes", return_value=[]),
+            patch("agent_hub.create_bridge_request", side_effect=RuntimeError("bridge unavailable")),
+        ):
+            hub = MultiCodexHub(config)
+            hub.tasks.append(task)
+            hub._update_task_progress("task-push-fail-001", "仍然继续")
+
+        self.assertEqual("仍然继续", task.progress_text)
+        self.assertEqual(1, task.progress_seq)
+
     def test_save_state_does_not_scan_external_agent_processes(self) -> None:
         workdir = self.temp_path / "workspace"
         session_file = self.temp_path / "sessions" / "main.txt"

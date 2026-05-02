@@ -16,11 +16,13 @@ IPC_DIR = RUNTIME_DIR / "ipc"
 REQUEST_DIR = IPC_DIR / "requests"
 RESPONSE_DIR = IPC_DIR / "responses"
 PROCESSED_DIR = IPC_DIR / "processed"
+BRIDGE_REQUEST_DIR = IPC_DIR / "bridge_requests"
+BRIDGE_PROCESSED_DIR = IPC_DIR / "bridge_processed"
 IPC_POLL_INTERVAL_SECONDS = 0.05
 
 
 def ensure_ipc_dirs() -> None:
-    for path in [IPC_DIR, REQUEST_DIR, RESPONSE_DIR, PROCESSED_DIR]:
+    for path in [IPC_DIR, REQUEST_DIR, RESPONSE_DIR, PROCESSED_DIR, BRIDGE_REQUEST_DIR, BRIDGE_PROCESSED_DIR]:
         path.mkdir(parents=True, exist_ok=True)
 
 
@@ -28,6 +30,17 @@ def create_request(action: str, payload: dict[str, Any]) -> str:
     ensure_ipc_dirs()
     request_id = f"req-{uuid.uuid4().hex}"
     request_path = REQUEST_DIR / f"{request_id}.json"
+    save_json(
+        request_path,
+        IpcRequestEnvelope(id=request_id, action=action, payload=payload).to_dict(),
+    )
+    return request_id
+
+
+def create_bridge_request(action: str, payload: dict[str, Any]) -> str:
+    ensure_ipc_dirs()
+    request_id = f"bridge-req-{time.time_ns()}-{uuid.uuid4().hex}"
+    request_path = BRIDGE_REQUEST_DIR / f"{request_id}.json"
     save_json(
         request_path,
         IpcRequestEnvelope(id=request_id, action=action, payload=payload).to_dict(),
@@ -71,4 +84,10 @@ def wait_for_response(request_id: str, timeout_seconds: float) -> IpcResponseEnv
 def mark_processed(request_path: Path) -> None:
     ensure_ipc_dirs()
     target = PROCESSED_DIR / request_path.name
+    request_path.replace(target)
+
+
+def mark_bridge_processed(request_path: Path) -> None:
+    ensure_ipc_dirs()
+    target = BRIDGE_PROCESSED_DIR / request_path.name
     request_path.replace(target)

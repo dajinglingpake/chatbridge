@@ -18,7 +18,7 @@ from bridge_config import BridgeConfig
 from core.json_store import load_json, save_json
 from core.state_models import AgentRuntimeState, HubTask, IpcRequestEnvelope, IpcResponseEnvelope
 from core.weixin_notifier import broadcast_weixin_notice_by_kind, build_task_followup_hint
-from local_ipc import REQUEST_DIR, ensure_ipc_dirs, mark_processed, read_request, write_response
+from local_ipc import REQUEST_DIR, create_bridge_request, ensure_ipc_dirs, mark_processed, read_request, write_response
 from core.platform_compat import IS_WINDOWS, creationflags, resolve_command, terminate_process_tree
 from runtime_stack import discover_external_agent_processes
 
@@ -500,6 +500,7 @@ class MultiCodexHub:
                     runtime.last_output = result["output"][:1800]
                     runtime.last_error = ""
                 self._save_state()
+                self._push_bridge_task_update(task, event="terminal")
             if canceled:
                 self._notify_task_canceled(task)
                 return
@@ -529,6 +530,7 @@ class MultiCodexHub:
                     runtime.failure_count += 1
                     runtime.last_error = str(exc)
                 self._save_state()
+                self._push_bridge_task_update(task, event="terminal")
             if canceled:
                 self._notify_task_canceled(task)
                 return
@@ -655,6 +657,7 @@ class MultiCodexHub:
             task.progress_at = now_iso()
             task.progress_seq += 1
             self._save_state()
+            self._push_bridge_task_update(task, event="progress")
 
     def _update_task_context_left_percent(self, task_id: str, percent: int) -> None:
         with self.lock:
@@ -663,6 +666,22 @@ class MultiCodexHub:
                 return
             task.context_left_percent = max(0, min(100, int(percent)))
             self._save_state()
+
+    def _push_bridge_task_update(self, task: HubTask, *, event: str) -> None:
+        if not task.source.strip().lower().startswith("wechat"):
+            return
+        if not task.sender_id.strip():
+            return
+        try:
+            create_bridge_request(
+                "task_update",
+                {
+                    "event": event,
+                    "task": task.to_dict(),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[hub] bridge task_update push failed task_id={task.id} event={event}: {exc}", flush=True)
 
     def _resolve_task_workdir(self, agent: AgentConfig, task: HubTask) -> str:
         return task.workdir.strip() or agent.workdir
