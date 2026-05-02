@@ -18,7 +18,7 @@ from bridge_config import BridgeConfig
 from core.json_store import load_json, save_json
 from core.state_models import AgentRuntimeState, HubTask, IpcRequestEnvelope, IpcResponseEnvelope
 from core.weixin_notifier import broadcast_weixin_notice_by_kind, build_task_followup_hint
-from local_ipc import REQUEST_DIR, create_bridge_request, ensure_ipc_dirs, mark_processed, read_request, write_response
+from local_ipc import REQUEST_DIR, cleanup_processed_requests, create_bridge_request, ensure_ipc_dirs, mark_processed, read_request, write_response
 from core.platform_compat import IS_WINDOWS, creationflags, resolve_command, terminate_process_tree
 from runtime_stack import discover_external_agent_processes
 
@@ -46,7 +46,6 @@ MCP_SERVER_NAME = "operations"
 MCP_SERVER_PATH = APP_DIR / "tools" / "operations_server.py"
 PERF_LOG_MIN_SECONDS = 0.25
 IPC_IDLE_SLEEP_SECONDS = 0.05
-CONTEXT_REFRESH_MIN_INTERVAL_SECONDS = 8.0
 
 
 def now_iso() -> str:
@@ -174,8 +173,6 @@ class MultiCodexHub:
         self.started_workers: set[str] = set()
         self.running_task_pids: dict[str, int] = {}
         self.cancel_requested_task_ids: set[str] = set()
-        self.context_refreshing_task_ids: set[str] = set()
-        self.context_refresh_requested_at: dict[str, float] = {}
         self.external_agent_processes_cache: list[dict[str, Any]] = []
         self.external_agent_processes_cache_at = 0.0
         self._restore_previous_state()
@@ -380,6 +377,7 @@ class MultiCodexHub:
         permission_mode: str = "",
         bridge_conversations_path: str = "",
         bridge_event_log_path: str = "",
+        context_token: str = "",
     ) -> dict[str, Any]:
         started_at = time.perf_counter()
         prompt = (prompt or "").strip()
@@ -405,6 +403,7 @@ class MultiCodexHub:
             permission_mode=permission_mode.strip(),
             bridge_conversations_path=bridge_conversations_path.strip(),
             bridge_event_log_path=bridge_event_log_path.strip(),
+            context_token=context_token.strip(),
         )
         with self.lock:
             self.tasks.append(task)
@@ -437,6 +436,7 @@ class MultiCodexHub:
             model=str(payload.get("model") or ""),
             reasoning_effort=str(payload.get("reasoning_effort") or ""),
             permission_mode=str(payload.get("permission_mode") or ""),
+            context_token=str(payload.get("context_token") or ""),
         )
 
     def _worker(self, agent_id: str) -> None:
@@ -781,6 +781,7 @@ class MultiCodexHub:
                         str(payload.get("permission_mode") or ""),
                         str(payload.get("bridge_conversations_path") or ""),
                         str(payload.get("bridge_event_log_path") or ""),
+                        str(payload.get("context_token") or ""),
                     ),
                 },
             )
@@ -819,11 +820,6 @@ class MultiCodexHub:
             return IpcResponseEnvelope(
                 ok=True,
                 payload={"context_left_percent": self.get_task_context_left_percent(str(payload.get("task_id") or ""))},
-            )
-        if action == "refresh_task_context_left":
-            return IpcResponseEnvelope(
-                ok=True,
-                payload={"context_left_percent": self.request_task_context_left_refresh(str(payload.get("task_id") or ""))},
             )
         if action == "refresh_external_agent_processes":
             return IpcResponseEnvelope(
@@ -892,49 +888,9 @@ class MultiCodexHub:
             self._save_state()
         return current_percent
 
-    def request_task_context_left_refresh(self, task_id: str) -> int | None:
-        task = self._find_task(task_id)
-        if task is None:
-            raise ValueError("task not found")
-        cached_percent = task.context_left_percent
-        if normalize_backend(task.backend) != "codex":
-            return cached_percent
-        now = time.monotonic()
-        with self.lock:
-            if task_id in self.context_refreshing_task_ids:
-                return cached_percent
-            last_requested_at = self.context_refresh_requested_at.get(task_id, 0.0)
-            if now - last_requested_at < CONTEXT_REFRESH_MIN_INTERVAL_SECONDS:
-                return cached_percent
-            self.context_refresh_requested_at[task_id] = now
-            self.context_refreshing_task_ids.add(task_id)
-        threading.Thread(target=self._refresh_task_context_left_worker, args=(task_id,), daemon=True).start()
-        return cached_percent
-
-    def _refresh_task_context_left_worker(self, task_id: str) -> None:
-        started_at = time.perf_counter()
-        try:
-            percent = self.get_task_context_left_percent(task_id)
-            elapsed_ms = int((time.perf_counter() - started_at) * 1000)
-            print(
-                f"[hub-perf] context_left_refresh task_id={task_id} duration_ms={elapsed_ms} "
-                f"status={'ok' if percent is not None else 'empty'}",
-                flush=True,
-            )
-        except Exception as exc:  # noqa: BLE001
-            elapsed_ms = int((time.perf_counter() - started_at) * 1000)
-            print(
-                f"[hub-perf] context_left_refresh task_id={task_id} duration_ms={elapsed_ms} "
-                f"status=failed error={str(exc)[:180]}",
-                flush=True,
-            )
-        finally:
-            with self.lock:
-                self.context_refreshing_task_ids.discard(task_id)
-
-
 def run() -> int:
     ensure_ipc_dirs()
+    cleanup_processed_requests()
     config = HubConfig.load()
     hub = MultiCodexHub(config)
     print("ChatBridge backend started in local IPC mode")

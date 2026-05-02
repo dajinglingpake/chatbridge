@@ -98,7 +98,7 @@ def _build_incoming_message(*, sender_id: str, context_token: str, text: str, in
 def _wait_for_pending_tasks(bridge: CaptureBridge, *, timeout_seconds: int) -> bool:
     deadline = time.time() + max(timeout_seconds, 5)
     while bridge.pending_tasks and time.time() < deadline:
-        bridge._poll_pending_tasks("https://example.com", "token")
+        bridge._process_bridge_ipc_once("https://example.com", "token")
         time.sleep(1.0)
     return not bridge.pending_tasks
 

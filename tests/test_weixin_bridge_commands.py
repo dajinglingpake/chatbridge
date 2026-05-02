@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -165,7 +164,12 @@ class FeedbackBridge(FakeBridge):
         raise RuntimeError(f"unexpected url: {url}")
 
     def poll_pending(self) -> None:
-        self._poll_pending_tasks("https://example.com", "token")
+        if not self.pending_tasks:
+            return
+        task_id = next(iter(self.pending_tasks))
+        data = self._ipc_request("get_task", {"task_id": task_id}, timeout_seconds=5)
+        if data.ok:
+            self._handle_pushed_task_update("https://example.com", "token", {"event": "task_update", "task": data.payload.get("task")})
 
 
 class TypingBridge(FeedbackBridge):
@@ -449,79 +453,6 @@ class WeixinBridgeCommandTests(unittest.TestCase):
             bridge._deliver_pending_restart_notice()
         self.assertTrue(any("服务已重启成功" in text for text in bridge.sent_texts))
         self.assertFalse(self.restart_notice_path.exists())
-
-    def test_poll_pending_tasks_drops_stale_missing_task(self) -> None:
-        self.pending_tasks_path.write_text(
-            json.dumps(
-                {
-                    "task-stale": {
-                        "task_id": "task-stale",
-                        "sender_id": "sender-test",
-                        "session_name": "default",
-                        "backend": "codex",
-                        "source": "wechat",
-                        "model": "-",
-                        "workdir": "/tmp",
-                        "context_token": "ctx-stale",
-                        "last_status": "running",
-                        "last_progress_seq": 0,
-                    }
-                },
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
-        bridge = FeedbackBridge(BridgeConfig.load(), [])
-        bridge.pending_tasks = bridge._load_pending_tasks()
-        with patch.object(bridge, "_ipc_request", return_value=IpcResponseEnvelope(ok=False, error="task not found")):
-            bridge._poll_pending_tasks("https://example.com", "token")
-        self.assertEqual({}, bridge.pending_tasks)
-
-    def test_poll_pending_tasks_clears_unknown_after_restart_task(self) -> None:
-        self.pending_tasks_path.write_text(
-            json.dumps(
-                {
-                    "task-restarted": {
-                        "task_id": "task-restarted",
-                        "sender_id": "sender-test",
-                        "session_name": "default",
-                        "backend": "codex",
-                        "source": "wechat",
-                        "model": "-",
-                        "workdir": "/tmp",
-                        "context_token": "ctx-restarted",
-                        "last_status": "running",
-                        "last_progress_seq": 1,
-                    }
-                },
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
-        bridge = FeedbackBridge(BridgeConfig.load(), [])
-        bridge.pending_tasks = bridge._load_pending_tasks()
-        response = IpcResponseEnvelope(
-            ok=True,
-            payload={
-                "task": {
-                    "id": "task-restarted",
-                    "sender_id": "sender-test",
-                    "session_name": "default",
-                    "status": "unknown_after_restart",
-                    "backend": "codex",
-                    "prompt": "restart",
-                    "error": "Hub restarted while this task was running.",
-                    "created_at": "2026-04-23T18:31:27",
-                    "started_at": "2026-04-23T18:31:49",
-                    "finished_at": "2026-04-23T18:37:36",
-                }
-            },
-        )
-        with patch.object(bridge, "_ipc_request", return_value=response):
-            bridge._poll_pending_tasks("https://example.com", "token")
-        self.assertEqual({}, bridge.pending_tasks)
-        self.assertTrue(bridge.sent_texts)
-        self.assertIn("Hub restarted while this task was running.", bridge.sent_texts[-1])
 
     def test_poll_once_ignores_expected_getupdates_timeout(self) -> None:
         bridge = TimeoutPollingBridge(BridgeConfig.load())
@@ -1195,13 +1126,6 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             event_log_path = Path(temp_dir) / "weixin_bridge_events.jsonl"
             bridge = FeedbackBridge(BridgeConfig.load(), [])
-            bridge.pending_tasks["task-pushed-001"] = WeixinPendingTaskState(
-                task_id="task-pushed-001",
-                sender_id="sender-test",
-                session_name="default",
-                backend="codex",
-                context_token="ctx",
-            )
             bridge.task_context_left_response = IpcResponseEnvelope(ok=True, payload={"context_left_percent": 33})
             with patch("weixin_hub_bridge.EVENT_LOG_PATH", event_log_path):
                 bridge._handle_pushed_task_update(
@@ -1219,6 +1143,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                             "backend": "codex",
                             "source": "wechat",
                             "prompt": "hello",
+                            "context_token": "ctx",
                             "progress_text": "正在处理推送进度",
                             "progress_seq": 1,
                             "created_at": "2026-04-20T12:00:00",
@@ -1229,26 +1154,23 @@ class WeixinBridgeCommandTests(unittest.TestCase):
             self.assertEqual(1, len(bridge.sent_texts))
             self.assertIn(" · ctx 33% · ", bridge.sent_texts[0].splitlines()[0])
             self.assertIn("正在处理推送进度", bridge.sent_texts[0])
-            self.assertEqual(1, bridge.pending_tasks["task-pushed-001"].last_progress_seq)
-            self.assertGreater(bridge.pending_tasks["task-pushed-001"].last_push_at, 0)
+            self.assertNotIn("task-pushed-001", bridge.pending_tasks)
 
     def test_handle_message_starts_typing_indicator_when_task_is_accepted(self) -> None:
         bridge = TypingBridge(BridgeConfig.load(), [])
         with patch("weixin_hub_bridge.time.time", return_value=100):
-            bridge._handle_message(
-                "https://example.com",
-                "token",
-                {
-                    "message_type": 1,
-                    "from_user_id": "sender-test",
-                    "context_token": "ctx-live",
-                    "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
-                },
-            )
-        deadline = time.time() + 1
-        while len(bridge.typing_calls) < 2 and time.time() < deadline:
-            time.sleep(0.01)
-        bridge.pending_tasks.clear()
+            with patch.object(bridge, "_ensure_typing_worker_started"):
+                bridge._handle_message(
+                    "https://example.com",
+                    "token",
+                    {
+                        "message_type": 1,
+                        "from_user_id": "sender-test",
+                        "context_token": "ctx-live",
+                        "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
+                    },
+                )
+            bridge._run_typing_scheduler_once("https://example.com", "token")
 
         self.assertEqual(
             [
@@ -1258,7 +1180,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
             bridge.typing_calls,
         )
 
-    def test_poll_pending_tasks_stops_typing_indicator_on_terminal_status(self) -> None:
+    def test_pushed_terminal_update_stops_typing_indicator(self) -> None:
         bridge = TypingBridge(
             BridgeConfig.load(),
             [
@@ -1288,7 +1210,17 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         tracked.typing_ticket = "ticket-typing"
         tracked.typing_last_sent_at = 95
 
-        bridge.poll_pending()
+        class ImmediateThread:
+            def __init__(self, target, args=(), daemon=None) -> None:
+                self.target = target
+                self.args = args
+                self.daemon = daemon
+
+            def start(self) -> None:
+                self.target(*self.args)
+
+        with patch("weixin_hub_bridge.threading.Thread", ImmediateThread):
+            bridge.poll_pending()
 
         self.assertEqual(
             [
