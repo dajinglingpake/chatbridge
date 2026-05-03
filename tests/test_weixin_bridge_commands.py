@@ -137,7 +137,7 @@ class FeedbackBridge(FakeBridge):
     def __init__(self, config: BridgeConfig, task_states: list[dict[str, object]]) -> None:
         self.sent_texts: list[str] = []
         self._task_states = task_states
-        self._task_poll_index = 0
+        self._task_update_index = 0
         super().__init__(config)
 
     def _ipc_request(self, action: str, payload: dict[str, object], timeout_seconds: float) -> IpcResponseEnvelope:
@@ -145,8 +145,8 @@ class FeedbackBridge(FakeBridge):
             self.submit_payloads.append(dict(payload))
             return IpcResponseEnvelope(ok=True, payload={"task": {"id": "task-feedback-001"}})
         if action == "get_task":
-            index = min(self._task_poll_index, len(self._task_states) - 1)
-            self._task_poll_index += 1
+            index = min(self._task_update_index, len(self._task_states) - 1)
+            self._task_update_index += 1
             return IpcResponseEnvelope(ok=True, payload={"task": self._task_states[index]})
         return super()._ipc_request(action, payload, timeout_seconds)
 
@@ -163,7 +163,7 @@ class FeedbackBridge(FakeBridge):
             return {"ret": 0}
         raise RuntimeError(f"unexpected url: {url}")
 
-    def poll_pending(self) -> None:
+    def process_next_pushed_update(self) -> None:
         if not self.pending_tasks:
             return
         task_id = next(iter(self.pending_tasks))
@@ -271,11 +271,16 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         self.restart_notice_path = temp_root / ".runtime" / "state" / "weixin_restart_notice.json"
         self.service_action_state_path = temp_root / ".runtime" / "state" / "service_action_state.json"
         self.state_path = temp_root / ".runtime" / "state" / "weixin_hub_bridge_state.json"
+        self.app_dir = temp_root / "app"
+        self.export_dir = temp_root / ".runtime" / "exports"
         self.session_dir = temp_root / "sessions"
         self.conversation_path.parent.mkdir(parents=True, exist_ok=True)
         self.event_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.app_dir.mkdir(parents=True, exist_ok=True)
         self.session_dir.mkdir(parents=True, exist_ok=True)
         self._patchers = [
+            patch("weixin_hub_bridge.APP_DIR", self.app_dir),
+            patch("weixin_hub_bridge.EXPORT_DIR", self.export_dir),
             patch("weixin_hub_bridge.CONVERSATION_PATH", self.conversation_path),
             patch("weixin_hub_bridge.PENDING_TASKS_PATH", self.pending_tasks_path),
             patch("weixin_hub_bridge.PROJECT_SPACES_PATH", self.project_spaces_path),
@@ -884,7 +889,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
             },
         )
         self.assertEqual([], bridge.sent_texts)
-        bridge.poll_pending()
+        bridge.process_next_pushed_update()
         self.assertTrue(bridge.sent_texts[-1].startswith("done · "))
         self.assertIn("\n\n找到 2 个会话：default, deep-dive", bridge.sent_texts[-1])
 
@@ -946,8 +951,8 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                     },
                 )
                 self.assertEqual([], bridge.sent_texts)
-                bridge.poll_pending()
-                bridge.poll_pending()
+                bridge.process_next_pushed_update()
+                bridge.process_next_pushed_update()
             self.assertEqual(1, len(bridge.sent_texts))
             self.assertTrue(bridge.sent_texts[0].startswith("done · "))
             self.assertIn("\n\nworld", bridge.sent_texts[0])
@@ -1016,9 +1021,9 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                         "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
                     },
                 )
-                bridge.poll_pending()
-                bridge.poll_pending()
-                bridge.poll_pending()
+                bridge.process_next_pushed_update()
+                bridge.process_next_pushed_update()
+                bridge.process_next_pushed_update()
             self.assertTrue(bridge.sent_texts[0].startswith("running · "))
             self.assertIn(" · ctx 21% · ", bridge.sent_texts[0].splitlines()[0])
             self.assertIn("\n\n正在分析仓库结构", bridge.sent_texts[0])
@@ -1081,8 +1086,8 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                         "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
                     },
                 )
-                bridge.poll_pending()
-                bridge.poll_pending()
+                bridge.process_next_pushed_update()
+                bridge.process_next_pushed_update()
             self.assertIn(" · ctx 18% · ", bridge.sent_texts[0].splitlines()[0])
             self.assertIn(" · ctx 18% · ", bridge.sent_texts[1].splitlines()[0])
 
@@ -1119,7 +1124,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                         "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
                     },
                 )
-                bridge.poll_pending()
+                bridge.process_next_pushed_update()
             self.assertIn(" · ctx 17% · ", bridge.sent_texts[0].splitlines()[0])
 
     def test_pushed_task_update_sends_progress_without_polling_task_state(self) -> None:
@@ -1220,7 +1225,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                 self.target(*self.args)
 
         with patch("weixin_hub_bridge.threading.Thread", ImmediateThread):
-            bridge.poll_pending()
+            bridge.process_next_pushed_update()
 
         self.assertEqual(
             [
@@ -1273,8 +1278,8 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                         "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
                     },
                 )
-                bridge.poll_pending()
-                bridge.poll_pending()
+                bridge.process_next_pushed_update()
+                bridge.process_next_pushed_update()
             self.assertEqual(2, len(bridge.sent_texts))
             self.assertTrue(bridge.sent_texts[0].startswith("running · "))
             self.assertIn("\n\n最终回答", bridge.sent_texts[0])
@@ -1331,8 +1336,8 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                         "item_list": [{"type": 1, "text_item": {"text": "列出所有会话"}}],
                     },
                 )
-                bridge.poll_pending()
-                bridge.poll_pending()
+                bridge.process_next_pushed_update()
+                bridge.process_next_pushed_update()
             self.assertEqual(2, len(bridge.sent_texts))
             self.assertTrue(bridge.sent_texts[0].startswith("running · "))
             self.assertIn("\n\n正在调用 get_sender_snapshot", bridge.sent_texts[0])
@@ -1377,7 +1382,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                     },
                 )
                 self.assertEqual([], bridge.sent_texts)
-                bridge.poll_pending()
+                bridge.process_next_pushed_update()
             self.assertIn("/retry task-feedback-001", bridge.sent_texts[-1])
             self.assertIn("Session ID: -", bridge.sent_texts[-1])
             entries = [json.loads(line) for line in event_log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -1424,8 +1429,8 @@ class WeixinBridgeCommandTests(unittest.TestCase):
             },
         )
         self.assertEqual([], bridge.sent_texts)
-        bridge.poll_pending()
-        bridge.poll_pending()
+        bridge.process_next_pushed_update()
+        bridge.process_next_pushed_update()
         self.assertIn("task was canceled", bridge.sent_texts[-1])
         self.assertIn("/retry task-feedback-001", bridge.sent_texts[-1])
 
@@ -1461,7 +1466,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         reply, handled = bridge._handle_control_command("sender-test", "/new deep-dive")
         self.assertTrue(handled)
         self.assertIn("deep-dive", reply)
-        bridge.poll_pending()
+        bridge.process_next_pushed_update()
         self.assertTrue(bridge.sent_texts[-1].startswith("done · "))
         self.assertIn("\n\nworld", bridge.sent_texts[-1])
 
@@ -1740,16 +1745,16 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         self.assertIn("Current project directory: /tmp/project-alpha", reply)
 
     def test_project_switch_updates_current_session_workdir(self) -> None:
-        project_dir = Path("/home/dajingling/PythonProjects/chatbridge/workspace/project-gamma")
+        project_dir = self.app_dir / "workspace" / "project-gamma"
         project_dir.mkdir(parents=True, exist_ok=True)
         reply, handled = self.bridge._handle_control_command("sender-test", "/project project-gamma")
         self.assertTrue(handled)
-        self.assertIn(str(project_dir), reply)
+        self.assertIn(str(project_dir.resolve()), reply)
         binding = self.bridge.conversations["sender-test"]
-        self.assertEqual(str(project_dir), binding.sessions["default"].workdir)
+        self.assertEqual(str(project_dir.resolve()), binding.sessions["default"].workdir)
 
     def test_new_session_inherits_current_project_directory(self) -> None:
-        project_dir = Path("/home/dajingling/PythonProjects/chatbridge/workspace/project-theta")
+        project_dir = self.app_dir / "workspace" / "project-theta"
         project_dir.mkdir(parents=True, exist_ok=True)
         self.bridge._handle_control_command("sender-test", "/project project-theta")
         reply, handled = self.bridge._handle_control_command("sender-test", "/new feature-a")
@@ -1759,7 +1764,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         self.assertEqual(str(project_dir.resolve()), binding.sessions["feature-a"].workdir)
 
     def test_project_reset_clears_session_override(self) -> None:
-        project_dir = Path("/home/dajingling/PythonProjects/chatbridge/workspace/project-epsilon")
+        project_dir = self.app_dir / "workspace" / "project-epsilon"
         project_dir.mkdir(parents=True, exist_ok=True)
         self.bridge._handle_control_command("sender-test", "/project project-epsilon")
         reply, handled = self.bridge._handle_control_command("sender-test", "/project reset")
@@ -1774,7 +1779,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         self.assertIn("Project directory not found: missing-project", reply)
 
     def test_project_list_shows_available_directories(self) -> None:
-        project_dir = Path("/home/dajingling/PythonProjects/chatbridge/workspace/project-delta")
+        project_dir = self.app_dir / "workspace" / "project-delta"
         project_dir.mkdir(parents=True, exist_ok=True)
         fake_hub_config = SimpleNamespace(
             agents=[_fake_agent("main", backend="codex", model="", workdir="/tmp/project-alpha", name="Main")]
@@ -1958,7 +1963,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         reply, handled = self.bridge._handle_control_command("sender-test", "/export deep-dive")
         self.assertTrue(handled)
         self.assertIn("Session history exported", reply)
-        export_path = Path("/home/dajingling/PythonProjects/chatbridge/.runtime/exports/sender-test__deep-dive.md")
+        export_path = self.export_dir / "sender-test__deep-dive.md"
         self.assertTrue(export_path.exists())
         content = export_path.read_text(encoding="utf-8")
         self.assertIn("# Session Export: deep-dive", content)
@@ -1974,7 +1979,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                 reply, handled = self.bridge._handle_control_command("sender-test", "/showfile docs/architecture.md")
         self.assertTrue(handled)
         self.assertIn("File preview", reply)
-        self.assertIn("Path: docs/architecture.md", reply)
+        self.assertIn(f"Path: {Path('docs') / 'architecture.md'}", reply)
         self.assertIn("Bridge -> Hub", reply)
 
     def test_showfile_command_denies_sensitive_paths(self) -> None:
@@ -2203,3 +2208,4 @@ class WeixinBridgeCommandTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
