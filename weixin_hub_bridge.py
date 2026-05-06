@@ -71,6 +71,7 @@ _configure_process_stdio()
 
 
 EXPORT_DIR = RUNTIME_DIR / "exports"
+UPLOAD_DIR = RUNTIME_DIR / "uploads"
 STATE_PATH = BRIDGE_STATE_PATH
 CONVERSATION_PATH = BRIDGE_CONVERSATIONS_PATH
 PENDING_TASKS_PATH = BRIDGE_PENDING_TASKS_PATH
@@ -79,6 +80,7 @@ MESSAGE_AUDIT_LOG_PATH = BRIDGE_MESSAGE_AUDIT_LOG_PATH
 RESTART_NOTICE_PATH = BRIDGE_RESTART_NOTICE_PATH
 SERVICE_ACTION_STATE_FILE = SERVICE_ACTION_STATE_PATH
 PROJECT_SPACES_PATH = BRIDGE_PROJECT_SPACES_PATH
+PENDING_MEDIA_CONTEXT_PATH = STATE_DIR / "weixin_pending_media_context.json"
 DEFAULT_WEIXIN_BASE_URL = "https://ilinkai.weixin.qq.com"
 DEFAULT_WEIXIN_CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c"
 ILINK_APP_ID = "bot"
@@ -93,10 +95,13 @@ PERF_LOG_MIN_SECONDS = 0.25
 ACTIVE_GETUPDATES_SLOW_LOG_SECONDS = 1.0
 CONTEXT_LEFT_QUERY_TIMEOUT_SECONDS = 2.0
 MEDIA_SEND_MAX_BYTES = 25 * 1024 * 1024
+MEDIA_RECEIVE_MAX_BYTES = 50 * 1024 * 1024
+MEDIA_CONTEXT_TTL_SECONDS = 10 * 60
 MEDIA_UPLOAD_TYPE_IMAGE = 1
 MEDIA_UPLOAD_TYPE_FILE = 3
 MESSAGE_ITEM_TYPE_IMAGE = 2
 MESSAGE_ITEM_TYPE_FILE = 4
+INCOMING_MEDIA_ITEM_TYPES = frozenset({MESSAGE_ITEM_TYPE_IMAGE, MESSAGE_ITEM_TYPE_FILE})
 SHOWFILE_PREVIEW_LIMIT = 3200
 SENDMEDIA_IMAGE_EXTENSIONS = frozenset({".bmp", ".gif", ".jpeg", ".jpg", ".png", ".webp"})
 SHOWFILE_ALLOWED_EXTENSIONS = frozenset(
@@ -147,6 +152,13 @@ def _encrypt_aes_128_ecb(data: bytes, key: bytes) -> bytes:
     return encryptor.update(padded) + encryptor.finalize()
 
 
+def _decrypt_aes_128_ecb(data: bytes, key: bytes) -> bytes:
+    decryptor = Cipher(algorithms.AES(key), modes.ECB()).decryptor()
+    padded = decryptor.update(data) + decryptor.finalize()
+    unpadder = padding.PKCS7(128).unpadder()
+    return unpadder.update(padded) + unpadder.finalize()
+
+
 def resolve_bridge_language(config_language: str) -> str:
     cleaned = str(config_language or "").strip()
     if cleaned and cleaned.lower() != "auto":
@@ -185,6 +197,7 @@ class WeixinBridge:
         self.conversation_path = account_conversation_path(CONVERSATION_PATH, config.active_account_id, self.account_path)
         self.conversations = self._load_conversations()
         self.pending_tasks = self._load_pending_tasks()
+        self.pending_media_context = self._load_pending_media_context()
         self._recent_message_keys: list[str] = []
         self._recent_message_fingerprints: dict[str, float] = {}
         self._send_worker_started = False
@@ -484,16 +497,14 @@ class WeixinBridge:
 
     def _handle_message(self, base_url: str, token: str, msg: dict[str, Any]) -> None:
         message_started = time.perf_counter()
-        if msg.get("message_type") != 1:
-            return
-
         sender_id = str(msg.get("from_user_id") or "").strip()
         if not sender_id:
             return
         self._remember_context_token(sender_id, msg.get("context_token"))
 
         text = self._extract_text(msg)
-        if not text:
+        has_media = self._has_incoming_media(msg)
+        if not text and not has_media:
             return
         if any(text.startswith(prefix) for prefix in self.config.ignore_prefixes):
             self._append_message_audit(
@@ -511,6 +522,25 @@ class WeixinBridge:
                 route="ignored",
                 reason="duplicate",
             )
+            return
+        media_attachments, media_errors = self._extract_media_attachments(base_url, token, sender_id, msg)
+        if not text:
+            if media_attachments:
+                self._remember_pending_media_context(sender_id, media_attachments)
+                self._append_message_audit(
+                    sender_id=sender_id,
+                    text="",
+                    route="media_context",
+                    attachment_count=len(media_attachments),
+                    error_count=len(media_errors),
+                )
+                self.state.record_handled()
+                self._save_state()
+                return
+            if media_errors:
+                self._send_text(base_url, token, sender_id, msg.get("context_token"), "附件接收失败：\n" + "\n".join(media_errors))
+                self.state.record_failed()
+                self._save_state()
             return
 
         binding = self._ensure_conversation(sender_id)
@@ -610,6 +640,8 @@ class WeixinBridge:
                 self._save_state()
                 return
             prompt = passthrough_prompt
+        pending_media_attachments = self._consume_pending_media_context(sender_id)
+        prompt = self._build_prompt_with_media(prompt, [*pending_media_attachments, *media_attachments], media_errors)
         if not prompt:
             self._append_message_audit(
                 sender_id=sender_id,
@@ -1465,13 +1497,177 @@ class WeixinBridge:
                     parts.append(text)
         return "\n".join(parts).strip()
 
+    @staticmethod
+    def _has_incoming_media(msg: dict[str, Any]) -> bool:
+        return any(isinstance(item, dict) and item.get("type") in INCOMING_MEDIA_ITEM_TYPES for item in msg.get("item_list") or [])
+
+    def _extract_media_attachments(
+        self,
+        base_url: str,
+        token: str,
+        sender_id: str,
+        msg: dict[str, Any],
+    ) -> tuple[list[dict[str, str]], list[str]]:
+        attachments: list[dict[str, str]] = []
+        errors: list[str] = []
+        for index, item in enumerate(msg.get("item_list") or [], start=1):
+            if not isinstance(item, dict) or item.get("type") not in INCOMING_MEDIA_ITEM_TYPES:
+                continue
+            try:
+                attachments.append(self._save_incoming_media_item(base_url, token, sender_id, item, index=index))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"- 第 {index} 个附件：{str(exc)}")
+                print(f"[bridge] incoming media save failed sender={sender_id} index={index}: {exc}", flush=True)
+        return attachments, errors
+
+    def _save_incoming_media_item(
+        self,
+        base_url: str,
+        token: str,
+        sender_id: str,
+        item: dict[str, Any],
+        *,
+        index: int,
+    ) -> dict[str, str]:
+        raw_type = item.get("type")
+        if raw_type == MESSAGE_ITEM_TYPE_IMAGE:
+            kind = "image"
+            payload = item.get("image_item") or {}
+            default_name = f"image-{index}.jpg"
+        elif raw_type == MESSAGE_ITEM_TYPE_FILE:
+            kind = "file"
+            payload = item.get("file_item") or {}
+            default_name = f"file-{index}"
+        else:
+            raise ValueError(f"unsupported media item type: {raw_type}")
+        if not isinstance(payload, dict):
+            raise ValueError("invalid media item payload")
+        media = payload.get("media") or {}
+        if not isinstance(media, dict):
+            raise ValueError("missing media metadata")
+        raw_name = str(payload.get("file_name") or payload.get("name") or media.get("file_name") or default_name)
+        filename = self._safe_incoming_media_filename(raw_name, fallback=default_name)
+        saved_path = self._download_incoming_media_file(
+            base_url,
+            token,
+            sender_id,
+            media,
+            filename=filename,
+        )
+        return {"kind": kind, "name": filename, "path": str(saved_path)}
+
+    def _download_incoming_media_file(
+        self,
+        base_url: str,
+        token: str,
+        sender_id: str,
+        media: dict[str, Any],
+        *,
+        filename: str,
+    ) -> Path:
+        download_url = self._incoming_media_download_url(base_url, media)
+        request = urllib.request.Request(download_url, headers={"Authorization": f"Bearer {token}"} if token else {}, method="GET")
+        with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310 - URL comes from the authenticated WeChat payload
+            ciphertext = response.read(MEDIA_RECEIVE_MAX_BYTES + 1)
+        if len(ciphertext) > MEDIA_RECEIVE_MAX_BYTES:
+            raise ValueError(f"file is too large: {len(ciphertext)} bytes")
+        data = ciphertext
+        if str(media.get("encrypt_type") or "").strip() == "1" or media.get("aes_key"):
+            data = _decrypt_aes_128_ecb(ciphertext, self._decode_media_aes_key(media.get("aes_key")))
+        sender_dir = UPLOAD_DIR / self._safe_path_part(sender_id or "unknown")
+        sender_dir.mkdir(parents=True, exist_ok=True)
+        target = sender_dir / f"{int(time.time() * 1000)}-{secrets.token_hex(4)}-{filename}"
+        target.write_bytes(data)
+        return target
+
+    def _incoming_media_download_url(self, base_url: str, media: dict[str, Any]) -> str:
+        for key in ("download_url", "url", "cdn_url", "full_url"):
+            value = str(media.get(key) or "").strip()
+            if value:
+                return value
+        download_param = str(media.get("encrypt_query_param") or media.get("download_param") or "").strip()
+        if not download_param:
+            raise ValueError("missing media download parameter")
+        return f"{DEFAULT_WEIXIN_CDN_BASE_URL}/download?encrypted_query_param={urllib.parse.quote(download_param, safe='')}"
+
+    @staticmethod
+    def _decode_media_aes_key(value: Any) -> bytes:
+        raw = str(value or "").strip()
+        if not raw:
+            raise ValueError("missing media aes key")
+        if len(raw) == 32:
+            try:
+                return bytes.fromhex(raw)
+            except ValueError:
+                pass
+        try:
+            decoded = base64.b64decode(raw, validate=True)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError("invalid media aes key") from exc
+        if len(decoded) == 16:
+            return decoded
+        try:
+            decoded_text = decoded.decode("ascii").strip()
+        except UnicodeDecodeError as exc:
+            raise ValueError("invalid media aes key length") from exc
+        if len(decoded_text) == 32:
+            try:
+                return bytes.fromhex(decoded_text)
+            except ValueError as exc:
+                raise ValueError("invalid media aes key hex") from exc
+        raise ValueError("invalid media aes key length")
+
+    @staticmethod
+    def _safe_path_part(value: str) -> str:
+        cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "-" for ch in str(value or "").strip())
+        return cleaned.strip(".-") or "unknown"
+
+    def _safe_incoming_media_filename(self, value: str, *, fallback: str) -> str:
+        candidate = Path(str(value or "").replace("\\", "/")).name
+        safe = self._safe_path_part(candidate)
+        return safe if safe and safe != "unknown" else fallback
+
+    @staticmethod
+    def _build_prompt_with_media(prompt: str, attachments: list[dict[str, str]], errors: list[str]) -> str:
+        parts: list[str] = []
+        cleaned_prompt = str(prompt or "").strip()
+        if cleaned_prompt:
+            parts.append(cleaned_prompt)
+        if attachments:
+            lines = ["用户发送了以下附件，已保存到本地："]
+            for attachment in attachments:
+                label = "图片" if attachment.get("kind") == "image" else "文件"
+                lines.append(f"- {label}: {attachment.get('name') or '-'}")
+                lines.append(f"  本地路径: {attachment.get('path') or '-'}")
+            if not cleaned_prompt:
+                lines.append("请根据这些附件继续处理。")
+            parts.append("\n".join(lines))
+        if errors:
+            parts.append("以下附件接收失败：\n" + "\n".join(errors))
+        return "\n\n".join(part for part in parts if part).strip()
+
     def _message_key(self, msg: dict[str, Any], text: str) -> str:
+        media_fingerprint: list[dict[str, str]] = []
+        for item in msg.get("item_list") or []:
+            if not isinstance(item, dict) or item.get("type") not in INCOMING_MEDIA_ITEM_TYPES:
+                continue
+            payload = item.get("image_item") if item.get("type") == MESSAGE_ITEM_TYPE_IMAGE else item.get("file_item")
+            payload = payload if isinstance(payload, dict) else {}
+            media = payload.get("media") if isinstance(payload.get("media"), dict) else {}
+            media_fingerprint.append(
+                {
+                    "type": str(item.get("type") or ""),
+                    "name": str(payload.get("file_name") or payload.get("name") or ""),
+                    "download": str(media.get("encrypt_query_param") or media.get("download_param") or media.get("download_url") or media.get("url") or ""),
+                }
+            )
         payload = {
             "id": msg.get("msg_id") or msg.get("message_id") or msg.get("client_id") or "",
             "context_token": msg.get("context_token") or "",
             "sender_id": msg.get("from_user_id") or "",
             "create_time": msg.get("create_time") or msg.get("create_timestamp") or "",
             "text": text,
+            "media": media_fingerprint,
         }
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
         return hashlib.sha1(encoded).hexdigest()
@@ -3376,6 +3572,78 @@ class WeixinBridge:
                 PENDING_TASKS_PATH,
                 {task_id: tracked.to_dict() for task_id, tracked in self.pending_tasks.items()},
             )
+
+    def _load_pending_media_context(self) -> dict[str, list[dict[str, str]]]:
+        payload = load_json(PENDING_MEDIA_CONTEXT_PATH, {}, expect_type=dict)
+        if not isinstance(payload, dict):
+            return {}
+        now_seconds = int(time.time())
+        contexts: dict[str, list[dict[str, str]]] = {}
+        for sender_id, raw_items in payload.items():
+            cleaned_sender_id = str(sender_id or "").strip()
+            if not cleaned_sender_id or not isinstance(raw_items, list):
+                continue
+            items: list[dict[str, str]] = []
+            for raw_item in raw_items:
+                if not isinstance(raw_item, dict):
+                    continue
+                created_at = int(raw_item.get("created_at") or 0)
+                if created_at and now_seconds - created_at > MEDIA_CONTEXT_TTL_SECONDS:
+                    continue
+                path = str(raw_item.get("path") or "").strip()
+                if not path:
+                    continue
+                items.append(
+                    {
+                        "kind": str(raw_item.get("kind") or "file").strip() or "file",
+                        "name": str(raw_item.get("name") or Path(path).name).strip() or Path(path).name,
+                        "path": path,
+                        "created_at": str(created_at or now_seconds),
+                    }
+                )
+            if items:
+                contexts[cleaned_sender_id] = items
+        return contexts
+
+    def _save_pending_media_context(self) -> None:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        save_json(PENDING_MEDIA_CONTEXT_PATH, self.pending_media_context)
+
+    def _remember_pending_media_context(self, sender_id: str, attachments: list[dict[str, str]]) -> None:
+        cleaned_sender_id = str(sender_id or "").strip()
+        if not cleaned_sender_id or not attachments:
+            return
+        now_value = str(int(time.time()))
+        pending = self.pending_media_context.get(cleaned_sender_id, [])
+        for attachment in attachments:
+            pending.append(
+                {
+                    "kind": str(attachment.get("kind") or "file"),
+                    "name": str(attachment.get("name") or Path(str(attachment.get("path") or "")).name),
+                    "path": str(attachment.get("path") or ""),
+                    "created_at": now_value,
+                }
+            )
+        self.pending_media_context[cleaned_sender_id] = pending[-10:]
+        self._save_pending_media_context()
+
+    def _consume_pending_media_context(self, sender_id: str) -> list[dict[str, str]]:
+        cleaned_sender_id = str(sender_id or "").strip()
+        if not cleaned_sender_id:
+            return []
+        raw_attachments = self.pending_media_context.pop(cleaned_sender_id, [])
+        now_seconds = int(time.time())
+        attachments: list[dict[str, str]] = []
+        for attachment in raw_attachments:
+            try:
+                created_at = int(attachment.get("created_at") or 0)
+            except (TypeError, ValueError):
+                created_at = 0
+            if now_seconds - created_at <= MEDIA_CONTEXT_TTL_SECONDS:
+                attachments.append(attachment)
+        if raw_attachments:
+            self._save_pending_media_context()
+        return attachments
 
     def _load_conversations(self) -> dict[str, Any]:
         source_path = self.conversation_path

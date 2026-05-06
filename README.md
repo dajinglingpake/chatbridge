@@ -18,7 +18,7 @@ Technically, the system has five layers:
 - **Application layer**: `WeixinBridge` handles WeChat messages, slash commands, and queued text replies; `AgentHub` handles task queues, sessions, agent dispatch, and `ctx%` aggregation; `App Service` handles Hub / Bridge lifecycle.
 - **Backend adapter layer**: `agent_backends/` normalizes Codex, Claude, and OpenCode CLI differences.
 - **State layer**: in addition to project-local config, accounts, task state, event logs, session files, exports, and work directories, `ctx%` reads Codex native local state from `~/.codex/state_*.sqlite` and the matching `rollout-*.jsonl`.
-- **Outbound messaging and media layer**: text replies and notices flow through a shared `Text Outbox`, then the Bridge sender worker serializes delivery to WeChat; MCP tool `send_weixin_media(target_sender_id, path)` is the primary media entrypoint, WeChat `/sendfile` reuses the same implementation, and both call iLink `getuploadurl`, upload to WeChat CDN, then send `text_item`, `image_item`, or `file_item` with `sendmessage`.
+- **Messaging and media layer**: text replies and notices flow through a shared `Text Outbox`, then the Bridge sender worker serializes delivery to WeChat; MCP tool `send_weixin_media(target_sender_id, path)` is the primary outbound media entrypoint, WeChat `/sendfile` reuses the same implementation, and incoming `image_item` / `file_item` messages are downloaded to `.runtime/uploads`; media-only messages are cached as context for the sender's next text prompt.
 
 ## Repository Status
 

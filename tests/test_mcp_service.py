@@ -71,7 +71,8 @@ class McpServiceTests(unittest.TestCase):
         self.assertNotEqual(target_file, sent_file)
         self.assertEqual(target_file.read_bytes(), sent_file.read_bytes())
         self.assertEqual(target_file.suffix, sent_file.suffix)
-        self.assertIn(".runtime/exports/", str(sent_file))
+        self.assertIn(".runtime", sent_file.parts)
+        self.assertIn("exports", sent_file.parts)
         self.assertEqual(str(target_file), result.data["source_path"])
         self.assertEqual(sent_file.name, result.data["file_name"])
 

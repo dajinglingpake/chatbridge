@@ -265,6 +265,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         temp_root = Path(self._tempdir.name)
         self.conversation_path = temp_root / ".runtime" / "state" / "weixin_conversations.json"
         self.pending_tasks_path = temp_root / ".runtime" / "state" / "weixin_pending_tasks.json"
+        self.pending_media_context_path = temp_root / ".runtime" / "state" / "weixin_pending_media_context.json"
         self.project_spaces_path = temp_root / ".runtime" / "state" / "project_spaces.json"
         self.event_log_path = temp_root / ".runtime" / "logs" / "weixin_bridge_events.jsonl"
         self.message_audit_log_path = temp_root / ".runtime" / "logs" / "weixin_bridge_message_audit.jsonl"
@@ -283,6 +284,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
             patch("weixin_hub_bridge.EXPORT_DIR", self.export_dir),
             patch("weixin_hub_bridge.CONVERSATION_PATH", self.conversation_path),
             patch("weixin_hub_bridge.PENDING_TASKS_PATH", self.pending_tasks_path),
+            patch("weixin_hub_bridge.PENDING_MEDIA_CONTEXT_PATH", self.pending_media_context_path),
             patch("weixin_hub_bridge.PROJECT_SPACES_PATH", self.project_spaces_path),
             patch("weixin_hub_bridge.EVENT_LOG_PATH", self.event_log_path),
             patch("weixin_hub_bridge.MESSAGE_AUDIT_LOG_PATH", self.message_audit_log_path),
@@ -2021,6 +2023,135 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         self.assertEqual(1, len(sent_paths))
         self.assertEqual("architecture.md", sent_paths[0].name)
         self.assertEqual([], bridge.sent_texts)
+
+    def test_handle_message_caches_image_for_next_text_message(self) -> None:
+        bridge = FeedbackBridge(BridgeConfig.load(), [])
+        saved_image = self.app_dir / "received" / "image.png"
+        saved_image.parent.mkdir(parents=True, exist_ok=True)
+        saved_image.write_bytes(b"png")
+
+        def fake_download(_base_url, _token, _sender_id, media, *, filename: str) -> Path:
+            self.assertEqual("download-param", media["encrypt_query_param"])
+            self.assertEqual("image-1.jpg", filename)
+            return saved_image
+
+        bridge._download_incoming_media_file = fake_download  # type: ignore[method-assign]
+        with patch.object(bridge, "_ensure_typing_worker_started"):
+            bridge._handle_message(
+                "https://example.com",
+                "token",
+                {
+                    "message_type": 2,
+                    "client_id": "image-message",
+                    "from_user_id": "sender-test",
+                    "context_token": "ctx",
+                    "item_list": [
+                        {
+                            "type": 2,
+                            "image_item": {
+                                "media": {
+                                    "encrypt_query_param": "download-param",
+                                    "aes_key": "00112233445566778899aabbccddeeff",
+                                    "encrypt_type": 1,
+                                }
+                            },
+                        }
+                    ],
+                },
+            )
+
+        self.assertEqual([], bridge.submit_payloads)
+        self.assertIn("sender-test", bridge.pending_media_context)
+        with patch.object(bridge, "_ensure_typing_worker_started"):
+            bridge._handle_message(
+                "https://example.com",
+                "token",
+                {
+                    "message_type": 1,
+                    "client_id": "caption-message",
+                    "from_user_id": "sender-test",
+                    "context_token": "ctx",
+                    "item_list": [{"type": 1, "text_item": {"text": "你能看到这张图吗"}}],
+                },
+            )
+
+        prompt = bridge.submit_payloads[-1]["prompt"]
+        self.assertTrue(prompt.startswith("你能看到这张图吗"))
+        self.assertIn("用户发送了以下附件", prompt)
+        self.assertIn("图片: image-1.jpg", prompt)
+        self.assertIn(str(saved_image), prompt)
+        self.assertNotIn("sender-test", bridge.pending_media_context)
+
+    def test_handle_message_submits_text_with_file_attachment_path(self) -> None:
+        bridge = FeedbackBridge(BridgeConfig.load(), [])
+        saved_file = self.app_dir / "received" / "report.pdf"
+        saved_file.parent.mkdir(parents=True, exist_ok=True)
+        saved_file.write_bytes(b"pdf")
+
+        def fake_download(_base_url, _token, _sender_id, media, *, filename: str) -> Path:
+            self.assertEqual("download-param", media["encrypt_query_param"])
+            self.assertEqual("report.pdf", filename)
+            return saved_file
+
+        bridge._download_incoming_media_file = fake_download  # type: ignore[method-assign]
+        with patch.object(bridge, "_ensure_typing_worker_started"):
+            bridge._handle_message(
+                "https://example.com",
+                "token",
+                {
+                    "message_type": 2,
+                    "from_user_id": "sender-test",
+                    "context_token": "ctx",
+                    "item_list": [
+                        {"type": 1, "text_item": {"text": "请总结这个文件"}},
+                        {
+                            "type": 4,
+                            "file_item": {
+                                "file_name": "report.pdf",
+                                "media": {
+                                    "encrypt_query_param": "download-param",
+                                    "aes_key": "00112233445566778899aabbccddeeff",
+                                    "encrypt_type": 1,
+                                },
+                            },
+                        },
+                    ],
+                },
+            )
+
+        prompt = bridge.submit_payloads[-1]["prompt"]
+        self.assertTrue(prompt.startswith("请总结这个文件"))
+        self.assertIn("文件: report.pdf", prompt)
+        self.assertIn(str(saved_file), prompt)
+
+    def test_handle_message_ignores_expired_pending_media_context(self) -> None:
+        bridge = FeedbackBridge(BridgeConfig.load(), [])
+        bridge.pending_media_context["sender-test"] = [
+            {
+                "kind": "image",
+                "name": "old.jpg",
+                "path": str(self.app_dir / "received" / "old.jpg"),
+                "created_at": "100",
+            }
+        ]
+
+        with patch("weixin_hub_bridge.time.time", return_value=100 + 11 * 60):
+            with patch.object(bridge, "_ensure_typing_worker_started"):
+                bridge._handle_message(
+                    "https://example.com",
+                    "token",
+                    {
+                        "message_type": 1,
+                        "client_id": "caption-message",
+                        "from_user_id": "sender-test",
+                        "context_token": "ctx",
+                        "item_list": [{"type": 1, "text_item": {"text": "这条不应该带旧图"}}],
+                    },
+                )
+
+        prompt = bridge.submit_payloads[-1]["prompt"]
+        self.assertEqual("这条不应该带旧图", prompt)
+        self.assertNotIn("sender-test", bridge.pending_media_context)
 
     def test_send_media_file_builds_image_message_item(self) -> None:
         bridge = FakeBridge(BridgeConfig.load())
