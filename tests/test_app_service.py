@@ -90,3 +90,27 @@ class AppServiceTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(["start", "notify"], events)
         mocked_notify.assert_called_once()
+
+    def test_qq_bridge_action_does_not_notify_weixin(self) -> None:
+        with (
+            patch("core.app_service.restart_qq_bridge", return_value=["QQ Bridge stopped", "QQ Bridge started"]) as mocked_restart,
+            patch("core.app_service.broadcast_weixin_notice_by_kind") as mocked_notify,
+        ):
+            result = run_named_action("restart-qq-bridge")
+
+        self.assertTrue(result.ok)
+        self.assertEqual("QQ Bridge stopped | QQ Bridge started", result.message)
+        mocked_restart.assert_called_once()
+        mocked_notify.assert_not_called()
+
+    def test_restart_onebot_runtime_is_allowed_without_weixin_notice(self) -> None:
+        with (
+            patch("core.app_service.restart_onebot_runtime", return_value=["OneBot restarted"]) as mocked_restart,
+            patch("core.app_service.broadcast_weixin_notice_by_kind") as mocked_notify,
+        ):
+            result = run_named_action("restart-onebot-runtime")
+
+        self.assertTrue(result.ok)
+        self.assertEqual("OneBot restarted", result.message)
+        mocked_restart.assert_called_once()
+        mocked_notify.assert_not_called()

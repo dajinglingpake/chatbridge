@@ -705,7 +705,8 @@ class MultiCodexHub:
             self._save_state()
 
     def _push_bridge_task_update(self, task: HubTask, *, event: str) -> None:
-        if not task.source.strip().lower().startswith("wechat"):
+        channel = self._bridge_channel_for_task(task)
+        if not channel:
             return
         if not task.sender_id.strip():
             return
@@ -716,9 +717,19 @@ class MultiCodexHub:
                     "event": event,
                     "task": task.to_dict(),
                 },
+                channel=channel,
             )
         except Exception as exc:  # noqa: BLE001
             print(f"[hub] bridge task_update push failed task_id={task.id} event={event}: {exc}", flush=True)
+
+    @staticmethod
+    def _bridge_channel_for_task(task: HubTask) -> str:
+        source = task.source.strip().lower()
+        if source.startswith("wechat"):
+            return "wechat"
+        if source.startswith("qq"):
+            return "qq"
+        return ""
 
     def _resolve_task_workdir(self, agent: AgentConfig, task: HubTask) -> str:
         return task.workdir.strip() or agent.workdir

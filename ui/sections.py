@@ -274,9 +274,9 @@ def render_home_section(
                         ui.button(_tr(t, "ui.primary.stop.label", "停止服务"), on_click=lambda: on_run_action("stop"), icon="stop")
                         ui.button(_tr(t, "ui.web.action.restart", "重启服务"), on_click=lambda: on_run_action("restart"), icon="restart_alt")
                     else:
-                        ui.button(_tr(t, "ui.web.action.switch_qq_mode", "切换到 QQ 模式"), on_click=lambda: on_run_action("start-qq-bridge"), icon="play_arrow")
-                        ui.button(_tr(t, "ui.web.action.stop_qq_bridge", "停止 QQ 桥"), on_click=lambda: on_run_action("stop-qq-bridge"), icon="stop").props("outline")
-                        ui.button(_tr(t, "ui.web.action.restart_qq_bridge", "重启 QQ 桥"), on_click=lambda: on_run_action("restart-qq-bridge"), icon="restart_alt").props("outline")
+                        ui.button(_tr(t, "ui.primary.start.label", "启动服务"), on_click=lambda: on_run_action("start-qq-bridge"), icon="play_arrow")
+                        ui.button(_tr(t, "ui.primary.stop.label", "停止服务"), on_click=lambda: on_run_action("stop-qq-bridge"), icon="stop")
+                        ui.button(_tr(t, "ui.web.action.restart", "重启服务"), on_click=lambda: on_run_action("restart-qq-bridge"), icon="restart_alt")
                         ui.button(_tr(t, "ui.web.action.restart_onebot_runtime", "重启 QQ OneBot"), on_click=lambda: on_run_action("restart-onebot-runtime"), icon="restart_alt").props("outline")
                     ui.button(_tr(t, "ui.web.action.emergency_stop", "紧急停止"), on_click=lambda: on_run_action("emergency-stop"), color="negative", icon="warning")
 

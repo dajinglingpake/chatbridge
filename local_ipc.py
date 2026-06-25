@@ -18,13 +18,39 @@ RESPONSE_DIR = IPC_DIR / "responses"
 PROCESSED_DIR = IPC_DIR / "processed"
 BRIDGE_REQUEST_DIR = IPC_DIR / "bridge_requests"
 BRIDGE_PROCESSED_DIR = IPC_DIR / "bridge_processed"
+BRIDGE_CHANNELS_DIR = IPC_DIR / "bridge_channels"
 IPC_POLL_INTERVAL_SECONDS = 0.05
 PROCESSED_RETENTION_SECONDS = 24 * 60 * 60
 
 
 def ensure_ipc_dirs() -> None:
-    for path in [IPC_DIR, REQUEST_DIR, RESPONSE_DIR, PROCESSED_DIR, BRIDGE_REQUEST_DIR, BRIDGE_PROCESSED_DIR]:
+    for path in [IPC_DIR, REQUEST_DIR, RESPONSE_DIR, PROCESSED_DIR, BRIDGE_REQUEST_DIR, BRIDGE_PROCESSED_DIR, BRIDGE_CHANNELS_DIR]:
         path.mkdir(parents=True, exist_ok=True)
+
+
+def _safe_bridge_channel(channel: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in str(channel or "").strip().lower())
+    return cleaned.strip("-_") or "wechat"
+
+
+def bridge_request_dir(channel: str = "wechat") -> Path:
+    ensure_ipc_dirs()
+    cleaned = _safe_bridge_channel(channel)
+    if cleaned == "wechat":
+        return BRIDGE_REQUEST_DIR
+    path = BRIDGE_CHANNELS_DIR / cleaned / "requests"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def bridge_processed_dir(channel: str = "wechat") -> Path:
+    ensure_ipc_dirs()
+    cleaned = _safe_bridge_channel(channel)
+    if cleaned == "wechat":
+        return BRIDGE_PROCESSED_DIR
+    path = BRIDGE_CHANNELS_DIR / cleaned / "processed"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def create_request(action: str, payload: dict[str, Any]) -> str:
@@ -38,10 +64,9 @@ def create_request(action: str, payload: dict[str, Any]) -> str:
     return request_id
 
 
-def create_bridge_request(action: str, payload: dict[str, Any]) -> str:
-    ensure_ipc_dirs()
+def create_bridge_request(action: str, payload: dict[str, Any], *, channel: str = "wechat") -> str:
     request_id = f"bridge-req-{time.time_ns()}-{uuid.uuid4().hex}"
-    request_path = BRIDGE_REQUEST_DIR / f"{request_id}.json"
+    request_path = bridge_request_dir(channel) / f"{request_id}.json"
     save_json(
         request_path,
         IpcRequestEnvelope(id=request_id, action=action, payload=payload).to_dict(),
@@ -88,16 +113,20 @@ def mark_processed(request_path: Path) -> None:
     request_path.replace(target)
 
 
-def mark_bridge_processed(request_path: Path) -> None:
-    ensure_ipc_dirs()
-    target = BRIDGE_PROCESSED_DIR / request_path.name
+def mark_bridge_processed(request_path: Path, *, channel: str = "wechat") -> None:
+    target = bridge_processed_dir(channel) / request_path.name
     request_path.replace(target)
 
 
 def cleanup_processed_requests(*, max_age_seconds: int = PROCESSED_RETENTION_SECONDS) -> None:
     ensure_ipc_dirs()
     cutoff = time.time() - max_age_seconds
-    for directory in (PROCESSED_DIR, BRIDGE_PROCESSED_DIR):
+    directories = [PROCESSED_DIR, BRIDGE_PROCESSED_DIR]
+    for channel_root in BRIDGE_CHANNELS_DIR.glob("*"):
+        processed_dir = channel_root / "processed"
+        if processed_dir.is_dir():
+            directories.append(processed_dir)
+    for directory in directories:
         for path in directory.glob("*.json"):
             try:
                 if path.stat().st_mtime < cutoff:

@@ -10,6 +10,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from core.bridge_pending_tasks import BridgePendingReplyTask
+from core.state_models import HubTask
+import local_ipc
 from qq_onebot_bridge import DEFAULT_QQ_AGENT_ID, QQOneBotBridge
 from http.server import ThreadingHTTPServer
 
@@ -56,9 +59,13 @@ class QQOneBotBridgeTests(unittest.TestCase):
         self.addCleanup(self._tempdir.cleanup)
         self.temp_path = Path(self._tempdir.name)
         self.state_path = self.temp_path / "qq_media.json"
-        patcher = patch("qq_onebot_bridge.ONEBOT_STATE_PATH", self.state_path)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        self.pending_tasks_path = self.temp_path / "qq_pending_tasks.json"
+        media_patcher = patch("qq_onebot_bridge.ONEBOT_STATE_PATH", self.state_path)
+        task_patcher = patch("qq_onebot_bridge.QQ_PENDING_TASKS_PATH", self.pending_tasks_path)
+        media_patcher.start()
+        task_patcher.start()
+        self.addCleanup(media_patcher.stop)
+        self.addCleanup(task_patcher.stop)
 
     def test_media_only_message_caches_attachment_for_next_text(self) -> None:
         bridge = FakeQQBridge(self.temp_path)
@@ -204,6 +211,373 @@ class QQOneBotBridgeTests(unittest.TestCase):
 
         self.assertEqual(1, len(bridge.submitted))
         self.assertEqual("//help", bridge.submitted[0][1])
+
+    def test_wait_and_reply_streams_progress_before_final_reply(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        responses = [
+            SimpleNamespace(
+                ok=True,
+                payload={
+                    "task": {
+                        "id": "task-qq-001",
+                        "agent_id": "qq",
+                        "agent_name": "QQ 会话",
+                        "backend": "codex",
+                        "source": "qq",
+                        "sender_id": "qq:private:10001",
+                        "prompt": "hello",
+                        "status": "running",
+                        "created_at": "2026-06-26T01:00:00",
+                        "started_at": "2026-06-26T01:00:01",
+                        "finished_at": "",
+                        "output": "",
+                        "error": "",
+                        "session_name": "qq-private-10001",
+                        "progress_text": "正在检查项目",
+                        "progress_at": "2026-06-26T01:00:02",
+                        "progress_seq": 1,
+                    }
+                },
+            ),
+            SimpleNamespace(
+                ok=True,
+                payload={
+                    "task": {
+                        "id": "task-qq-001",
+                        "agent_id": "qq",
+                        "agent_name": "QQ 会话",
+                        "backend": "codex",
+                        "source": "qq",
+                        "sender_id": "qq:private:10001",
+                        "prompt": "hello",
+                        "status": "succeeded",
+                        "created_at": "2026-06-26T01:00:00",
+                        "started_at": "2026-06-26T01:00:01",
+                        "finished_at": "2026-06-26T01:00:05",
+                        "output": "检查完成",
+                        "error": "",
+                        "session_name": "qq-private-10001",
+                        "progress_text": "正在检查项目",
+                        "progress_at": "2026-06-26T01:00:02",
+                        "progress_seq": 1,
+                    }
+                },
+            ),
+        ]
+
+        context_response = SimpleNamespace(ok=True, payload={"context_left_percent": 42})
+        with patch("qq_onebot_bridge.create_request", return_value="req-get-task"), patch("qq_onebot_bridge.wait_for_response", side_effect=responses), patch.object(
+            bridge,
+            "_ipc_request",
+            return_value=context_response,
+        ):
+            QQOneBotBridge._wait_and_reply(bridge, {"message_type": "private", "user_id": 10001}, "task-qq-001")
+
+        sent_messages = [payload["message"] for action, payload in bridge.api_calls if action == "send_private_msg"]
+        self.assertEqual(2, len(sent_messages))
+        self.assertIn("正在检查项目", sent_messages[0])
+        self.assertIn("ctx 42%", sent_messages[0].splitlines()[0])
+        self.assertIn("检查完成", sent_messages[1])
+        self.assertIn("ctx 42%", sent_messages[1].splitlines()[0])
+        typing_calls = [payload for action, payload in bridge.api_calls if action == "set_input_status"]
+        self.assertEqual([1, 0], [payload["event_type"] for payload in typing_calls])
+
+    def test_submitted_task_is_persisted_for_restart_recovery(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.handle_event(
+            {
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": 10001,
+                "message": "hello",
+            }
+        )
+
+        self.assertIn("task-qq-001", bridge.pending_tasks)
+        persisted = bridge.pending_tasks["task-qq-001"]
+        self.assertEqual("qq:private:10001", persisted.sender_key)
+        self.assertEqual({"message_type": "private", "user_id": 10001}, persisted.reply_target)
+
+    def test_recover_pending_tasks_reconciles_once_after_bridge_restart(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.pending_tasks = {
+            "task-qq-001": BridgePendingReplyTask(
+                task_id="task-qq-001",
+                sender_key="qq:private:10001",
+                reply_target={"message_type": "private", "user_id": 10001},
+                created_at=123,
+                last_progress_seq=2,
+                last_progress_text="已经发送过的进度",
+            )
+        }
+        task = HubTask.from_dict(
+            {
+                "id": "task-qq-001",
+                "agent_id": "qq",
+                "agent_name": "QQ 会话",
+                "backend": "codex",
+                "source": "qq",
+                "sender_id": "qq:private:10001",
+                "prompt": "hello",
+                "status": "succeeded",
+                "created_at": "2026-06-26T01:00:00",
+                "started_at": "2026-06-26T01:00:01",
+                "finished_at": "2026-06-26T01:00:05",
+                "output": "恢复后完成",
+                "error": "",
+                "session_name": "qq-private-10001",
+                "progress_text": "已经发送过的进度",
+                "progress_at": "2026-06-26T01:00:02",
+                "progress_seq": 2,
+            },
+            default_backend="codex",
+        )
+
+        with patch.object(bridge, "_start_thread", side_effect=lambda _name, target, *args: target(*args)), patch.object(
+            bridge,
+            "_get_task_for_delivery",
+            return_value=task,
+        ):
+            bridge.recover_pending_tasks()
+
+        self.assertNotIn("task-qq-001", bridge.pending_tasks)
+        sent_messages = [payload["message"] for action, payload in bridge.api_calls if action == "send_private_msg"]
+        self.assertIn("恢复后完成", sent_messages[-1])
+
+    def test_pushed_task_update_streams_progress_and_final_reply(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.pending_tasks = {
+            "task-qq-001": BridgePendingReplyTask(
+                task_id="task-qq-001",
+                sender_key="qq:private:10001",
+                reply_target={"message_type": "private", "user_id": 10001},
+                created_at=123,
+            )
+        }
+        base_task = {
+            "id": "task-qq-001",
+            "agent_id": "qq",
+            "agent_name": "QQ 会话",
+            "backend": "codex",
+            "source": "qq",
+            "sender_id": "qq:private:10001",
+            "prompt": "hello",
+            "created_at": "2026-06-26T01:00:00",
+            "started_at": "2026-06-26T01:00:01",
+            "session_name": "qq-private-10001",
+            "workdir": "",
+            "progress_at": "2026-06-26T01:00:02",
+        }
+
+        bridge._handle_pushed_task_update({"task": {**base_task, "status": "running", "progress_text": "正在处理 QQ 消息", "progress_seq": 1}})
+        bridge._handle_pushed_task_update(
+            {
+                "task": {
+                    **base_task,
+                    "status": "succeeded",
+                    "finished_at": "2026-06-26T01:00:05",
+                    "output": "QQ 消息完成",
+                    "error": "",
+                    "progress_text": "正在处理 QQ 消息",
+                    "progress_seq": 1,
+                }
+            }
+        )
+
+        self.assertNotIn("task-qq-001", bridge.pending_tasks)
+        sent_messages = [payload["message"] for action, payload in bridge.api_calls if action == "send_private_msg"]
+        self.assertEqual(2, len(sent_messages))
+        self.assertIn("正在处理 QQ 消息", sent_messages[0])
+        self.assertIn("QQ 消息完成", sent_messages[1])
+
+    def test_process_bridge_ipc_consumes_qq_channel_update(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.pending_tasks = {
+            "task-qq-001": BridgePendingReplyTask(
+                task_id="task-qq-001",
+                sender_key="qq:private:10001",
+                reply_target={"message_type": "private", "user_id": 10001},
+                created_at=123,
+            )
+        }
+        ipc_root = self.temp_path / "ipc"
+        patchers = [
+            patch("local_ipc.IPC_DIR", ipc_root),
+            patch("local_ipc.REQUEST_DIR", ipc_root / "requests"),
+            patch("local_ipc.RESPONSE_DIR", ipc_root / "responses"),
+            patch("local_ipc.PROCESSED_DIR", ipc_root / "processed"),
+            patch("local_ipc.BRIDGE_REQUEST_DIR", ipc_root / "bridge_requests"),
+            patch("local_ipc.BRIDGE_PROCESSED_DIR", ipc_root / "bridge_processed"),
+            patch("local_ipc.BRIDGE_CHANNELS_DIR", ipc_root / "bridge_channels"),
+        ]
+        for patcher in patchers:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+        request_id = local_ipc.create_bridge_request(
+            "task_update",
+            {
+                "task": {
+                    "id": "task-qq-001",
+                    "agent_id": "qq",
+                    "agent_name": "QQ 会话",
+                    "backend": "codex",
+                    "source": "qq",
+                    "sender_id": "qq:private:10001",
+                    "prompt": "hello",
+                    "status": "succeeded",
+                    "created_at": "2026-06-26T01:00:00",
+                    "started_at": "2026-06-26T01:00:01",
+                    "finished_at": "2026-06-26T01:00:05",
+                    "output": "频道事件完成",
+                    "error": "",
+                    "session_name": "qq-private-10001",
+                    "progress_text": "",
+                    "progress_at": "",
+                    "progress_seq": 0,
+                }
+            },
+            channel="qq",
+        )
+
+        bridge._process_bridge_ipc_once()
+
+        self.assertFalse((local_ipc.bridge_request_dir("qq") / f"{request_id}.json").exists())
+        self.assertTrue((local_ipc.bridge_processed_dir("qq") / f"{request_id}.json").exists())
+        sent_messages = [payload["message"] for action, payload in bridge.api_calls if action == "send_private_msg"]
+        self.assertIn("频道事件完成", sent_messages[-1])
+
+    def test_wait_and_reply_removes_pending_task_after_terminal_reply(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.pending_tasks = {
+            "task-qq-001": BridgePendingReplyTask(
+                task_id="task-qq-001",
+                sender_key="qq:private:10001",
+                reply_target={"message_type": "private", "user_id": 10001},
+                created_at=123,
+            )
+        }
+        response = SimpleNamespace(
+            ok=True,
+            payload={
+                "task": {
+                    "id": "task-qq-001",
+                    "agent_id": "qq",
+                    "agent_name": "QQ 会话",
+                    "backend": "codex",
+                    "source": "qq",
+                    "sender_id": "qq:private:10001",
+                    "prompt": "hello",
+                    "status": "succeeded",
+                    "created_at": "2026-06-26T01:00:00",
+                    "started_at": "2026-06-26T01:00:01",
+                    "finished_at": "2026-06-26T01:00:05",
+                    "output": "完成",
+                    "error": "",
+                    "session_name": "qq-private-10001",
+                    "progress_text": "",
+                    "progress_at": "",
+                    "progress_seq": 0,
+                }
+            },
+        )
+
+        with patch("qq_onebot_bridge.create_request", return_value="req-get-task"), patch("qq_onebot_bridge.wait_for_response", return_value=response), patch.object(
+            bridge,
+            "_ipc_request",
+            return_value=SimpleNamespace(ok=True, payload={}),
+        ):
+            QQOneBotBridge._wait_and_reply(bridge, {"message_type": "private", "user_id": 10001}, "task-qq-001")
+
+        self.assertNotIn("task-qq-001", bridge.pending_tasks)
+        sent_messages = [payload["message"] for action, payload in bridge.api_calls if action == "send_private_msg"]
+        self.assertIn("完成", sent_messages[-1])
+
+    def test_wait_and_reply_sends_only_incremental_progress_delta(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        base_task = {
+            "id": "task-qq-001",
+            "agent_id": "qq",
+            "agent_name": "QQ 会话",
+            "backend": "codex",
+            "source": "qq",
+            "sender_id": "qq:private:10001",
+            "prompt": "hello",
+            "created_at": "2026-06-26T01:00:00",
+            "started_at": "2026-06-26T01:00:01",
+            "finished_at": "",
+            "output": "",
+            "error": "",
+            "session_name": "qq-private-10001",
+            "progress_at": "2026-06-26T01:00:02",
+        }
+        responses = [
+            SimpleNamespace(ok=True, payload={"task": {**base_task, "status": "running", "progress_text": "第一段内容完成", "progress_seq": 1}}),
+            SimpleNamespace(ok=True, payload={"task": {**base_task, "status": "running", "progress_text": "第一段内容完成\n第二段内容完成", "progress_seq": 2}}),
+            SimpleNamespace(
+                ok=True,
+                payload={
+                    "task": {
+                        **base_task,
+                        "status": "succeeded",
+                        "finished_at": "2026-06-26T01:00:05",
+                        "output": "完成",
+                        "progress_text": "第一段内容完成\n第二段内容完成",
+                        "progress_seq": 2,
+                    }
+                },
+            ),
+        ]
+
+        with patch("qq_onebot_bridge.create_request", return_value="req-get-task"), patch("qq_onebot_bridge.wait_for_response", side_effect=responses), patch.object(
+            bridge,
+            "_ipc_request",
+            return_value=SimpleNamespace(ok=True, payload={}),
+        ):
+            QQOneBotBridge._wait_and_reply(bridge, {"message_type": "private", "user_id": 10001}, "task-qq-001")
+
+        sent_messages = [payload["message"] for action, payload in bridge.api_calls if action == "send_private_msg"]
+        self.assertIn("第一段内容完成", sent_messages[0])
+        self.assertIn("第二段内容完成", sent_messages[1])
+        self.assertNotIn("第一段内容完成", sent_messages[1])
+        self.assertIn("完成", sent_messages[2])
+
+    def test_wait_and_reply_batches_tiny_progress_fragments(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        base_task = {
+            "id": "task-qq-001",
+            "agent_id": "qq",
+            "agent_name": "QQ 会话",
+            "backend": "codex",
+            "source": "qq",
+            "sender_id": "qq:private:10001",
+            "prompt": "hello",
+            "created_at": "2026-06-26T01:00:00",
+            "started_at": "2026-06-26T01:00:01",
+            "finished_at": "",
+            "output": "",
+            "error": "",
+            "session_name": "qq-private-10001",
+            "progress_at": "2026-06-26T01:00:02",
+        }
+        responses = [
+            SimpleNamespace(ok=True, payload={"task": {**base_task, "status": "running", "progress_text": "刚", "progress_seq": 1}}),
+            SimpleNamespace(ok=True, payload={"task": {**base_task, "status": "running", "progress_text": "刚开始分析项目", "progress_seq": 2}}),
+            SimpleNamespace(ok=True, payload={"task": {**base_task, "status": "succeeded", "finished_at": "2026-06-26T01:00:05", "output": "完成", "progress_text": "刚开始分析项目", "progress_seq": 2}}),
+        ]
+
+        with patch("qq_onebot_bridge.create_request", return_value="req-get-task"), patch("qq_onebot_bridge.wait_for_response", side_effect=responses), patch.object(
+            bridge,
+            "_ipc_request",
+            return_value=SimpleNamespace(ok=True, payload={}),
+        ):
+            QQOneBotBridge._wait_and_reply(bridge, {"message_type": "private", "user_id": 10001}, "task-qq-001")
+
+        sent_messages = [payload["message"] for action, payload in bridge.api_calls if action == "send_private_msg"]
+        self.assertEqual(2, len(sent_messages))
+        self.assertIn("刚开始分析项目", sent_messages[0])
+        self.assertNotEqual("刚", sent_messages[0].split("\n\n", 1)[-1])
+        self.assertIn("完成", sent_messages[1])
 
     def test_group_message_at_other_user_is_ignored(self) -> None:
         bridge = FakeQQBridge(self.temp_path)

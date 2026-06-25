@@ -44,6 +44,15 @@ from core.weixin_notifier import broadcast_weixin_notice_by_kind
 
 ActionRunner = Callable[[], list[str]]
 STOP_NOTICE_DRAIN_SECONDS = 1.0
+QQ_ISOLATED_ACTIONS = {
+    "start-onebot-runtime",
+    "stop-onebot-runtime",
+    "restart-onebot-runtime",
+    "start-qq-bridge",
+    "stop-qq-bridge",
+    "restart-qq-bridge",
+    "prepare-qq-login",
+}
 
 
 @dataclass
@@ -107,6 +116,8 @@ def run_named_action(action: str) -> ServiceResult:
     result_message = " | ".join(runner())
     if pre_notice is not None:
         return ServiceResult(ok=True, message=f"{result_message} | {pre_notice.summary}")
+    if action in QQ_ISOLATED_ACTIONS:
+        return ServiceResult(ok=True, message=result_message)
     notice = broadcast_weixin_notice_by_kind("service", f"服务操作: {action}", result_message)
     return ServiceResult(ok=True, message=f"{result_message} | {notice.summary}")
 

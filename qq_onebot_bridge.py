@@ -14,21 +14,28 @@ from typing import Any
 
 from bridge_config import BridgeConfig
 from core.bridge_command_catalog import QQ_HELP_MESSAGE_KEYS, parse_bridge_command, render_bridge_help
+from core.bridge_message_control import (
+    normalize_context_left_percent,
+)
+from core.bridge_pending_tasks import BridgePendingReplyTask, JsonBackedTaskStore
+from core.bridge_task_delivery import PollingTaskDeliveryController, TaskUpdateDeliveryController, format_bridge_progress_reply, format_bridge_task_reply
 from core.json_store import load_json, save_json
 from core.runtime_paths import RUNTIME_DIR, STATE_DIR
 from core.state_models import HubTask
-from core.weixin_message_format import format_duration_since, prefix_weixin_output
 from localization import Localizer
-from local_ipc import cleanup_processed_requests, create_request, wait_for_response
+from local_ipc import bridge_request_dir, cleanup_processed_requests, create_request, mark_bridge_processed, read_request, wait_for_response
 
 
 ONEBOT_STATE_PATH = STATE_DIR / "qq_onebot_pending_media_context.json"
+QQ_PENDING_TASKS_PATH = STATE_DIR / "qq_pending_tasks.json"
 ONEBOT_UPLOAD_DIR = RUNTIME_DIR / "uploads" / "qq"
 MEDIA_CONTEXT_TTL_SECONDS = 10 * 60
+PENDING_TASK_TTL_SECONDS = 24 * 60 * 60
 MEDIA_RECEIVE_MAX_BYTES = 50 * 1024 * 1024
-TERMINAL_TASK_STATUSES = frozenset({"succeeded", "failed", "canceled", "unknown_after_restart"})
 LOCAL_URL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 DEFAULT_QQ_AGENT_ID = "qq"
+QQ_TYPING_KEEPALIVE_SECONDS = 5.0
+QQ_BRIDGE_CHANNEL = "qq"
 
 
 def _configure_process_stdio() -> None:
@@ -110,7 +117,15 @@ class QQOneBotBridge:
         self.agent_id = str(os.environ.get("QQ_BRIDGE_AGENT_ID") or DEFAULT_QQ_AGENT_ID).strip() or DEFAULT_QQ_AGENT_ID
         self.localizer = Localizer(str(getattr(config, "language", "") or ""))
         self._login_user_id = ""
+        self._typing_status_available = True
         self.pending_media_context = self._load_pending_media_context()
+        self.pending_task_store = JsonBackedTaskStore(
+            QQ_PENDING_TASKS_PATH,
+            from_dict=lambda raw: BridgePendingReplyTask.from_dict(raw, ttl_seconds=PENDING_TASK_TTL_SECONDS),
+            to_dict=lambda task: task.to_dict(),
+        )
+        self.pending_tasks = self.pending_task_store.load()
+        self._typing_sent_at_by_task: dict[str, float] = {}
 
     def handle_event(self, event: dict[str, Any]) -> None:
         if str(event.get("post_type") or "") != "message":
@@ -141,7 +156,8 @@ class QQOneBotBridge:
             self._send_reply(event, "任务提交失败：Hub 没有返回 task id")
             return
         _log(f"submitted task_id={task_id} sender={sender_key}")
-        self._start_thread("wait_and_reply", self._wait_and_reply, event, task_id)
+        self._remember_pending_task(task_id, event, sender_key)
+        self._typing_sent_at_by_task[task_id] = self._send_typing_keepalive(event, 0.0)
 
     def _start_thread(self, name: str, target: Any, *args: Any) -> None:
         def run_target() -> None:
@@ -331,34 +347,174 @@ class QQOneBotBridge:
         return self.localizer.translate(key, **kwargs)
 
     def _wait_and_reply(self, event: dict[str, Any], task_id: str) -> None:
-        deadline = time.time() + max(60, int(self.config.hub_task_timeout_seconds))
-        latest_task: HubTask | None = None
-        while time.time() < deadline:
-            response = wait_for_response(
-                create_request("get_task", {"task_id": task_id}),
-                timeout_seconds=10,
-            )
-            if response.ok:
-                latest_task = HubTask.from_dict(response.payload.get("task"), default_backend=self.config.default_backend)
-                if latest_task is not None and latest_task.status in TERMINAL_TASK_STATUSES:
-                    break
-            time.sleep(1.0)
-        if latest_task is None:
-            self._send_reply(event, f"任务状态查询失败：{task_id}")
-            return
-        _log(f"task terminal task_id={task_id} status={latest_task.status} output_preview={latest_task.output[:80]!r} error_preview={latest_task.error[:80]!r}")
-        self._send_reply(event, self._format_task_reply(latest_task))
+        PollingTaskDeliveryController(
+            default_backend=self.config.default_backend,
+            task_timeout_seconds=int(self.config.hub_task_timeout_seconds),
+            get_task=self._get_task_for_delivery,
+            send_reply=self._send_reply,
+            send_typing_keepalive=self._send_typing_keepalive,
+            stop_typing=self._stop_typing_best_effort,
+            resolve_context_left_percent=self._resolve_task_context_left_percent,
+            get_pending_task=lambda pending_task_id: self.pending_tasks.get(pending_task_id),
+            update_pending_progress=lambda pending_task_id, last_progress_seq, last_progress_text: self._update_pending_task_progress(
+                pending_task_id,
+                last_progress_seq=last_progress_seq,
+                last_progress_text=last_progress_text,
+            ),
+            forget_pending_task=self._forget_pending_task,
+            log=_log,
+        ).wait_and_reply(event, task_id)
 
-    def _format_task_reply(self, task: HubTask) -> str:
-        if task.status == "succeeded":
-            return prefix_weixin_output(
-                "done",
-                format_duration_since(task.started_at or task.created_at, ended_at=task.finished_at),
-                task.output.strip() or "(empty)",
-                at=task.finished_at,
-                context_left_percent=task.context_left_percent,
+    def _bridge_ipc_worker(self) -> None:
+        while True:
+            self._process_bridge_ipc_once()
+            time.sleep(0.2)
+
+    def _process_bridge_ipc_once(self) -> None:
+        for request_path in sorted(bridge_request_dir(QQ_BRIDGE_CHANNEL).glob("*.json")):
+            action = "unknown"
+            try:
+                request = read_request(request_path)
+                action = request.action or "unknown"
+                if action == "task_update":
+                    self._handle_pushed_task_update(request.payload)
+            except Exception as exc:  # noqa: BLE001
+                _log_error(f"bridge ipc request failed {request_path.name}: {type(exc).__name__}: {exc}")
+            finally:
+                try:
+                    mark_bridge_processed(request_path, channel=QQ_BRIDGE_CHANNEL)
+                except FileNotFoundError:
+                    pass
+                _log(f"bridge ipc action={action} path={request_path.name}")
+
+    def _handle_pushed_task_update(self, payload: dict[str, object]) -> None:
+        task = HubTask.from_dict(payload.get("task"), default_backend=self.config.default_backend)
+        if task is None or not task.source.strip().lower().startswith("qq"):
+            return
+        pending = self.pending_tasks.get(task.id)
+        if pending is None:
+            reply_target = self._reply_target_from_sender_key(task.sender_id)
+            if not reply_target:
+                return
+            pending = BridgePendingReplyTask(
+                task_id=task.id,
+                sender_key=task.sender_id,
+                reply_target=reply_target,
+                created_at=now_seconds(),
             )
-        return f"任务 {task.status or 'failed'}：{(task.error or 'unknown error').strip()}"
+            self.pending_tasks[task.id] = pending
+            self._save_pending_tasks()
+        typing_last_sent_at = self._typing_sent_at_by_task.get(task.id, 0.0)
+        next_typing_sent_at, _state_updated = TaskUpdateDeliveryController(
+            send_progress=self._send_task_progress_update,
+            send_terminal=self._send_task_terminal_update,
+            save_pending_task=lambda _task_id: self._save_pending_tasks(),
+            forget_pending_task=self._forget_pending_task,
+            send_typing_keepalive=self._send_typing_keepalive,
+        ).handle_task_update(
+            reply_target=pending.reply_target,
+            task=task,
+            pending_task=pending,
+            typing_last_sent_at=typing_last_sent_at,
+        )
+        if task.id in self.pending_tasks:
+            self._typing_sent_at_by_task[task.id] = next_typing_sent_at
+        else:
+            self._typing_sent_at_by_task.pop(task.id, None)
+
+    def _reconcile_pending_tasks(self) -> None:
+        for task_id, pending in list(self.pending_tasks.items()):
+            task = self._get_task_for_delivery(task_id)
+            if task is None:
+                continue
+            _log(f"reconcile pending task_id={task_id} sender={pending.sender_key}")
+            self._handle_pushed_task_update({"task": task.to_dict()})
+
+    def _send_task_progress_update(self, event: dict[str, Any], pending: BridgePendingReplyTask, task: HubTask, progress_delta: str) -> None:
+        self._send_reply(
+            event,
+            format_bridge_progress_reply(
+                task,
+                progress_text=progress_delta,
+                context_left_percent=self._resolve_task_context_left_percent(task),
+            ),
+        )
+
+    def _send_task_terminal_update(self, event: dict[str, Any], pending: BridgePendingReplyTask, task: HubTask) -> None:
+        self._stop_typing_best_effort(event)
+        _log(
+            f"task terminal task_id={task.id} status={task.status} "
+            f"output_preview={task.output[:80]!r} error_preview={task.error[:80]!r}"
+        )
+        final_reply = format_bridge_task_reply(
+            task,
+            last_progress_text=pending.last_progress_text,
+            context_left_percent=self._resolve_task_context_left_percent(task),
+        )
+        if final_reply:
+            self._send_reply(event, final_reply)
+
+    def _send_typing_keepalive(self, event: dict[str, Any], last_sent_at: float) -> float:
+        now_value = time.time()
+        if last_sent_at and now_value - last_sent_at < QQ_TYPING_KEEPALIVE_SECONDS:
+            return last_sent_at
+        if self._send_typing_best_effort(event, enabled=True):
+            return now_value
+        return last_sent_at
+
+    def _send_typing_best_effort(self, event: dict[str, Any], *, enabled: bool) -> bool:
+        if not self._typing_status_available:
+            return False
+        message_type = str(event.get("message_type") or "").strip().lower()
+        if message_type != "private":
+            return False
+        user_id = event.get("user_id")
+        if not user_id:
+            return False
+        try:
+            response = self._onebot_api("set_input_status", {"user_id": user_id, "event_type": 1 if enabled else 0})
+            ok = str(response.get("status") or "").lower() == "ok" or int(response.get("retcode") or 0) == 0
+            _log(f"typing user_id={user_id} enabled={enabled} status={response.get('status')} retcode={response.get('retcode')}")
+            if not ok:
+                self._typing_status_available = False
+            return ok
+        except Exception as exc:  # noqa: BLE001
+            self._typing_status_available = False
+            _log_error(f"typing failed user_id={user_id} enabled={enabled}: {type(exc).__name__}: {exc}")
+            return False
+
+    def _stop_typing_best_effort(self, event: dict[str, Any]) -> None:
+        self._send_typing_best_effort(event, enabled=False)
+
+    def _resolve_task_context_left_percent(self, task: HubTask) -> int | None:
+        if str(task.backend or self.config.default_backend).strip().lower() != "codex":
+            return None
+        live_percent = self._query_task_context_left_percent(task.id)
+        if live_percent is not None:
+            task.context_left_percent = live_percent
+            return live_percent
+        return normalize_context_left_percent(task.context_left_percent)
+
+    def _query_task_context_left_percent(self, task_id: str) -> int | None:
+        try:
+            response = self._ipc_request(
+                "task_context_left",
+                {"task_id": task_id},
+                timeout_seconds=2,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log_error(f"context_left query failed task_id={task_id}: {type(exc).__name__}: {exc}")
+            return None
+        return normalize_context_left_percent(response.payload.get("context_left_percent") if response.ok else None)
+
+    def _get_task_for_delivery(self, task_id: str) -> HubTask | None:
+        response = wait_for_response(
+            create_request("get_task", {"task_id": task_id}),
+            timeout_seconds=10,
+        )
+        if not response.ok:
+            return None
+        return HubTask.from_dict(response.payload.get("task"), default_backend=self.config.default_backend)
 
     def _send_reply(self, event: dict[str, Any], text: str) -> None:
         message_type = str(event.get("message_type") or "").strip().lower()
@@ -497,6 +653,52 @@ class QQOneBotBridge:
             self._save_pending_media_context()
         return items
 
+    def _save_pending_tasks(self) -> None:
+        self.pending_task_store.save(self.pending_tasks)
+
+    def _remember_pending_task(self, task_id: str, event: dict[str, Any], sender_key: str) -> None:
+        self.pending_tasks[task_id] = BridgePendingReplyTask(
+            task_id=task_id,
+            sender_key=sender_key,
+            reply_target=self._reply_event_snapshot(event),
+            created_at=now_seconds(),
+        )
+        self._save_pending_tasks()
+
+    def _update_pending_task_progress(self, task_id: str, *, last_progress_seq: int, last_progress_text: str) -> None:
+        pending = self.pending_tasks.get(task_id)
+        if pending is None:
+            return
+        pending.last_progress_seq = int(last_progress_seq or 0)
+        pending.last_progress_text = str(last_progress_text or "")
+        self._save_pending_tasks()
+
+    def _forget_pending_task(self, task_id: str) -> None:
+        if self.pending_tasks.pop(task_id, None) is not None:
+            self._save_pending_tasks()
+
+    def recover_pending_tasks(self) -> None:
+        self._start_thread("reconcile_pending_tasks", self._reconcile_pending_tasks)
+
+    @staticmethod
+    def _reply_event_snapshot(event: dict[str, Any]) -> dict[str, Any]:
+        message_type = str(event.get("message_type") or "").strip().lower()
+        if message_type == "group":
+            return {"message_type": "group", "group_id": event.get("group_id"), "user_id": event.get("user_id")}
+        user_id = event.get("user_id")
+        if user_id:
+            return {"message_type": "private", "user_id": user_id}
+        return {}
+
+    @staticmethod
+    def _reply_target_from_sender_key(sender_key: str) -> dict[str, Any]:
+        parts = str(sender_key or "").split(":")
+        if len(parts) == 3 and parts[0] == "qq" and parts[1] == "private" and parts[2]:
+            return {"message_type": "private", "user_id": parts[2]}
+        if len(parts) == 4 and parts[0] == "qq" and parts[1] == "group" and parts[2] and parts[3]:
+            return {"message_type": "group", "group_id": parts[2], "user_id": parts[3]}
+        return {}
+
     @staticmethod
     def _build_prompt_with_media(prompt: str, attachments: list[dict[str, str]], errors: list[str]) -> str:
         parts = [prompt.strip()] if prompt.strip() else []
@@ -582,6 +784,8 @@ def run() -> int:
     cleanup_processed_requests()
     config = BridgeConfig.load()
     bridge = QQOneBotBridge(config)
+    bridge._start_thread("bridge_ipc", bridge._bridge_ipc_worker)
+    bridge.recover_pending_tasks()
     host = os.environ.get("QQ_ONEBOT_LISTEN_HOST") or "127.0.0.1"
     port = int(os.environ.get("QQ_ONEBOT_LISTEN_PORT") or "5701")
     server = ThreadingHTTPServer((host, port), bridge.make_handler())

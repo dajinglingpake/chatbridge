@@ -3,7 +3,7 @@
   "claude_command": "claude.cmd",
   "opencode_command": "opencode.cmd",
   "codex_slim_exec": true,
-  "codex_transport": "app-server",
+  "codex_transport": "exec",
   "agents": [
     {
       "id": "main",

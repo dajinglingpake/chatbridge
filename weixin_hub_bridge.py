@@ -26,6 +26,9 @@ from bridge_config import APP_DIR, CONFIG_PATH, WEIXIN_ACCOUNTS_DIR, BridgeConfi
 from core.accounts import account_conversation_path, load_account_context_tokens, save_account_context_tokens
 from core.app_service import schedule_named_action
 from core.bridge_command_catalog import normalize_command_text, parse_bridge_command, render_bridge_help
+from core.bridge_message_control import normalize_context_left_percent, normalize_message_for_dedupe
+from core.bridge_pending_tasks import JsonBackedTaskStore
+from core.bridge_task_delivery import TaskUpdateDeliveryController
 from core.context_relations import build_context_relation_lines
 from core.http_json import request_json
 from core.json_store import load_json, save_json
@@ -56,7 +59,7 @@ from core.weixin_send_gate import sender_send_lock
 from core.weixin_text_outbox import MAX_RETRY_ATTEMPTS, enqueue_text_message, pop_text_messages, requeue_text_message
 from core.weixin_notifier import broadcast_weixin_notice_by_kind, build_task_followup_hint
 from core.weixin_message_format import format_duration_since, format_weixin_reply, now_iso, prefix_weixin_output
-from local_ipc import BRIDGE_REQUEST_DIR, cleanup_processed_requests, mark_bridge_processed, create_request, read_request, wait_for_response
+from local_ipc import bridge_request_dir, cleanup_processed_requests, mark_bridge_processed, create_request, read_request, wait_for_response
 from localization import Localizer
 
 
@@ -88,7 +91,6 @@ ILINK_APP_CLIENT_VERSION = (2 << 16) | (1 << 8) | 1
 SUPPORTED_BACKENDS = set(supported_backend_keys())
 SESSION_PAGE_SIZE = 5
 ACTIVE_TASK_POLL_TIMEOUT_MS = 500
-TERMINAL_TASK_STATUSES = frozenset({"succeeded", "failed", "canceled", "unknown_after_restart"})
 TYPING_KEEPALIVE_SECONDS = 5
 TYPING_TICKET_TTL_SECONDS = 23 * 60 * 60
 PENDING_TASK_RECONCILE_INTERVAL_SECONDS = 45.0
@@ -172,10 +174,6 @@ def resolve_bridge_language(config_language: str) -> str:
     return "zh-CN"
 
 
-def _normalize_message_for_dedupe(text: str) -> str:
-    return "\n".join(line.rstrip() for line in str(text or "").strip().splitlines()).strip()
-
-
 def _append_delivery_header_suffix(text: str, suffix: str) -> str:
     lines = str(text or "").splitlines()
     if not lines or not suffix:
@@ -199,6 +197,11 @@ class WeixinBridge:
         self.context_tokens = load_account_context_tokens(self.account_path)
         self.conversation_path = account_conversation_path(CONVERSATION_PATH, config.active_account_id, self.account_path)
         self.conversations = self._load_conversations()
+        self.pending_task_store = JsonBackedTaskStore(
+            PENDING_TASKS_PATH,
+            from_dict=WeixinPendingTaskState.from_dict,
+            to_dict=lambda tracked: tracked.to_dict(),
+        )
         self.pending_tasks = self._load_pending_tasks()
         self.pending_media_context = self._load_pending_media_context()
         self._recent_message_keys: list[str] = []
@@ -799,11 +802,12 @@ class WeixinBridge:
         token: str,
         tracked: WeixinPendingTaskState,
         task: HubTask,
+        progress_text: str | None = None,
     ) -> None:
-        progress_text = task.progress_text.strip()
-        if not progress_text:
+        progress_reply_text = str(progress_text if progress_text is not None else task.progress_text).strip()
+        if not progress_reply_text:
             return
-        if progress_text != tracked.last_progress_text:
+        if progress_reply_text != tracked.last_progress_text:
             context_token = self._resolve_context_token_for_sender(tracked)
             self._send_text(
                 base_url,
@@ -813,12 +817,12 @@ class WeixinBridge:
                 prefix_weixin_output(
                     "running",
                     format_duration_since(task.started_at or task.created_at),
-                    progress_text,
+                    progress_reply_text,
                     at=now_iso(),
                     context_left_percent=self._resolve_task_context_left_percent(task),
                 ),
             )
-            tracked.last_progress_text = progress_text
+            tracked.last_progress_text = progress_reply_text
         self._append_event_log(
             event="progress",
             task_id=task.id,
@@ -828,12 +832,12 @@ class WeixinBridge:
             backend=task.backend or tracked.backend or self.config.default_backend,
             model=self._display_model(task.model.strip() or tracked.model),
             workdir=task.workdir.strip() or tracked.workdir or "-",
-            result_preview=progress_text[:240],
+            result_preview=progress_reply_text[:240],
             source=tracked.source,
         )
 
     def _process_bridge_ipc_once(self, base_url: str, token: str) -> None:
-        for request_path in sorted(BRIDGE_REQUEST_DIR.glob("*.json")):
+        for request_path in sorted(bridge_request_dir("wechat").glob("*.json")):
             started_at = time.perf_counter()
             action = "unknown"
             status = "ok"
@@ -869,19 +873,24 @@ class WeixinBridge:
                 workdir=task.workdir,
                 context_token=task.context_token,
             )
-        state_updated = False
-        if task.status == "running" and tracked.last_status != "running":
-            self._notify_task_progress(base_url, token, tracked, task)
-            tracked.last_status = "running"
-            state_updated = True
-        if task.progress_seq > tracked.last_progress_seq and task.progress_text.strip():
-            self._notify_task_progress_update(base_url, token, tracked, task)
-            tracked.last_progress_seq = task.progress_seq
-            state_updated = True
-        if task.status in TERMINAL_TASK_STATUSES:
-            self._notify_task_terminal(base_url, token, tracked, task)
-            self.pending_tasks.pop(task.id, None)
-            state_updated = True
+        _typing_last_sent_at, state_updated = TaskUpdateDeliveryController(
+            send_progress=lambda _delivery_context, pending, pushed_task, progress_delta: self._notify_task_progress_update(
+                base_url,
+                token,
+                pending,
+                pushed_task,
+                progress_text=progress_delta,
+            ),
+            send_terminal=lambda _delivery_context, pending, pushed_task: self._notify_task_terminal(base_url, token, pending, pushed_task),
+            save_pending_task=lambda _task_id: None,
+            forget_pending_task=lambda task_id: self.pending_tasks.pop(task_id, None),
+            on_running=lambda _delivery_context, pending, pushed_task: self._notify_task_progress(base_url, token, pending, pushed_task),
+            should_send_progress=lambda progress_delta: bool(str(progress_delta or "").strip()),
+        ).handle_task_update(
+            reply_target={"base_url": base_url},
+            task=task,
+            pending_task=tracked,
+        )
         if state_updated:
             self._save_pending_tasks()
 
@@ -987,7 +996,7 @@ class WeixinBridge:
         context_token = self._resolve_context_token_for_sender(tracked)
         if task.status == "succeeded":
             output = task.output.strip()
-            if output and _normalize_message_for_dedupe(output) == _normalize_message_for_dedupe(tracked.last_progress_text):
+            if output and normalize_message_for_dedupe(output) == normalize_message_for_dedupe(tracked.last_progress_text):
                 self._send_text(
                     base_url,
                     token,
@@ -1140,7 +1149,7 @@ class WeixinBridge:
         if live_percent is not None:
             task.context_left_percent = live_percent
             return live_percent
-        return self._normalize_context_left_percent(task.context_left_percent)
+        return normalize_context_left_percent(task.context_left_percent)
 
     def _query_task_context_left_percent(self, task_id: str) -> int | None:
         started_at = time.perf_counter()
@@ -1153,7 +1162,7 @@ class WeixinBridge:
         except Exception:
             self._log_perf("context_left_query", started_at, force=True, task_id=task_id, status="timeout_or_failed")
             return None
-        percent = self._normalize_context_left_percent(response.payload.get("context_left_percent") if response.ok else None)
+        percent = normalize_context_left_percent(response.payload.get("context_left_percent") if response.ok else None)
         self._log_perf(
             "context_left_query",
             started_at,
@@ -1163,15 +1172,6 @@ class WeixinBridge:
             status="ok" if percent is not None else "empty" if response.ok else "not_ok",
         )
         return percent
-
-    @staticmethod
-    def _normalize_context_left_percent(value: object) -> int | None:
-        try:
-            if value is None or value == "":
-                return None
-            return max(0, min(100, int(value)))
-        except (TypeError, ValueError):
-            return None
 
     def _log_perf(
         self,
@@ -3549,24 +3549,11 @@ class WeixinBridge:
         save_json(STATE_PATH, self.state.to_dict())
 
     def _load_pending_tasks(self) -> dict[str, WeixinPendingTaskState]:
-        data = load_json(PENDING_TASKS_PATH, {}, expect_type=dict)
-        if not isinstance(data, dict):
-            return {}
-        pending_tasks: dict[str, WeixinPendingTaskState] = {}
-        for task_id, raw_task in data.items():
-            tracked = WeixinPendingTaskState.from_dict(raw_task)
-            if tracked is None:
-                continue
-            pending_tasks[str(task_id)] = tracked
-        return pending_tasks
+        return self.pending_task_store.load()
 
     def _save_pending_tasks(self) -> None:
         with self._pending_tasks_save_lock:
-            STATE_DIR.mkdir(parents=True, exist_ok=True)
-            save_json(
-                PENDING_TASKS_PATH,
-                {task_id: tracked.to_dict() for task_id, tracked in self.pending_tasks.items()},
-            )
+            self.pending_task_store.save(self.pending_tasks)
 
     def _load_pending_media_context(self) -> dict[str, list[dict[str, str]]]:
         payload = load_json(PENDING_MEDIA_CONTEXT_PATH, {}, expect_type=dict)

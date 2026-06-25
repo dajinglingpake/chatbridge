@@ -288,6 +288,47 @@ class AgentHubCancellationTests(unittest.TestCase):
         self.assertEqual("progress", payload["event"])
         self.assertEqual("task-push-001", payload["task"]["id"])
         self.assertEqual("正在处理", payload["task"]["progress_text"])
+        self.assertEqual("wechat", mocked_push.call_args.kwargs["channel"])
+
+    def test_qq_progress_update_pushes_to_qq_bridge_channel(self) -> None:
+        workdir = self.temp_path / "workspace"
+        session_file = self.temp_path / "sessions" / "main.txt"
+        workdir.mkdir(parents=True, exist_ok=True)
+        session_file.parent.mkdir(parents=True, exist_ok=True)
+        config = HubConfig(
+            codex_command="codex",
+            claude_command="claude",
+            opencode_command="opencode",
+            agents=[AgentConfig("qq", "QQ", str(workdir), str(session_file), backend="codex")],
+        )
+        state_path = self.temp_path / "state" / "agent_hub_state.json"
+        task = HubTask(
+            id="task-qq-push-001",
+            agent_id="qq",
+            agent_name="QQ",
+            backend="codex",
+            source="qq",
+            sender_id="qq:private:10001",
+            prompt="hello",
+            status="running",
+            created_at="2026-06-26T00:00:00",
+            session_name="qq-private-10001",
+            workdir=str(workdir),
+        )
+        with (
+            patch("agent_hub.STATE_PATH", state_path),
+            patch("agent_hub.discover_external_agent_processes", return_value=[]),
+            patch("agent_hub.create_bridge_request") as mocked_push,
+        ):
+            hub = MultiCodexHub(config)
+            hub.tasks.append(task)
+            hub._update_task_progress("task-qq-push-001", "QQ 正在处理")
+
+        mocked_push.assert_called_once()
+        action, payload = mocked_push.call_args.args
+        self.assertEqual("task_update", action)
+        self.assertEqual("task-qq-push-001", payload["task"]["id"])
+        self.assertEqual("qq", mocked_push.call_args.kwargs["channel"])
 
     def test_progress_update_still_succeeds_when_bridge_push_fails(self) -> None:
         workdir = self.temp_path / "workspace"

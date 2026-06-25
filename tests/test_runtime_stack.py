@@ -7,7 +7,18 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from runtime_stack import _managed_subprocess_env, _onebot_runtime_env, _taskkill, discover_external_agent_processes, restart_all, start_all, start_managed, start_qq_stack, stop_managed
+from runtime_stack import (
+    _managed_subprocess_env,
+    _onebot_runtime_env,
+    _taskkill,
+    discover_external_agent_processes,
+    restart_all,
+    restart_qq_bridge,
+    start_all,
+    start_managed,
+    start_qq_stack,
+    stop_managed,
+)
 
 
 class FakeProcess:
@@ -110,6 +121,24 @@ class RuntimeStackTests(unittest.TestCase):
         self.assertEqual(["Bridge", "Hub"], [call.args[0] for call in mocked_stop.call_args_list])
         mocked_start_all.assert_called_once_with(env={"A": "B"})
         mocked_stop_onebot.assert_not_called()
+
+    def test_restart_qq_bridge_preserves_onebot_runtime(self) -> None:
+        with (
+            patch("runtime_stack.stop_bridge", return_value="Bridge stopped") as mocked_stop_bridge,
+            patch("runtime_stack.stop_qq_bridge", return_value="QQ Bridge stopped") as mocked_stop_qq_bridge,
+            patch("runtime_stack.start_qq_bridge", return_value="QQ Bridge started") as mocked_start_qq_bridge,
+            patch("runtime_stack.stop_onebot_runtime") as mocked_stop_onebot,
+            patch("runtime_stack.start_onebot_runtime") as mocked_start_onebot,
+            patch("runtime_stack._managed_subprocess_env", return_value={"A": "B"}),
+        ):
+            messages = restart_qq_bridge()
+
+        self.assertEqual(["Bridge stopped", "QQ Bridge stopped", "QQ Bridge started"], messages)
+        mocked_stop_bridge.assert_called_once_with()
+        mocked_stop_qq_bridge.assert_called_once_with()
+        mocked_start_qq_bridge.assert_called_once_with(env={"A": "B"})
+        mocked_stop_onebot.assert_not_called()
+        mocked_start_onebot.assert_not_called()
 
     def test_managed_subprocess_env_copies_proxy_from_running_process(self) -> None:
         fake_proc = SimpleNamespace(pid=123)
