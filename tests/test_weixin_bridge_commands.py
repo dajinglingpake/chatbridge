@@ -1236,6 +1236,112 @@ class WeixinBridgeCommandTests(unittest.TestCase):
             bridge.typing_calls,
         )
 
+    def test_pending_reconcile_skips_when_no_pending_tasks(self) -> None:
+        bridge = FeedbackBridge(BridgeConfig.load(), [{"id": "unused", "status": "queued"}])
+
+        bridge._reconcile_pending_tasks("https://example.com", "token")
+
+        self.assertEqual(0, bridge._task_update_index)
+
+    def test_pending_reconcile_is_rate_limited(self) -> None:
+        bridge = FeedbackBridge(
+            BridgeConfig.load(),
+            [
+                {
+                    "id": "task-feedback-001",
+                    "sender_id": "sender-test",
+                    "session_name": "default",
+                    "status": "queued",
+                    "agent_id": "main",
+                    "agent_name": "default",
+                    "backend": "codex",
+                    "prompt": "hello",
+                    "created_at": "2026-04-20T12:00:00",
+                }
+            ],
+        )
+        bridge.pending_tasks["task-feedback-001"] = WeixinPendingTaskState(
+            task_id="task-feedback-001",
+            sender_id="sender-test",
+            session_name="default",
+            backend="codex",
+            context_token="ctx-live",
+        )
+
+        with patch("weixin_hub_bridge.time.monotonic", side_effect=[100.0, 110.0]):
+            bridge._reconcile_pending_tasks("https://example.com", "token")
+            bridge._reconcile_pending_tasks("https://example.com", "token")
+
+        self.assertEqual(1, bridge._task_update_index)
+        self.assertIn("task-feedback-001", bridge.pending_tasks)
+
+    def test_pending_reconcile_limits_batch_size(self) -> None:
+        bridge = FeedbackBridge(
+            BridgeConfig.load(),
+            [
+                {
+                    "id": f"task-feedback-{index}",
+                    "sender_id": "sender-test",
+                    "session_name": "default",
+                    "status": "queued",
+                    "agent_id": "main",
+                    "agent_name": "default",
+                    "backend": "codex",
+                    "prompt": "hello",
+                    "created_at": "2026-04-20T12:00:00",
+                }
+                for index in range(10)
+            ],
+        )
+        for index in range(10):
+            task_id = f"task-feedback-{index}"
+            bridge.pending_tasks[task_id] = WeixinPendingTaskState(
+                task_id=task_id,
+                sender_id="sender-test",
+                session_name="default",
+                backend="codex",
+                context_token="ctx-live",
+            )
+
+        with patch("weixin_hub_bridge.PENDING_TASK_RECONCILE_BATCH_SIZE", 3):
+            bridge._reconcile_pending_tasks("https://example.com", "token")
+
+        self.assertEqual(3, bridge._task_update_index)
+        self.assertEqual(3, bridge._pending_reconcile_cursor)
+
+    def test_pending_reconcile_removes_unknown_after_restart_task(self) -> None:
+        bridge = FeedbackBridge(
+            BridgeConfig.load(),
+            [
+                {
+                    "id": "task-feedback-001",
+                    "sender_id": "sender-test",
+                    "session_name": "default",
+                    "status": "unknown_after_restart",
+                    "agent_id": "main",
+                    "agent_name": "default",
+                    "backend": "codex",
+                    "prompt": "hello",
+                    "error": "Hub restarted while this task was running.",
+                    "created_at": "2026-04-20T12:00:00",
+                    "finished_at": "2026-04-20T12:01:00",
+                }
+            ],
+        )
+        bridge.pending_tasks["task-feedback-001"] = WeixinPendingTaskState(
+            task_id="task-feedback-001",
+            sender_id="sender-test",
+            session_name="default",
+            backend="codex",
+            context_token="ctx-live",
+        )
+
+        bridge._reconcile_pending_tasks("https://example.com", "token")
+
+        self.assertNotIn("task-feedback-001", bridge.pending_tasks)
+        self.assertEqual(1, len(bridge.sent_texts))
+        self.assertIn("Hub restarted while this task was running.", bridge.sent_texts[0])
+
     def test_handle_message_sends_completion_notice_for_duplicate_final_result_after_progress(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             event_log_path = Path(temp_dir) / "weixin_bridge_events.jsonl"

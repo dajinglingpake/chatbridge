@@ -143,6 +143,19 @@ python3 ./main.py --host 0.0.0.0 --port 8765
 python3 ./main.py --native
 ```
 
+可选 QQ OneBot 桥接：
+
+```powershell
+$env:QQ_ONEBOT_API_BASE="http://127.0.0.1:3000"
+$env:QQ_ONEBOT_LISTEN_HOST="127.0.0.1"
+$env:QQ_ONEBOT_LISTEN_PORT="5701"
+python qq_onebot_bridge.py
+```
+
+点击 Web 管理界面的“扫码登录 QQ”会自动准备并启动本机 QQ OneBot 运行时：ChatBridge 会下载官方 NapCat Shell 到 `.runtime/onebot-runtime/napcat-shell/`，自动写入 OneBot HTTP API 与反向 HTTP 上报配置，并在弹窗里展示登录二维码。如果 NapCat 安装失败，会回退下载 Lagrange.OneBot self-contained 运行时。纯 QQ 图片/文件消息会缓存为该发送方下一条文本消息的上下文。
+
+如果你不想使用自动组件，也可以通过 `CHATBRIDGE_ONEBOT_RUNTIME_COMMAND` 指向你自行安装的 LLOneBot、Lagrange.OneBot 或 NapCat 启动器；此时仍需保证 OneBot HTTP API 为 `http://127.0.0.1:3000`，反向 HTTP 上报为 `http://127.0.0.1:5701/`。使用前请自行确认运行时许可证和本地法律合规要求。
+
 统一 UI 启动后会自动：
 
 - 创建 `.runtime/`
@@ -245,6 +258,7 @@ Web 模式启动后，终端会打印本地地址和局域网地址，例如 `ht
 - `config/weixin_bridge.json`：主线微信桥配置文件
 - `agent_backends/`：Agent 后端接口与独立实现目录，新后端放入这里会被 registry 自动发现
 - `weixin_hub_bridge.py`：微信桥接层；协议参考：Tencent `openclaw-weixin`、`wechat-ilink-client`
+- `qq_onebot_bridge.py`：可选 QQ 桥接层，面向 LLOneBot / Lagrange.OneBot / NapCat 等 OneBot v11 反向 HTTP 服务
 
 ## 微信命令
 

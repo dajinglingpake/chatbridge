@@ -80,6 +80,8 @@ class HomeViewModel:
     badge_style: str
     summary_text: str
     primary_hint: str
+    qq_login_text: str
+    qq_login_ok: bool
 
 
 @dataclass
@@ -248,11 +250,20 @@ def build_home_view_model(
 ) -> HomeViewModel:
     badge = build_badge(snapshot, t)
     _, _, primary_hint = decide_primary_action(snapshot, checks, t)
+    qq_account = f"{snapshot.qq_nickname} ({snapshot.qq_user_id})" if snapshot.qq_nickname and snapshot.qq_user_id else snapshot.qq_user_id or "-"
     return HomeViewModel(
         badge_text=badge.text,
         badge_style=badge.style,
         summary_text=build_summary_text(snapshot, checks, t),
         primary_hint=primary_hint,
+        qq_login_text=_t(
+            t,
+            "ui.overview.qq_login",
+            "QQ 登录: {status} {account}",
+            status=_t(t, "ui.status.logged_in", "已登录") if snapshot.qq_logged_in else _t(t, "ui.status.not_logged_in", "未登录"),
+            account=qq_account,
+        ),
+        qq_login_ok=snapshot.qq_logged_in,
     )
 
 
@@ -574,6 +585,10 @@ def build_web_console_view_model_from_dashboard(
         ("Hub stderr", dashboard.logs.get("hub_err", "(empty)")),
         ("Bridge stdout", dashboard.logs.get("bridge_out", "(empty)")),
         ("Bridge stderr", dashboard.logs.get("bridge_err", "(empty)")),
+        ("QQ OneBot Runtime stdout", dashboard.logs.get("onebot_runtime_out", "(empty)")),
+        ("QQ OneBot Runtime stderr", dashboard.logs.get("onebot_runtime_err", "(empty)")),
+        ("QQ Bridge stdout", dashboard.logs.get("qq_bridge_out", "(empty)")),
+        ("QQ Bridge stderr", dashboard.logs.get("qq_bridge_err", "(empty)")),
     ] if normalized_page_key == "diagnostics" else []
 
     return WebConsoleViewModel(

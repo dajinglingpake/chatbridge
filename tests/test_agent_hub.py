@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import tempfile
@@ -44,6 +45,33 @@ class AgentHubCancellationTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self._tempdir.cleanup()
+
+    def test_hub_config_load_adds_dedicated_qq_agent(self) -> None:
+        config_path = self.temp_path / "config" / "agent_hub.json"
+        session_dir = self.temp_path / "sessions"
+        workspace_dir = self.temp_path / "workspace"
+        config_path.parent.mkdir(parents=True)
+        session_dir.mkdir(parents=True)
+        workspace_dir.mkdir(parents=True)
+        config_path.write_text(
+            '{"codex_command":"codex","claude_command":"claude","opencode_command":"opencode","agents":[{"id":"main","name":"Main","workdir":"workspace","session_file":"sessions/main.txt","backend":"codex","enabled":true}]}',
+            encoding="utf-8",
+        )
+
+        with (
+            patch("agent_hub.APP_DIR", self.temp_path),
+            patch("agent_hub.CONFIG_PATH", config_path),
+            patch("agent_hub.SESSION_DIR", session_dir),
+            patch("agent_hub.WORKSPACE_DIR", workspace_dir),
+        ):
+            config = HubConfig.load()
+
+        self.assertIn("main", [agent.id for agent in config.agents])
+        self.assertIn("qq", [agent.id for agent in config.agents])
+        qq_agent = next(agent for agent in config.agents if agent.id == "qq")
+        self.assertEqual("QQ 会话", qq_agent.name)
+        saved = config_path.read_text(encoding="utf-8")
+        self.assertIn('"id": "qq"', saved)
 
     def _wait_until(self, predicate, timeout: float = 10.0) -> None:
         deadline = time.time() + timeout
@@ -155,6 +183,70 @@ class AgentHubCancellationTests(unittest.TestCase):
         self.assertEqual(18, percent)
         self.assertEqual(18, task.context_left_percent)
         mocked_query.assert_called_once()
+
+    def test_restore_marks_active_tasks_unknown_after_restart(self) -> None:
+        workdir = self.temp_path / "workspace"
+        session_file = self.temp_path / "sessions" / "main.txt"
+        workdir.mkdir(parents=True, exist_ok=True)
+        session_file.parent.mkdir(parents=True, exist_ok=True)
+        config = HubConfig(
+            codex_command="codex",
+            claude_command="claude",
+            opencode_command="opencode",
+            agents=[AgentConfig("main", "Main", str(workdir), str(session_file), backend="codex")],
+        )
+        state_path = self.temp_path / "state" / "agent_hub_state.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            json.dumps(
+                {
+                    "tasks": [
+                        {
+                            "id": "task-queued-restore",
+                            "agent_id": "main",
+                            "agent_name": "Main",
+                            "backend": "codex",
+                            "source": "wechat",
+                            "sender_id": "sender-test",
+                            "prompt": "queued",
+                            "status": "queued",
+                            "created_at": "2026-04-24T00:00:00",
+                            "session_name": "default",
+                            "workdir": str(workdir),
+                        },
+                        {
+                            "id": "task-running-restore",
+                            "agent_id": "main",
+                            "agent_name": "Main",
+                            "backend": "codex",
+                            "source": "wechat",
+                            "sender_id": "sender-test",
+                            "prompt": "running",
+                            "status": "running",
+                            "created_at": "2026-04-24T00:01:00",
+                            "session_name": "default",
+                            "workdir": str(workdir),
+                        },
+                    ],
+                    "agents": [],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("agent_hub.STATE_PATH", state_path),
+            patch("agent_hub.discover_external_agent_processes", return_value=[]),
+        ):
+            hub = MultiCodexHub(config)
+
+        queued = hub.get_task("task-queued-restore") or {}
+        running = hub.get_task("task-running-restore") or {}
+        self.assertEqual("unknown_after_restart", queued.get("status"))
+        self.assertIn("before this task could run", str(queued.get("error") or ""))
+        self.assertEqual("unknown_after_restart", running.get("status"))
+        self.assertIn("while this task was running", str(running.get("error") or ""))
 
     def test_progress_update_pushes_task_update_to_bridge_ipc(self) -> None:
         workdir = self.temp_path / "workspace"

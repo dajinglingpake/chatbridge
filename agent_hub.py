@@ -46,6 +46,8 @@ MCP_SERVER_NAME = "operations"
 MCP_SERVER_PATH = APP_DIR / "tools" / "operations_server.py"
 PERF_LOG_MIN_SECONDS = 0.25
 IPC_IDLE_SLEEP_SECONDS = 0.05
+DEFAULT_MAIN_AGENT_ID = "main"
+DEFAULT_QQ_AGENT_ID = "qq"
 
 
 def now_iso() -> str:
@@ -105,6 +107,23 @@ def _normalize_agent(raw: object) -> AgentConfig | None:
     )
 
 
+def _default_agent(agent_id: str) -> AgentConfig:
+    if agent_id == DEFAULT_QQ_AGENT_ID:
+        return AgentConfig(DEFAULT_QQ_AGENT_ID, "QQ 会话", str(WORKSPACE_DIR), str(SESSION_DIR / "qq.txt"))
+    return AgentConfig(DEFAULT_MAIN_AGENT_ID, "默认会话", str(WORKSPACE_DIR), str(SESSION_DIR / "main.txt"))
+
+
+def _ensure_default_agents(agents: list[AgentConfig]) -> tuple[list[AgentConfig], bool]:
+    changed = False
+    if not any(agent.id == DEFAULT_MAIN_AGENT_ID for agent in agents):
+        agents.insert(0, _default_agent(DEFAULT_MAIN_AGENT_ID))
+        changed = True
+    if not any(agent.id == DEFAULT_QQ_AGENT_ID for agent in agents):
+        agents.append(_default_agent(DEFAULT_QQ_AGENT_ID))
+        changed = True
+    return agents, changed
+
+
 @dataclass
 class HubConfig:
     codex_command: str = field(default_factory=lambda: resolve_command(DEFAULT_BACKEND_KEY))
@@ -119,7 +138,8 @@ class HubConfig:
             SESSION_DIR.mkdir(parents=True, exist_ok=True)
             cfg = cls(
                 agents=[
-                    AgentConfig("main", "默认会话", str(WORKSPACE_DIR), str(SESSION_DIR / "main.txt")),
+                    _default_agent(DEFAULT_MAIN_AGENT_ID),
+                    _default_agent(DEFAULT_QQ_AGENT_ID),
                 ]
             )
             cfg.save()
@@ -129,7 +149,8 @@ class HubConfig:
             SESSION_DIR.mkdir(parents=True, exist_ok=True)
             cfg = cls(
                 agents=[
-                    AgentConfig("main", "默认会话", str(WORKSPACE_DIR), str(SESSION_DIR / "main.txt")),
+                    _default_agent(DEFAULT_MAIN_AGENT_ID),
+                    _default_agent(DEFAULT_QQ_AGENT_ID),
                 ]
             )
             cfg.save()
@@ -143,15 +164,19 @@ class HubConfig:
         raw["opencode_command"] = resolve_command(str(raw.get("opencode_command") or "opencode"))
         if not raw["agents"]:
             raw["agents"] = [
-                AgentConfig("main", "默认会话", str(WORKSPACE_DIR), str(SESSION_DIR / "main.txt")),
+                _default_agent(DEFAULT_MAIN_AGENT_ID),
             ]
+        raw["agents"], changed = _ensure_default_agents(raw["agents"])
         for agent in raw["agents"]:
             agent.name = (agent.name or "默认会话").strip()
             agent.workdir = _to_abs_path(agent.workdir, WORKSPACE_DIR)
             agent.session_file = _to_abs_path(agent.session_file, SESSION_DIR / f"{agent.id}.txt")
             agent.backend = normalize_backend(agent.backend)
             Path(agent.workdir).mkdir(parents=True, exist_ok=True)
-        return cls(**raw)
+        cfg = cls(**raw)
+        if changed:
+            cfg.save()
+        return cfg
 
     def save(self) -> None:
         data = asdict(self)
@@ -189,9 +214,14 @@ class MultiCodexHub:
             if task is None:
                 continue
             task.backend = normalize_backend(task.backend)
-            if task.status == "running":
+            if task.status in {"queued", "running"}:
+                previous_status = task.status
                 task.status = "unknown_after_restart"
-                task.error = "Hub restarted while this task was running."
+                task.error = (
+                    "Hub restarted before this task could run."
+                    if previous_status == "queued"
+                    else "Hub restarted while this task was running."
+                )
                 task.finished_at = now_iso()
             self.tasks.append(task)
         for raw_agent in previous.get("agents", []):

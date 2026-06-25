@@ -16,8 +16,12 @@ def _runtime_snapshot(*, bridge_running: bool) -> RuntimeSnapshot:
     return RuntimeSnapshot(
         hub_running=False,
         bridge_running=bridge_running,
+        qq_bridge_running=False,
+        onebot_runtime_running=False,
         hub_pid=None,
         bridge_pid=202 if bridge_running else None,
+        qq_bridge_pid=None,
+        onebot_runtime_pid=None,
         codex_processes=[],
         log_dir=".runtime/logs",
     )

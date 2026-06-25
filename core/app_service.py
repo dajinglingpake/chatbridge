@@ -15,7 +15,23 @@ import time
 from agent_backends import supported_backend_keys
 from env_tools import run_shell_command
 from local_ipc import create_request, wait_for_response
-from runtime_stack import BRIDGE_CONVERSATIONS_PATH, emergency_stop, get_runtime_snapshot, restart_all, restart_bridge, start_all, stop_all, stop_external_agent_process
+from runtime_stack import (
+    BRIDGE_CONVERSATIONS_PATH,
+    emergency_stop,
+    get_runtime_snapshot,
+    restart_all,
+    restart_bridge,
+    restart_onebot_runtime,
+    restart_qq_bridge,
+    start_all,
+    start_onebot_runtime,
+    start_qq_stack,
+    start_qq_bridge,
+    stop_all,
+    stop_external_agent_process,
+    stop_onebot_runtime,
+    stop_qq_bridge,
+)
 
 from core.accounts import account_conversation_path, activate_account
 from bridge_config import APP_DIR, BridgeConfig, normalize_backend
@@ -75,6 +91,13 @@ def run_named_action(action: str) -> ServiceResult:
         "stop": stop_all,
         "restart": restart_all,
         "restart-bridge": restart_bridge,
+        "start-onebot-runtime": lambda: [start_onebot_runtime()],
+        "stop-onebot-runtime": lambda: [stop_onebot_runtime()],
+        "restart-onebot-runtime": restart_onebot_runtime,
+        "start-qq-bridge": start_qq_stack,
+        "stop-qq-bridge": lambda: [stop_qq_bridge()],
+        "restart-qq-bridge": restart_qq_bridge,
+        "prepare-qq-login": start_qq_stack,
         "emergency-stop": emergency_stop,
     }
     runner = actions.get(action)
@@ -93,7 +116,9 @@ def _broadcast_pre_stop_notice(action: str):
     detail = (
         f"即将执行服务停止操作: {action}\n"
         f"Hub PID: {snapshot.hub_pid or '-'}\n"
-        f"Bridge PID: {snapshot.bridge_pid or '-'}"
+        f"Bridge PID: {snapshot.bridge_pid or '-'}\n"
+        f"QQ OneBot Runtime PID: {snapshot.onebot_runtime_pid or '-'}\n"
+        f"QQ Bridge PID: {snapshot.qq_bridge_pid or '-'}"
     )
     notice = broadcast_weixin_notice_by_kind("service", f"服务操作: {action}", detail)
     if notice.recipient_count > 0 and notice.error != "disabled":
@@ -103,7 +128,7 @@ def _broadcast_pre_stop_notice(action: str):
 
 def schedule_named_action(action: str, *, delay_seconds: float = 1.0) -> ServiceResult:
     cleaned_action = action.strip()
-    if cleaned_action not in {"start", "stop", "restart", "restart-bridge", "emergency-stop"}:
+    if cleaned_action not in {"start", "stop", "restart", "restart-bridge", "start-onebot-runtime", "stop-onebot-runtime", "restart-onebot-runtime", "start-qq-bridge", "stop-qq-bridge", "restart-qq-bridge", "prepare-qq-login", "emergency-stop"}:
         return ServiceResult(ok=False, message=f"未知操作：{cleaned_action or action}")
 
     safe_delay = max(0.0, float(delay_seconds))
@@ -130,6 +155,8 @@ def schedule_named_action(action: str, *, delay_seconds: float = 1.0) -> Service
         scheduler_python=sys.executable,
         hub_pid=snapshot.hub_pid,
         bridge_pid=snapshot.bridge_pid,
+        onebot_runtime_pid=snapshot.onebot_runtime_pid,
+        qq_bridge_pid=snapshot.qq_bridge_pid,
     )
     _append_action_log(
         "scheduled",
@@ -140,6 +167,8 @@ def schedule_named_action(action: str, *, delay_seconds: float = 1.0) -> Service
         scheduler_python=sys.executable,
         hub_pid=snapshot.hub_pid,
         bridge_pid=snapshot.bridge_pid,
+        onebot_runtime_pid=snapshot.onebot_runtime_pid,
+        qq_bridge_pid=snapshot.qq_bridge_pid,
     )
     with APP_SERVICE_OUT_LOG.open("ab") as out_handle, APP_SERVICE_ERR_LOG.open("ab") as err_handle:
         proc = subprocess.Popen(
@@ -161,6 +190,8 @@ def schedule_named_action(action: str, *, delay_seconds: float = 1.0) -> Service
         scheduler_python=sys.executable,
         hub_pid=snapshot.hub_pid,
         bridge_pid=snapshot.bridge_pid,
+        onebot_runtime_pid=snapshot.onebot_runtime_pid,
+        qq_bridge_pid=snapshot.qq_bridge_pid,
     )
     _append_action_log(
         "launcher_spawned",

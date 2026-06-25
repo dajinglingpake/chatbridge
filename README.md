@@ -127,6 +127,19 @@ Or run web mode directly:
 python3 ./main.py --host 0.0.0.0 --port 8765
 ```
 
+Optional QQ OneBot bridge:
+
+```powershell
+$env:QQ_ONEBOT_API_BASE="http://127.0.0.1:3000"
+$env:QQ_ONEBOT_LISTEN_HOST="127.0.0.1"
+$env:QQ_ONEBOT_LISTEN_PORT="5701"
+python qq_onebot_bridge.py
+```
+
+Click "Scan to log in to QQ" in the web console to automatically prepare and start a local QQ OneBot runtime. ChatBridge downloads the official NapCat Shell runtime into `.runtime/onebot-runtime/napcat-shell/`, writes the OneBot HTTP API and reverse HTTP event configuration, and opens the login QR code in the dialog. If NapCat cannot be installed, it falls back to a self-contained Lagrange.OneBot runtime. Media-only QQ messages are cached as context for the sender's next text message.
+
+If you prefer your own runtime, set `CHATBRIDGE_ONEBOT_RUNTIME_COMMAND` to a local LLOneBot, Lagrange.OneBot, or NapCat launcher. In that mode, keep the OneBot HTTP API at `http://127.0.0.1:3000` and reverse HTTP events at `http://127.0.0.1:5701/`. Review the runtime's license and local legal requirements before use.
+
 On startup, the unified UI will:
 
 - create `.runtime/` if needed
@@ -221,6 +234,7 @@ The repo already ignores:
 - `config/weixin_bridge.json`: primary WeChat bridge config
 - `agent_backends/`: backend interface and isolated implementations; new `*_backend.py` files are auto-discovered
 - `weixin_hub_bridge.py`: WeChat bridge; protocol references: Tencent `openclaw-weixin`, `wechat-ilink-client`
+- `qq_onebot_bridge.py`: optional QQ bridge for OneBot v11 reverse HTTP services such as LLOneBot, Lagrange.OneBot, or NapCat
 
 ## WeChat Commands
 

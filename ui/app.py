@@ -11,6 +11,7 @@ from core.dashboard import refresh_dashboard_cache
 from core.view_models import build_web_console_view_model
 from localization import Localizer, normalize_language
 from ui.qr_login import install_qr_login_dialog
+from ui.qq_login import install_qq_login_dialog
 from ui.sections import render_diagnostics_section, render_home_section, render_sessions_section
 
 
@@ -303,6 +304,7 @@ def create_ui() -> None:
         "load_task_detail": False,
         "checks_in_progress": False,
         "active_page": "home",
+        "bridge_mode": "weixin",
         "language": localizer_ref["value"].language,
         "qr_login_open": False,
     }
@@ -358,6 +360,13 @@ def create_ui() -> None:
         localizer_ref["value"] = Localizer(selected)
         ui.run_javascript(f"window.location.href = '/?lang={selected}'")
 
+    def set_bridge_mode(mode: str) -> None:
+        cleaned = str(mode or "").strip()
+        if cleaned not in {"weixin", "qq"}:
+            return
+        state["bridge_mode"] = cleaned
+        content_view.refresh()
+
     def apply_request_language(request) -> None:
         selected = normalize_language(str(request.query_params.get("lang") or ""))
         if selected in {"zh-CN", "en-US"} and selected != state["language"]:
@@ -379,6 +388,7 @@ def create_ui() -> None:
         on_open=mark_qr_login_open,
         on_close=mark_qr_login_closed,
     )
+    open_qq_login = install_qq_login_dialog(ui, notify_only, translate)
 
     @ui.refreshable
     def content_view() -> None:
@@ -395,6 +405,9 @@ def create_ui() -> None:
                     _switch_account,
                     _set_weixin_notice_enabled,
                     open_qr_login,
+                    open_qq_login,
+                    state["bridge_mode"],
+                    set_bridge_mode,
                 )
             elif state["active_page"] == "sessions":
                 render_sessions_section(
@@ -634,6 +647,8 @@ def create_ui() -> None:
     @ui.page("/")
     def index_page(request: Request) -> None:
         apply_request_language(request)
+        requested_mode = str(request.query_params.get("mode") or "").strip()
+        state["bridge_mode"] = requested_mode if requested_mode in {"weixin", "qq"} else "weixin"
         shell_view()
         content_view()
 

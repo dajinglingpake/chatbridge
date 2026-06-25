@@ -8,6 +8,8 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,6 +19,7 @@ except ImportError:  # pragma: no cover - optional dependency
     psutil = None
 
 from core.json_store import load_json, save_json
+from core.onebot_runtime_installer import NAPCAT_QUICK_LOGIN_ENV, NAPCAT_RUNTIME_NAME, NAPCAT_WEBUI_TOKEN, ensure_default_onebot_runtime, find_installed_napcat_launcher
 from core.platform_compat import IS_WINDOWS, creationflags
 from core.runtime_paths import (
     APP_DIR,
@@ -30,6 +33,13 @@ from core.runtime_paths import (
     HUB_PID_FILE,
     HUB_STATE_PATH,
     LOG_DIR,
+    ONEBOT_RUNTIME_ERR_LOG,
+    ONEBOT_RUNTIME_OUT_LOG,
+    ONEBOT_RUNTIME_PID_FILE,
+    ONEBOT_RUNTIME_DIR,
+    QQ_BRIDGE_ERR_LOG,
+    QQ_BRIDGE_OUT_LOG,
+    QQ_BRIDGE_PID_FILE,
     RUNTIME_DIR,
     SESSION_DIR,
     STATE_DIR,
@@ -39,6 +49,10 @@ from core.state_models import ExternalAgentProcessState, RuntimeSnapshot
 
 HUB_SCRIPT = APP_DIR / "agent_hub.py"
 BRIDGE_SCRIPT = APP_DIR / "weixin_hub_bridge.py"
+QQ_BRIDGE_SCRIPT = APP_DIR / "qq_onebot_bridge.py"
+ONEBOT_RUNTIME_COMMAND_ENV = "CHATBRIDGE_ONEBOT_RUNTIME_COMMAND"
+ONEBOT_API_BASE = "http://127.0.0.1:3000"
+ONEBOT_RUNTIME_PROCESS_MARKERS = ("llonebot", "lagrange.onebot", "lagrange-onebot", "chatbridge-start-lagrange", "chatbridge-start-napcat", "napcat", "napcatqq", "go-cqhttp")
 PROXY_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy")
 AGENT_PROCESS_KEYWORDS = ("codex", "claude", "opencode")
 AGENT_PROCESS_HOST_NAMES = {
@@ -167,11 +181,43 @@ def _find_process_by_script(script_path: Path):
 def _find_processes_by_script(script_path: Path) -> list[object]:
     if psutil is None:
         return []
-    target = str(script_path)
+    targets = {str(script_path).lower(), str(script_path).replace("\\", "/").lower()}
     matches: list[object] = []
     for proc in psutil.process_iter(["pid", "cmdline"]):
         cmdline = proc.info.get("cmdline") or []
-        if target in cmdline or target in " ".join(cmdline):
+        joined = " ".join(str(item) for item in cmdline).lower()
+        normalized_joined = joined.replace("\\", "/")
+        if any(target in joined or target in normalized_joined for target in targets):
+            matches.append(proc)
+    return sorted(matches, key=lambda item: getattr(item, "pid", 0))
+
+
+def _find_processes_by_markers(markers: tuple[str, ...]) -> list[object]:
+    if psutil is None:
+        return []
+    lowered_markers = tuple(marker.lower() for marker in markers)
+    launcher_markers = (
+        "llonebot",
+        "lagrange.onebot",
+        "lagrange-onebot",
+        "chatbridge-start-lagrange",
+        "chatbridge-start-napcat",
+        "napcat.bat",
+        "napcatwinbootmain",
+        "napcat.mjs",
+        "napcat.shell",
+        "go-cqhttp",
+    )
+    current_pid = os.getpid()
+    matches: list[object] = []
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        if proc.info.get("pid") == current_pid:
+            continue
+        name = str(proc.info.get("name") or "")
+        cmdline = " ".join(proc.info.get("cmdline") or [])
+        lowered_name = name.lower()
+        lowered_cmdline = cmdline.lower()
+        if any(marker in lowered_name for marker in lowered_markers) or any(marker in lowered_cmdline for marker in launcher_markers):
             matches.append(proc)
     return sorted(matches, key=lambda item: getattr(item, "pid", 0))
 
@@ -181,6 +227,8 @@ def _managed_root_pids() -> set[int]:
     for status in [
         get_managed_status("Hub", HUB_SCRIPT, HUB_PID_FILE),
         get_managed_status("Bridge", BRIDGE_SCRIPT, BRIDGE_PID_FILE),
+        get_managed_status("QQ Bridge", QQ_BRIDGE_SCRIPT, QQ_BRIDGE_PID_FILE),
+        get_onebot_runtime_status(),
     ]:
         if status.running and status.pid:
             managed.add(status.pid)
@@ -272,6 +320,22 @@ def get_managed_status(name: str, script_path: Path, pid_file: Path) -> ManagedS
     return ManagedStatus(name=name, script_path=script_path, pid_file=pid_file, running=False, pid=None)
 
 
+def get_onebot_runtime_status() -> ManagedStatus:
+    pid = _read_pid_file(ONEBOT_RUNTIME_PID_FILE)
+    proc = _get_process(pid) if pid else None
+    if proc and any(marker in _cmdline_text(proc).lower() for marker in ONEBOT_RUNTIME_PROCESS_MARKERS):
+        return ManagedStatus(name="QQ OneBot Runtime", script_path=Path("OneBot"), pid_file=ONEBOT_RUNTIME_PID_FILE, running=True, pid=proc.pid)
+
+    discovered = _find_processes_by_markers(ONEBOT_RUNTIME_PROCESS_MARKERS)
+    if discovered:
+        primary = discovered[0]
+        _write_pid_file(ONEBOT_RUNTIME_PID_FILE, primary.pid)
+        return ManagedStatus(name="QQ OneBot Runtime", script_path=Path("OneBot"), pid_file=ONEBOT_RUNTIME_PID_FILE, running=True, pid=primary.pid)
+
+    _clear_pid_file(ONEBOT_RUNTIME_PID_FILE)
+    return ManagedStatus(name="QQ OneBot Runtime", script_path=Path("OneBot"), pid_file=ONEBOT_RUNTIME_PID_FILE, running=False, pid=None)
+
+
 def _get_python_command(gui: bool = False) -> str:
     if gui:
         pythonw = shutil_which("pythonw")
@@ -313,7 +377,7 @@ def _read_process_proxy_env(pid: int) -> dict[str, str]:
 
 def _discover_proxy_env() -> dict[str, str]:
     values = {key: value for key in PROXY_ENV_KEYS if (value := os.environ.get(key, "").strip())}
-    for script_path in (HUB_SCRIPT, BRIDGE_SCRIPT):
+    for script_path in (HUB_SCRIPT, BRIDGE_SCRIPT, QQ_BRIDGE_SCRIPT):
         for proc in _find_processes_by_script(script_path):
             for key, value in _read_process_proxy_env(proc.pid).items():
                 values.setdefault(key, value)
@@ -326,6 +390,86 @@ def _managed_subprocess_env(base_env: dict[str, str] | None = None) -> dict[str,
         if not env.get(key, "").strip():
             env[key] = value
     return env
+
+
+def _split_command(raw_command: str) -> list[str]:
+    if IS_WINDOWS:
+        return [raw_command]
+    return shlex.split(raw_command)
+
+
+def _powershell_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _resolve_onebot_runtime_command() -> list[str]:
+    raw_command = str(os.environ.get(ONEBOT_RUNTIME_COMMAND_ENV) or "").strip()
+    if raw_command:
+        return _split_command(raw_command)
+    for executable_name in ("llonebot", "LLOneBot", "lagrange.onebot", "lagrange-onebot", "napcat"):
+        executable = shutil_which(executable_name)
+        if executable:
+            return [executable]
+    installed = find_installed_napcat_launcher()
+    if installed is not None:
+        return [str(installed)]
+    return []
+
+
+def _onebot_runtime_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
+    env = _managed_subprocess_env(base_env)
+    env.setdefault("NAPCAT_WEBUI_SECRET_KEY", NAPCAT_WEBUI_TOKEN)
+    env.setdefault("NAPCAT_WEBUI_PREFERRED_PORT", "6099")
+    if not env.get(NAPCAT_QUICK_LOGIN_ENV, "").strip():
+        quick_login_uin = _detect_napcat_quick_login_uin()
+        if quick_login_uin:
+            env[NAPCAT_QUICK_LOGIN_ENV] = quick_login_uin
+    return env
+
+
+def _detect_napcat_quick_login_uin() -> str:
+    config_dir = ONEBOT_RUNTIME_DIR / NAPCAT_RUNTIME_NAME / "config"
+    if not config_dir.is_dir():
+        return ""
+    candidates = []
+    for path in config_dir.glob("onebot11_*.json"):
+        suffix = path.stem.removeprefix("onebot11_").strip()
+        if suffix.isdigit():
+            candidates.append(path)
+    if not candidates:
+        return ""
+    latest = max(candidates, key=lambda path: path.stat().st_mtime)
+    return latest.stem.removeprefix("onebot11_").strip()
+
+
+def _query_onebot_api(action: str, *, timeout: float = 0.8) -> dict:
+    request = urllib.request.Request(
+        f"{ONEBOT_API_BASE}/{action}",
+        data=b"{}",
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(request, timeout=timeout) as response:
+        payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    return payload if isinstance(payload, dict) else {}
+
+
+def get_qq_login_status() -> tuple[bool, str, str]:
+    try:
+        status_payload = _query_onebot_api("get_status")
+        login_payload = _query_onebot_api("get_login_info")
+    except (OSError, RuntimeError, json.JSONDecodeError, urllib.error.URLError):
+        return False, "", ""
+
+    status_data = status_payload.get("data") if isinstance(status_payload.get("data"), dict) else {}
+    login_data = login_payload.get("data") if isinstance(login_payload.get("data"), dict) else {}
+    user_id = str(login_data.get("user_id") or "").strip()
+    nickname = str(login_data.get("nickname") or "").strip()
+    online = status_data.get("online")
+    good = status_data.get("good")
+    logged_in = bool(user_id) and online is not False and good is not False
+    return logged_in, user_id, nickname
 
 
 def start_managed(
@@ -361,6 +505,107 @@ def start_managed(
             env=_managed_subprocess_env(env),
             creationflags=creationflags(),
             start_new_session=not IS_WINDOWS,
+        )
+    _write_pid_file(pid_file, proc.pid)
+    return f"{name} started (PID {proc.pid})"
+
+
+def start_managed_command(
+    name: str,
+    command: list[str],
+    pid_file: Path,
+    stdout_log: Path,
+    stderr_log: Path,
+    *,
+    env: dict[str, str] | None = None,
+) -> str:
+    if not command:
+        return f"{name} unavailable: external runtime command not found"
+    running = get_onebot_runtime_status()
+    if running.running and running.pid:
+        return f"{name} already running (PID {running.pid})"
+
+    ensure_runtime_dirs()
+    command_cwd = APP_DIR
+    command_path = Path(command[0]) if command else Path()
+    if command_path.exists():
+        command_cwd = command_path.parent
+    use_shell = IS_WINDOWS and len(command) == 1 and command[0].lower().endswith((".bat", ".cmd"))
+    needs_console = IS_WINDOWS and len(command) == 1 and command_path.name.lower() == "lagrange.onebot.exe"
+    needs_desktop_start = IS_WINDOWS and command_path.name.lower() == "napcatwinbootmain.exe"
+    popen_command: str | list[str] = command[0] if use_shell else command
+    if needs_desktop_start:
+        powershell = shutil_which("powershell") or shutil_which("pwsh") or "powershell"
+        arguments = command[1:]
+        argument_list = "@(" + ",".join(_powershell_quote(argument) for argument in arguments) + ")"
+        ps_command = (
+            "$p = Start-Process -FilePath "
+            f"{_powershell_quote(command[0])} "
+            f"-ArgumentList {argument_list} "
+            f"-WorkingDirectory {_powershell_quote(str(command_cwd))} "
+            "-PassThru; $p.Id"
+        )
+        completed = subprocess.run(
+            [powershell, "-NoProfile", "-Command", ps_command],
+            cwd=str(APP_DIR),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=_onebot_runtime_env(env),
+            creationflags=creationflags(),
+            check=False,
+        )
+        if completed.returncode != 0:
+            return f"{name} failed to start: {completed.stderr.strip() or completed.stdout.strip() or completed.returncode}"
+        pid_text = completed.stdout.strip().splitlines()[-1] if completed.stdout.strip() else ""
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            return f"{name} failed to start: invalid PID from launcher {pid_text!r}"
+        _write_pid_file(pid_file, pid)
+        return f"{name} started (PID {pid})"
+    if needs_console:
+        launcher_path = command_cwd / "chatbridge-start-lagrange.cmd"
+        launcher_path.write_text(f"@echo off\r\n\"{command[0]}\"\r\n", encoding="utf-8")
+        powershell = shutil_which("powershell") or shutil_which("pwsh") or "powershell"
+        ps_command = (
+            "$p = Start-Process -FilePath "
+            f"{_powershell_quote(str(launcher_path))} "
+            f"-WorkingDirectory {_powershell_quote(str(command_cwd))} "
+            "-PassThru; $p.Id"
+        )
+        completed = subprocess.run(
+            [powershell, "-NoProfile", "-Command", ps_command],
+            cwd=str(APP_DIR),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=_onebot_runtime_env(env),
+            creationflags=creationflags(),
+            check=False,
+        )
+        if completed.returncode != 0:
+            return f"{name} failed to start: {completed.stderr.strip() or completed.stdout.strip() or completed.returncode}"
+        pid_text = completed.stdout.strip().splitlines()[-1] if completed.stdout.strip() else ""
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            return f"{name} failed to start: invalid PID from launcher {pid_text!r}"
+        _write_pid_file(pid_file, pid)
+        return f"{name} started (PID {pid})"
+    with stdout_log.open("ab") as out_handle, stderr_log.open("ab") as err_handle:
+        proc = subprocess.Popen(
+            popen_command,
+            cwd=str(command_cwd),
+            stdout=None if needs_console else out_handle,
+            stderr=None if needs_console else err_handle,
+            stdin=None if needs_console else subprocess.DEVNULL,
+            env=_onebot_runtime_env(env),
+            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0) if needs_console else creationflags(),
+            start_new_session=not IS_WINDOWS,
+            shell=use_shell,
         )
     _write_pid_file(pid_file, proc.pid)
     return f"{name} started (PID {proc.pid})"
@@ -452,7 +697,9 @@ def stop_managed(name: str, script_path: Path, pid_file: Path) -> str:
 
 
 def start_all(*, env: dict[str, str] | None = None) -> list[str]:
-    messages = [start_managed("Hub", HUB_SCRIPT, HUB_PID_FILE, HUB_OUT_LOG, HUB_ERR_LOG, env=env)]
+    messages = [stop_qq_bridge()]
+    messages.append(stop_onebot_runtime())
+    messages.append(start_managed("Hub", HUB_SCRIPT, HUB_PID_FILE, HUB_OUT_LOG, HUB_ERR_LOG, env=env))
     time.sleep(1.5)
     messages.append(start_managed("Bridge", BRIDGE_SCRIPT, BRIDGE_PID_FILE, BRIDGE_OUT_LOG, BRIDGE_ERR_LOG, env=env))
     return messages
@@ -462,8 +709,49 @@ def start_bridge(*, env: dict[str, str] | None = None) -> str:
     return start_managed("Bridge", BRIDGE_SCRIPT, BRIDGE_PID_FILE, BRIDGE_OUT_LOG, BRIDGE_ERR_LOG, env=env)
 
 
+def start_qq_bridge(*, env: dict[str, str] | None = None) -> str:
+    return start_managed("QQ Bridge", QQ_BRIDGE_SCRIPT, QQ_BRIDGE_PID_FILE, QQ_BRIDGE_OUT_LOG, QQ_BRIDGE_ERR_LOG, env=env)
+
+
+def start_onebot_runtime(*, env: dict[str, str] | None = None) -> str:
+    command = _resolve_onebot_runtime_command()
+    if not command:
+        install_result = ensure_default_onebot_runtime()
+        if not install_result.ok or install_result.executable_path is None:
+            return install_result.message
+        command = [str(install_result.executable_path)]
+    return start_managed_command("QQ OneBot Runtime", command, ONEBOT_RUNTIME_PID_FILE, ONEBOT_RUNTIME_OUT_LOG, ONEBOT_RUNTIME_ERR_LOG, env=env)
+
+
+def start_qq_stack(*, env: dict[str, str] | None = None) -> list[str]:
+    messages = [stop_bridge()]
+    messages.append(start_managed("Hub", HUB_SCRIPT, HUB_PID_FILE, HUB_OUT_LOG, HUB_ERR_LOG, env=env))
+    messages.append(start_onebot_runtime(env=env))
+    messages.append(start_qq_bridge(env=env))
+    return messages
+
+
 def stop_bridge() -> str:
     return stop_managed("Bridge", BRIDGE_SCRIPT, BRIDGE_PID_FILE)
+
+
+def stop_qq_bridge() -> str:
+    return stop_managed("QQ Bridge", QQ_BRIDGE_SCRIPT, QQ_BRIDGE_PID_FILE)
+
+
+def stop_onebot_runtime() -> str:
+    running_processes = _find_processes_by_markers(ONEBOT_RUNTIME_PROCESS_MARKERS)
+    if not running_processes:
+        _clear_pid_file(ONEBOT_RUNTIME_PID_FILE)
+        return "QQ OneBot Runtime is not running"
+    stopped_pids: list[int] = []
+    for proc in running_processes:
+        stopped_pids.append(proc.pid)
+        _taskkill(proc.pid)
+    _clear_pid_file(ONEBOT_RUNTIME_PID_FILE)
+    if len(stopped_pids) == 1:
+        return f"QQ OneBot Runtime stopped (PID {stopped_pids[0]})"
+    return f"QQ OneBot Runtime stopped (PIDs {', '.join(str(pid) for pid in stopped_pids)})"
 
 
 def restart_bridge() -> list[str]:
@@ -471,15 +759,28 @@ def restart_bridge() -> list[str]:
     return [stop_bridge(), start_bridge(env=env)]
 
 
+def restart_qq_bridge() -> list[str]:
+    env = _managed_subprocess_env()
+    return [stop_bridge(), stop_qq_bridge(), start_qq_bridge(env=env)]
+
+
+def restart_onebot_runtime() -> list[str]:
+    env = _onebot_runtime_env()
+    return [stop_bridge(), stop_qq_bridge(), stop_onebot_runtime(), start_onebot_runtime(env=env), start_qq_bridge(env=env)]
+
+
 def stop_all() -> list[str]:
-    messages = [stop_managed("Bridge", BRIDGE_SCRIPT, BRIDGE_PID_FILE)]
+    messages = [stop_qq_bridge()]
+    messages.append(stop_onebot_runtime())
+    messages.append(stop_managed("Bridge", BRIDGE_SCRIPT, BRIDGE_PID_FILE))
     messages.append(stop_managed("Hub", HUB_SCRIPT, HUB_PID_FILE))
     return messages
 
 
 def restart_all() -> list[str]:
     env = _managed_subprocess_env()
-    messages = stop_all()
+    messages = [stop_managed("Bridge", BRIDGE_SCRIPT, BRIDGE_PID_FILE)]
+    messages.append(stop_managed("Hub", HUB_SCRIPT, HUB_PID_FILE))
     messages.extend(start_all(env=env))
     return messages
 
@@ -528,11 +829,21 @@ def read_json(path: Path) -> dict:
 def get_runtime_snapshot(*, include_agent_processes: bool = True) -> RuntimeSnapshot:
     hub = get_managed_status("Hub", HUB_SCRIPT, HUB_PID_FILE)
     bridge = get_managed_status("Bridge", BRIDGE_SCRIPT, BRIDGE_PID_FILE)
+    qq_bridge = get_managed_status("QQ Bridge", QQ_BRIDGE_SCRIPT, QQ_BRIDGE_PID_FILE)
+    onebot_runtime = get_onebot_runtime_status()
+    qq_logged_in, qq_user_id, qq_nickname = get_qq_login_status() if onebot_runtime.running else (False, "", "")
     return RuntimeSnapshot(
         hub_running=hub.running,
         bridge_running=bridge.running,
+        qq_bridge_running=qq_bridge.running,
+        onebot_runtime_running=onebot_runtime.running,
         hub_pid=hub.pid,
         bridge_pid=bridge.pid,
+        qq_bridge_pid=qq_bridge.pid,
+        onebot_runtime_pid=onebot_runtime.pid,
         codex_processes=list_codex_processes() if include_agent_processes else [],
         log_dir=str(LOG_DIR),
+        qq_logged_in=qq_logged_in,
+        qq_user_id=qq_user_id,
+        qq_nickname=qq_nickname,
     )

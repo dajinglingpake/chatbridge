@@ -22,6 +22,10 @@ from runtime_stack import (
     HUB_ERR_LOG,
     HUB_OUT_LOG,
     HUB_STATE_PATH,
+    ONEBOT_RUNTIME_ERR_LOG,
+    ONEBOT_RUNTIME_OUT_LOG,
+    QQ_BRIDGE_ERR_LOG,
+    QQ_BRIDGE_OUT_LOG,
     discover_external_agent_processes,
     get_runtime_snapshot,
     read_json,
@@ -129,7 +133,17 @@ def refresh_dashboard_cache(app_dir: Path, cache_key: str) -> None:
         snapshot = get_runtime_snapshot(include_agent_processes=False)
         hub_started_at = _process_started_at(snapshot.hub_pid)
         bridge_started_at = _process_started_at(snapshot.bridge_pid)
-        _write_cached_payload("logs", _load_logs(hub_started_at=hub_started_at, bridge_started_at=bridge_started_at))
+        onebot_runtime_started_at = _process_started_at(snapshot.onebot_runtime_pid)
+        qq_bridge_started_at = _process_started_at(snapshot.qq_bridge_pid)
+        _write_cached_payload(
+            "logs",
+            _load_logs(
+                hub_started_at=hub_started_at,
+                bridge_started_at=bridge_started_at,
+                onebot_runtime_started_at=onebot_runtime_started_at,
+                qq_bridge_started_at=qq_bridge_started_at,
+            ),
+        )
         return
     if normalized == "external_agent_processes":
         _write_cached_payload("external_agent_processes", discover_external_agent_processes())
@@ -145,7 +159,7 @@ def _read_cached_checks(checks_mode: str) -> dict[str, CheckSnapshot]:
     return {}
 
 
-def _load_logs(*, hub_started_at: float | None, bridge_started_at: float | None) -> dict[str, str]:
+def _load_logs(*, hub_started_at: float | None, bridge_started_at: float | None, onebot_runtime_started_at: float | None, qq_bridge_started_at: float | None) -> dict[str, str]:
     return {
         "hub_out": tail_text(HUB_OUT_LOG, start_marker="ChatBridge backend started"),
         "hub_err": tail_text(HUB_ERR_LOG, stale_before=hub_started_at),
@@ -155,6 +169,10 @@ def _load_logs(*, hub_started_at: float | None, bridge_started_at: float | None)
             start_marker="Weixin Hub Bridge started at",
         ),
         "bridge_err": tail_text(BRIDGE_ERR_LOG, stale_before=bridge_started_at),
+        "onebot_runtime_out": tail_text(ONEBOT_RUNTIME_OUT_LOG),
+        "onebot_runtime_err": tail_text(ONEBOT_RUNTIME_ERR_LOG, stale_before=onebot_runtime_started_at),
+        "qq_bridge_out": tail_text(QQ_BRIDGE_OUT_LOG, start_marker="QQ OneBot Bridge listening on"),
+        "qq_bridge_err": tail_text(QQ_BRIDGE_ERR_LOG, stale_before=qq_bridge_started_at),
     }
 
 

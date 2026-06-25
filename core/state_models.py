@@ -66,10 +66,17 @@ class ExternalAgentProcessState:
 class RuntimeSnapshot:
     hub_running: bool
     bridge_running: bool
+    qq_bridge_running: bool
+    onebot_runtime_running: bool
     hub_pid: int | None
     bridge_pid: int | None
+    qq_bridge_pid: int | None
+    onebot_runtime_pid: int | None
     codex_processes: list[str]
     log_dir: str
+    qq_logged_in: bool = False
+    qq_user_id: str = ""
+    qq_nickname: str = ""
 
     def to_dict(self) -> JsonObject:
         return asdict(self)

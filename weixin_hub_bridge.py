@@ -91,6 +91,9 @@ ACTIVE_TASK_POLL_TIMEOUT_MS = 500
 TERMINAL_TASK_STATUSES = frozenset({"succeeded", "failed", "canceled", "unknown_after_restart"})
 TYPING_KEEPALIVE_SECONDS = 5
 TYPING_TICKET_TTL_SECONDS = 23 * 60 * 60
+PENDING_TASK_RECONCILE_INTERVAL_SECONDS = 45.0
+PENDING_TASK_RECONCILE_BATCH_SIZE = 5
+PENDING_TASK_RECONCILE_TIMEOUT_SECONDS = 2.0
 PERF_LOG_MIN_SECONDS = 0.25
 ACTIVE_GETUPDATES_SLOW_LOG_SECONDS = 1.0
 CONTEXT_LEFT_QUERY_TIMEOUT_SECONDS = 2.0
@@ -204,6 +207,8 @@ class WeixinBridge:
         self._typing_worker_started = False
         self._pending_tasks_save_lock = threading.Lock()
         self._runtime_config_lock = threading.Lock()
+        self._pending_reconcile_last_at = 0.0
+        self._pending_reconcile_cursor = 0
         self.state = WeixinBridgeRuntimeState.create(
             now=now_iso(),
             managed_conversations=len(self.conversations),
@@ -441,6 +446,7 @@ class WeixinBridge:
             raise RuntimeError("weixin account token is missing; please log in first")
         base_url = (account.get("baseUrl") or DEFAULT_WEIXIN_BASE_URL).strip()
         self._process_bridge_ipc_once(base_url, token)
+        self._reconcile_pending_tasks(base_url, token)
         buf = self._load_sync_buf()
 
         payload = {"get_updates_buf": buf, "base_info": {"channel_version": "2.1.1"}}
@@ -491,6 +497,7 @@ class WeixinBridge:
             self._handle_message(base_url, token, msg)
 
         self._process_bridge_ipc_once(base_url, token)
+        self._reconcile_pending_tasks(base_url, token)
         self._save_state()
         if message_count or self.pending_tasks:
             self._log_perf("poll_once", poll_started, force=bool(message_count), status="ok", pending=len(self.pending_tasks), messages=message_count)
@@ -849,6 +856,8 @@ class WeixinBridge:
         if task is None:
             return
         tracked = self.pending_tasks.get(task.id)
+        if tracked is None and task.source and not task.source.strip().lower().startswith("wechat"):
+            return
         if tracked is None:
             tracked = WeixinPendingTaskState(
                 task_id=task.id,
@@ -875,6 +884,48 @@ class WeixinBridge:
             state_updated = True
         if state_updated:
             self._save_pending_tasks()
+
+    def _reconcile_pending_tasks(self, base_url: str, token: str) -> None:
+        if not self.pending_tasks:
+            return
+        now_value = time.monotonic()
+        if now_value - self._pending_reconcile_last_at < PENDING_TASK_RECONCILE_INTERVAL_SECONDS:
+            return
+        self._pending_reconcile_last_at = now_value
+
+        task_ids = list(self.pending_tasks.keys())
+        if self._pending_reconcile_cursor >= len(task_ids):
+            self._pending_reconcile_cursor = 0
+        start_index = self._pending_reconcile_cursor
+        selected = task_ids[start_index : start_index + PENDING_TASK_RECONCILE_BATCH_SIZE]
+        if len(selected) < PENDING_TASK_RECONCILE_BATCH_SIZE and start_index > 0:
+            selected.extend(task_ids[: PENDING_TASK_RECONCILE_BATCH_SIZE - len(selected)])
+        if not selected:
+            return
+        self._pending_reconcile_cursor = (start_index + len(selected)) % max(1, len(task_ids))
+
+        for task_id in selected:
+            if task_id not in self.pending_tasks:
+                continue
+            reconcile_started = time.perf_counter()
+            try:
+                response = self._ipc_request(
+                    "get_task",
+                    {"task_id": task_id},
+                    timeout_seconds=PENDING_TASK_RECONCILE_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._log_perf("pending_reconcile", reconcile_started, task_id=task_id, status="failed", error=str(exc)[:120])
+                continue
+            if not response.ok:
+                self._log_perf("pending_reconcile", reconcile_started, task_id=task_id, status="not_found")
+                continue
+            task = HubTask.from_dict(response.payload.get("task"), default_backend=self.config.default_backend)
+            if task is None:
+                self._log_perf("pending_reconcile", reconcile_started, task_id=task_id, status="invalid")
+                continue
+            self._handle_pushed_task_update(base_url, token, {"event": "reconcile", "task": task.to_dict()})
+            self._log_perf("pending_reconcile", reconcile_started, task_id=task_id, status=task.status)
 
     def _ensure_task_typing_best_effort(
         self,

@@ -2,19 +2,91 @@ from __future__ import annotations
 
 import unittest
 
-from core.app_state import build_issues, build_overview_lines
-from core.state_models import RuntimeSnapshot, WeixinBridgeRuntimeState
+from core.app_state import build_badge, build_issues, build_overview_lines, decide_primary_action
+from core.state_models import CheckSnapshot, RuntimeSnapshot, WeixinBridgeRuntimeState
 
 
 class AppStateTests(unittest.TestCase):
+    def test_weixin_stack_running_is_full_running_without_qq(self) -> None:
+        snapshot = RuntimeSnapshot(
+            hub_running=True,
+            hub_pid=101,
+            bridge_running=True,
+            bridge_pid=202,
+            onebot_runtime_running=False,
+            onebot_runtime_pid=None,
+            qq_bridge_running=False,
+            qq_bridge_pid=None,
+            codex_processes=[],
+            log_dir=".runtime/logs",
+        )
+
+        badge = build_badge(snapshot)
+        action, _, _ = decide_primary_action(snapshot, {})
+
+        self.assertEqual("运行中", badge.text)
+        self.assertEqual("stop", action)
+
+    def test_qq_stack_running_alone_does_not_block_weixin_start(self) -> None:
+        snapshot = RuntimeSnapshot(
+            hub_running=False,
+            hub_pid=None,
+            bridge_running=False,
+            bridge_pid=None,
+            onebot_runtime_running=True,
+            onebot_runtime_pid=303,
+            qq_bridge_running=True,
+            qq_bridge_pid=404,
+            codex_processes=[],
+            log_dir=".runtime/logs",
+        )
+        checks = {
+            "python": CheckSnapshot("python", "Python", True, ""),
+            "project_files": CheckSnapshot("project_files", "Project files", True, ""),
+            "weixin_account": CheckSnapshot("weixin_account", "Weixin account", True, ""),
+        }
+
+        badge = build_badge(snapshot)
+        action, _, _ = decide_primary_action(snapshot, checks)
+
+        self.assertEqual("已停止", badge.text)
+        self.assertEqual("start", action)
+
+    def test_full_qq_stack_running_is_running_mode(self) -> None:
+        snapshot = RuntimeSnapshot(
+            hub_running=True,
+            hub_pid=101,
+            bridge_running=False,
+            bridge_pid=None,
+            onebot_runtime_running=True,
+            onebot_runtime_pid=303,
+            qq_bridge_running=True,
+            qq_bridge_pid=404,
+            codex_processes=[],
+            log_dir=".runtime/logs",
+        )
+
+        badge = build_badge(snapshot)
+        action, _, _ = decide_primary_action(snapshot, {})
+
+        self.assertEqual("运行中", badge.text)
+        self.assertEqual("start", action)
+
     def test_build_overview_lines_renders_bridge_state_fields(self) -> None:
         snapshot = RuntimeSnapshot(
             hub_running=True,
             hub_pid=101,
             bridge_running=False,
             bridge_pid=0,
+            onebot_runtime_running=False,
+            onebot_runtime_pid=None,
+            qq_bridge_running=False,
+            qq_bridge_pid=None,
             codex_processes=[],
             log_dir=".runtime/logs",
+            qq_logged_in=True,
+            qq_user_id="2493227263",
+            qq_nickname="纳西妲",
         )
         bridge_state = WeixinBridgeRuntimeState(
             started_at="2026-01-01T00:00:00",
@@ -27,6 +99,7 @@ class AppStateTests(unittest.TestCase):
         lines = build_overview_lines(snapshot, bridge_state, "acct-1")
 
         self.assertIn("当前账号: acct-1", lines)
+        self.assertIn("QQ 登录: 已登录 纳西妲 (2493227263)", lines)
         self.assertIn("微信桥状态:", lines)
         self.assertIn("started_at: 2026-01-01T00:00:00", lines)
 
@@ -37,6 +110,10 @@ class AppStateTests(unittest.TestCase):
             bridge_running=True,
             codex_processes=[],
             bridge_pid=202,
+            onebot_runtime_running=False,
+            onebot_runtime_pid=None,
+            qq_bridge_running=False,
+            qq_bridge_pid=None,
             log_dir=".runtime/logs",
         )
         bridge_state = WeixinBridgeRuntimeState(

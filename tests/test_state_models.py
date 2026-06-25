@@ -12,8 +12,12 @@ class StateModelTests(unittest.TestCase):
         snapshot = RuntimeSnapshot(
             hub_running=True,
             bridge_running=False,
+            qq_bridge_running=True,
+            onebot_runtime_running=True,
             hub_pid=101,
             bridge_pid=None,
+            qq_bridge_pid=303,
+            onebot_runtime_pid=404,
             codex_processes=["PID 1 :: codex"],
             log_dir=".runtime/logs",
         )
@@ -22,10 +26,17 @@ class StateModelTests(unittest.TestCase):
             {
                 "hub_running": True,
                 "bridge_running": False,
+                "qq_bridge_running": True,
+                "onebot_runtime_running": True,
                 "hub_pid": 101,
                 "bridge_pid": None,
+                "qq_bridge_pid": 303,
+                "onebot_runtime_pid": 404,
                 "codex_processes": ["PID 1 :: codex"],
                 "log_dir": ".runtime/logs",
+                "qq_logged_in": False,
+                "qq_user_id": "",
+                "qq_nickname": "",
             },
             snapshot.to_dict(),
         )

@@ -28,14 +28,19 @@ def _fallback_text(key: str, **kwargs: object) -> str:
         "ui.status.running": "运行中",
         "ui.status.partial": "部分运行",
         "ui.status.stopped": "已停止",
+        "ui.status.logged_in": "已登录",
+        "ui.status.not_logged_in": "未登录",
         "ui.overview.hub": "Hub: {status} {pid}",
         "ui.overview.bridge": "Bridge: {status} {pid}",
+        "ui.overview.onebot_runtime": "QQ OneBot Runtime: {status} {pid}",
+        "ui.overview.qq_login": "QQ 登录: {status} {account}",
+        "ui.overview.qq_bridge": "QQ Bridge: {status} {pid}",
         "ui.overview.agent_processes": "Agent 进程数: {count}",
         "ui.overview.active_account": "当前账号: {account}",
         "ui.overview.none_agents": "没有检测到残留 Agent 进程。",
         "ui.overview.bridge_state": "微信桥状态:",
         "ui.summary.missing": "当前有 {count} 项需要处理，详情集中在诊断页。",
-        "ui.summary.ready_running": "环境已就绪，微信桥和会话后台都在运行。",
+        "ui.summary.ready_running": "环境已就绪，Hub 和微信桥都在运行。",
         "ui.summary.ready_waiting": "环境已就绪，等待启动后台服务。",
         "ui.primary.stop.label": "停止服务",
         "ui.primary.stop.hint": "关闭界面前优先通过这里正常停止，避免残留后台进程。",
@@ -46,7 +51,7 @@ def _fallback_text(key: str, **kwargs: object) -> str:
         "ui.primary.login.label": "打开微信账号目录",
         "ui.primary.login.hint": "当前缺少项目内微信账号文件，先把 json/sync 文件放到项目目录。",
         "ui.primary.start.label": "启动服务",
-        "ui.primary.start.hint": "环境检测已通过，直接启动微信桥和会话后台即可。",
+        "ui.primary.start.hint": "环境检测已通过，直接启动 Hub 和微信桥即可。",
         "ui.quickstart.step.desktop": "1. 桌面依赖",
         "ui.quickstart.step.node": "2. Node / Agent CLI",
         "ui.quickstart.step.accounts": "3. 微信账号文件",
@@ -100,8 +105,16 @@ def pid_text(pid: int | None) -> str:
     return f"(PID {pid})" if pid else ""
 
 
+def _weixin_mode_running(snapshot: RuntimeSnapshot) -> bool:
+    return snapshot.hub_running and snapshot.bridge_running
+
+
+def _qq_mode_running(snapshot: RuntimeSnapshot) -> bool:
+    return snapshot.hub_running and snapshot.onebot_runtime_running and snapshot.qq_bridge_running
+
+
 def build_badge(snapshot: RuntimeSnapshot, translator: Callable[..., str] | None = None) -> BadgeState:
-    if snapshot.hub_running and snapshot.bridge_running:
+    if _weixin_mode_running(snapshot) or _qq_mode_running(snapshot):
         return BadgeState(
             text=_t(translator, "ui.status.running"),
             style="background:#d9f3e4;color:#12633b;border:1px solid #b9dfca;border-radius:16px;padding:10px 12px;font-weight:700;",
@@ -126,6 +139,14 @@ def build_overview_lines(
     lines = [
         _t(translator, "ui.overview.hub", status=_t(translator, "ui.status.running") if snapshot.hub_running else _t(translator, "ui.status.stopped"), pid=pid_text(snapshot.hub_pid)),
         _t(translator, "ui.overview.bridge", status=_t(translator, "ui.status.running") if snapshot.bridge_running else _t(translator, "ui.status.stopped"), pid=pid_text(snapshot.bridge_pid)),
+        _t(translator, "ui.overview.onebot_runtime", status=_t(translator, "ui.status.running") if snapshot.onebot_runtime_running else _t(translator, "ui.status.stopped"), pid=pid_text(snapshot.onebot_runtime_pid)),
+        _t(
+            translator,
+            "ui.overview.qq_login",
+            status=_t(translator, "ui.status.logged_in") if snapshot.qq_logged_in else _t(translator, "ui.status.not_logged_in"),
+            account=(f"{snapshot.qq_nickname} ({snapshot.qq_user_id})" if snapshot.qq_nickname and snapshot.qq_user_id else snapshot.qq_user_id or "-"),
+        ),
+        _t(translator, "ui.overview.qq_bridge", status=_t(translator, "ui.status.running") if snapshot.qq_bridge_running else _t(translator, "ui.status.stopped"), pid=pid_text(snapshot.qq_bridge_pid)),
         _t(translator, "ui.overview.agent_processes", count=len(snapshot.codex_processes)),
         _t(translator, "ui.overview.active_account", account=active_account_id),
         "",
@@ -146,7 +167,7 @@ def decide_primary_action(
     checks: dict[str, CheckSnapshot],
     translator: Callable[..., str] | None = None,
 ) -> tuple[str, str, str]:
-    if snapshot.hub_running or snapshot.bridge_running:
+    if snapshot.bridge_running:
         return "stop", _t(translator, "ui.primary.stop.label"), _t(translator, "ui.primary.stop.hint")
 
     blocking = [key for key in ["python", "project_files"] if _check_missing(checks, key)]
@@ -177,7 +198,7 @@ def build_summary_text(
     missing_count = sum(1 for item in checks.values() if not item.ok)
     if missing_count:
         return _t(translator, "ui.summary.missing", count=missing_count)
-    if snapshot.hub_running and snapshot.bridge_running:
+    if _weixin_mode_running(snapshot) or _qq_mode_running(snapshot):
         return _t(translator, "ui.summary.ready_running")
     return _t(translator, "ui.summary.ready_waiting")
 
@@ -193,7 +214,7 @@ def build_quickstart_lines(
         step_line(_t(translator, "ui.quickstart.step.desktop"), _check_ok(checks, "psutil"), translator),
         step_line(_t(translator, "ui.quickstart.step.node"), not any(_check_missing(checks, key) for key in ["node", "npm", "codex", "claude", "opencode"]), translator),
         step_line(_t(translator, "ui.quickstart.step.accounts"), not _check_missing(checks, "weixin_account"), translator),
-        step_line(_t(translator, "ui.quickstart.step.start"), snapshot.hub_running and snapshot.bridge_running, translator),
+        step_line(_t(translator, "ui.quickstart.step.start"), _weixin_mode_running(snapshot) or _qq_mode_running(snapshot), translator),
     ]
     body = stage_lines + [
         "",
@@ -284,7 +305,7 @@ def build_issues(
                 detail=bridge_state.last_error.strip(),
             )
         )
-    if snapshot.codex_processes and not (snapshot.hub_running or snapshot.bridge_running):
+    if snapshot.codex_processes and not (snapshot.hub_running or snapshot.bridge_running or snapshot.onebot_runtime_running or snapshot.qq_bridge_running):
         issues.append(
             IssueItem(
                 kind="processes",

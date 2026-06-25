@@ -51,10 +51,10 @@ class ConfigResilienceTests(unittest.TestCase):
             ):
                 config = HubConfig.load()
 
-            self.assertEqual(1, len(config.agents))
-            self.assertEqual("main", config.agents[0].id)
+            self.assertEqual(["main", "qq"], [agent.id for agent in config.agents])
             saved = json.loads(config_path.read_text(encoding="utf-8"))
             self.assertEqual("main", saved["agents"][0]["id"])
+            self.assertEqual("qq", saved["agents"][1]["id"])
 
     def test_resolve_ilink_base_url_uses_active_account(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

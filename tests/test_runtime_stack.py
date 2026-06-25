@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from runtime_stack import _managed_subprocess_env, _taskkill, discover_external_agent_processes, start_managed, stop_managed
+from runtime_stack import _managed_subprocess_env, _onebot_runtime_env, _taskkill, discover_external_agent_processes, restart_all, start_all, start_managed, start_qq_stack, stop_managed
 
 
 class FakeProcess:
@@ -66,6 +66,51 @@ class RuntimeStackTests(unittest.TestCase):
         env = mocked_popen.call_args.kwargs["env"]
         self.assertEqual("http://127.0.0.1:7890", env["HTTPS_PROXY"])
 
+    def test_start_all_starts_only_weixin_stack(self) -> None:
+        with (
+            patch("runtime_stack.stop_qq_bridge", return_value="QQ Bridge stopped") as mocked_stop_qq_bridge,
+            patch("runtime_stack.stop_onebot_runtime", return_value="OneBot stopped") as mocked_stop_onebot,
+            patch("runtime_stack.start_managed", side_effect=["Hub started", "Bridge started"]) as mocked_start,
+            patch("runtime_stack.start_onebot_runtime") as mocked_start_onebot,
+            patch("runtime_stack.time.sleep"),
+        ):
+            messages = start_all()
+
+        self.assertEqual(["QQ Bridge stopped", "OneBot stopped", "Hub started", "Bridge started"], messages)
+        self.assertEqual(["Hub", "Bridge"], [call.args[0] for call in mocked_start.call_args_list])
+        mocked_start_onebot.assert_not_called()
+        mocked_stop_qq_bridge.assert_called_once_with()
+        mocked_stop_onebot.assert_called_once_with()
+
+    def test_start_qq_stack_stops_weixin_bridge_and_starts_qq_stack(self) -> None:
+        with (
+            patch("runtime_stack.stop_bridge", return_value="Bridge stopped") as mocked_stop_bridge,
+            patch("runtime_stack.start_managed", return_value="Hub started") as mocked_start,
+            patch("runtime_stack.start_onebot_runtime", return_value="OneBot started") as mocked_start_onebot,
+            patch("runtime_stack.start_qq_bridge", return_value="QQ Bridge started") as mocked_start_qq_bridge,
+        ):
+            messages = start_qq_stack()
+
+        self.assertEqual(["Bridge stopped", "Hub started", "OneBot started", "QQ Bridge started"], messages)
+        mocked_stop_bridge.assert_called_once_with()
+        self.assertEqual(["Hub"], [call.args[0] for call in mocked_start.call_args_list])
+        mocked_start_onebot.assert_called_once_with(env=None)
+        mocked_start_qq_bridge.assert_called_once_with(env=None)
+
+    def test_restart_all_restarts_only_weixin_stack(self) -> None:
+        with (
+            patch("runtime_stack.stop_managed", side_effect=["Bridge stopped", "Hub stopped"]) as mocked_stop,
+            patch("runtime_stack.start_all", return_value=["Hub started", "Bridge started"]) as mocked_start_all,
+            patch("runtime_stack.stop_onebot_runtime") as mocked_stop_onebot,
+            patch("runtime_stack._managed_subprocess_env", return_value={"A": "B"}),
+        ):
+            messages = restart_all()
+
+        self.assertEqual(["Bridge stopped", "Hub stopped", "Hub started", "Bridge started"], messages)
+        self.assertEqual(["Bridge", "Hub"], [call.args[0] for call in mocked_stop.call_args_list])
+        mocked_start_all.assert_called_once_with(env={"A": "B"})
+        mocked_stop_onebot.assert_not_called()
+
     def test_managed_subprocess_env_copies_proxy_from_running_process(self) -> None:
         fake_proc = SimpleNamespace(pid=123)
         with patch.dict("runtime_stack.os.environ", {}, clear=True):
@@ -73,6 +118,13 @@ class RuntimeStackTests(unittest.TestCase):
                 with patch("runtime_stack._read_process_proxy_env", return_value={"HTTPS_PROXY": "http://127.0.0.1:7890"}):
                     env = _managed_subprocess_env({})
         self.assertEqual("http://127.0.0.1:7890", env["HTTPS_PROXY"])
+
+    def test_onebot_runtime_env_sets_quick_login_from_napcat_config(self) -> None:
+        with patch("runtime_stack._managed_subprocess_env", return_value={}):
+            with patch("runtime_stack._detect_napcat_quick_login_uin", return_value="2493227263"):
+                env = _onebot_runtime_env({})
+
+        self.assertEqual("2493227263", env["CHATBRIDGE_NAPCAT_QQ"])
 
     def test_discover_external_agents_skips_cmdline_for_unrelated_processes(self) -> None:
         unrelated = FakeProcess(101, "chrome.exe", ["chrome.exe", "--type=renderer"])
@@ -154,7 +206,7 @@ class RuntimeStackTests(unittest.TestCase):
         current_child = FakeChild(current_pid)
         other_child = FakeChild(999999)
         proc = FakeProc([current_child, other_child])
-        with patch("runtime_stack.psutil", object()):
+        with patch("runtime_stack.IS_WINDOWS", False), patch("runtime_stack.psutil", object()):
             with patch("runtime_stack._get_process", return_value=proc):
                 _taskkill(123)
         self.assertFalse(current_child.terminated)
@@ -201,7 +253,7 @@ class RuntimeStackTests(unittest.TestCase):
         child = FakeChild()
         proc = FakeProc(child)
         fake_psutil = SimpleNamespace(Error=Exception)
-        with patch("runtime_stack.psutil", fake_psutil):
+        with patch("runtime_stack.IS_WINDOWS", False), patch("runtime_stack.psutil", fake_psutil):
             with patch("runtime_stack._get_process", return_value=proc):
                 _taskkill(123)
         self.assertTrue(proc.terminated)

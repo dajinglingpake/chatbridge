@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from contextlib import closing
 import tempfile
 import unittest
 from pathlib import Path
@@ -159,7 +160,7 @@ class CodexStatusQueryTests(unittest.TestCase):
                 '{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":108000},"model_context_window":258400}}}\n',
                 encoding="utf-8",
             )
-            with sqlite3.connect(str(state_db_path)) as connection:
+            with closing(sqlite3.connect(str(state_db_path))) as connection:
                 connection.execute("create table threads (id text primary key, rollout_path text not null)")
                 connection.execute(
                     "insert into threads (id, rollout_path) values (?, ?)",

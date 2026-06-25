@@ -20,4 +20,6 @@ accounts/*
 !accounts/.gitkeep
 !accounts/README.md
 
+vendor/napcat/
+
 *.local.json

@@ -230,7 +230,12 @@ def render_home_section(
     on_switch_account,
     on_set_weixin_notice_enabled,
     on_open_qr_login,
+    on_open_qq_login,
+    bridge_mode: str = "weixin",
+    on_set_bridge_mode=None,
 ) -> None:
+    active_mode = bridge_mode if bridge_mode in {"weixin", "qq"} else "weixin"
+    set_mode = on_set_bridge_mode or (lambda _mode: None)
     with ui.element("section").props(f"id={HOME_PAGE.anchor}").classes("w-full"):
         _render_page_intro(ui, _tr(t, "ui.tab.home", HOME_PAGE.title), _tr(t, "ui.page.home.description", HOME_PAGE.description), "Console")
         with _responsive_grid(ui, "grid-cols-1"):
@@ -238,19 +243,72 @@ def render_home_section(
                 with ui.row().classes("items-center justify-between gap-2"):
                     _render_card_title(ui, _tr(t, "ui.web.home.service_controls", "服务控制"))
                     ui.button(_tr(t, "ui.web.action.refresh_status", "刷新状态"), on_click=on_refresh_checks, icon="refresh").props("outline")
+                with ui.row().classes("gap-2 pb-4 flex-wrap"):
+                    ui.button(
+                        _tr(t, "ui.web.mode.weixin", "微信模式"),
+                        on_click=lambda: set_mode("weixin"),
+                        icon="chat",
+                    ).props("color=primary unelevated" if active_mode == "weixin" else "outline")
+                    ui.button(
+                        _tr(t, "ui.web.mode.qq", "QQ 模式"),
+                        on_click=lambda: set_mode("qq"),
+                        icon="forum",
+                    ).props("color=primary unelevated" if active_mode == "qq" else "outline")
                 status_panel_class, badge_class = _status_variant(f"{model.home.badge_text} {model.home.summary_text}")
                 with ui.element("div").classes(f"cb-status-panel {status_panel_class} w-full mb-4"):
                     with ui.row().classes("w-full items-start justify-between gap-3 flex-wrap"):
                         with ui.column().classes("gap-2 grow"):
                             ui.label(_tr(t, "ui.web.home.system_status", "系统状态")).classes("cb-kicker")
                             ui.label(model.home.summary_text).classes("text-base font-bold text-slate-900")
-                            ui.label(model.home.primary_hint).classes("text-sm cb-muted")
+                            ui.label(
+                                model.home.primary_hint
+                                if active_mode == "weixin"
+                                else _tr(t, "ui.web.mode.qq_hint", "QQ 模式会停止微信桥，只保留 QQ OneBot 入口。")
+                            ).classes("text-sm cb-muted")
+                            if active_mode == "qq":
+                                ui.label(model.home.qq_login_text).classes("cb-chip cb-chip-ok w-fit" if model.home.qq_login_ok else "cb-chip cb-chip-warn w-fit")
                         ui.label(model.home.badge_text).classes(f"{badge_class} self-start")
                 with ui.row().classes("gap-2 pt-4 flex-wrap"):
-                    ui.button(_tr(t, "ui.primary.start.label", "启动服务"), on_click=lambda: on_run_action("start"), icon="play_arrow")
-                    ui.button(_tr(t, "ui.primary.stop.label", "停止服务"), on_click=lambda: on_run_action("stop"), icon="stop")
-                    ui.button(_tr(t, "ui.web.action.restart", "重启服务"), on_click=lambda: on_run_action("restart"), icon="restart_alt")
+                    if active_mode == "weixin":
+                        ui.button(_tr(t, "ui.web.action.switch_weixin_mode", "切换到微信模式"), on_click=lambda: on_run_action("start"), icon="play_arrow")
+                        ui.button(_tr(t, "ui.primary.stop.label", "停止服务"), on_click=lambda: on_run_action("stop"), icon="stop")
+                        ui.button(_tr(t, "ui.web.action.restart", "重启服务"), on_click=lambda: on_run_action("restart"), icon="restart_alt")
+                    else:
+                        ui.button(_tr(t, "ui.web.action.switch_qq_mode", "切换到 QQ 模式"), on_click=lambda: on_run_action("start-qq-bridge"), icon="play_arrow")
+                        ui.button(_tr(t, "ui.web.action.stop_qq_bridge", "停止 QQ 桥"), on_click=lambda: on_run_action("stop-qq-bridge"), icon="stop").props("outline")
+                        ui.button(_tr(t, "ui.web.action.restart_qq_bridge", "重启 QQ 桥"), on_click=lambda: on_run_action("restart-qq-bridge"), icon="restart_alt").props("outline")
+                        ui.button(_tr(t, "ui.web.action.restart_onebot_runtime", "重启 QQ OneBot"), on_click=lambda: on_run_action("restart-onebot-runtime"), icon="restart_alt").props("outline")
                     ui.button(_tr(t, "ui.web.action.emergency_stop", "紧急停止"), on_click=lambda: on_run_action("emergency-stop"), color="negative", icon="warning")
+
+        if active_mode == "qq":
+            with _responsive_grid(ui, "grid-cols-1 xl:grid-cols-2"):
+                with ui.card().classes("cb-card w-full p-5"):
+                    _render_card_title(ui, _tr(t, "ui.web.mode.qq", "QQ 模式"), _tr(t, "ui.web.mode.qq_detail", "用于 QQ 私聊/群聊的 OneBot 入口；切换后微信桥会停止。"))
+                    with _panel(ui):
+                        ui.label(model.home.qq_login_text).classes("cb-chip cb-chip-ok w-fit" if model.home.qq_login_ok else "cb-chip cb-chip-warn w-fit")
+                        ui.label(_tr(t, "ui.qq_login.onebot_api", "OneBot HTTP API: http://127.0.0.1:3000")).classes("text-sm cb-muted")
+                        ui.label(_tr(t, "ui.qq_login.reverse_http", "反向 HTTP 上报: http://127.0.0.1:5701/")).classes("text-sm cb-muted")
+                    with ui.row().classes("gap-2 flex-wrap pt-4"):
+                        ui.button(_tr(t, "ui.qq_login.button", "扫码登录 QQ"), on_click=on_open_qq_login, icon="qr_code_scanner")
+                        ui.button(_tr(t, "ui.web.action.switch_qq_mode", "切换到 QQ 模式"), on_click=lambda: on_run_action("start-qq-bridge"), icon="play_arrow").props("outline")
+                with ui.card().classes("cb-card w-full p-5"):
+                    _render_card_title(ui, _tr(t, "ui.web.home.submit_task", "提交任务"))
+                    ui.label(_tr(t, "ui.web.mode.qq_submit_hint", "QQ 模式启动后，请优先从 QQ 会话发送消息；这里仍可用于直接向 Hub 提交测试任务。")).classes("text-sm cb-muted")
+                    agent_options = {item.agent_id: item.label for item in model.agent_options}
+                    with _panel(ui):
+                        prompt = ui.textarea(label=_tr(t, "ui.web.field.prompt", "Prompt"), placeholder=_tr(t, "ui.web.form.prompt_placeholder", "输入要发给 Agent 的内容")).classes("w-full")
+                        prompt.props("autogrow outlined input-class=text-base")
+                        agent = ui.select(
+                            agent_options,
+                            value=model.agent_options[0].agent_id if model.agent_options else "main",
+                            label=_tr(t, "ui.web.field.agent", "Agent"),
+                        ).classes("w-full")
+                    ui.button(
+                        _tr(t, "ui.web.action.submit_to_hub", "提交到 Hub"),
+                        on_click=lambda: on_submit_task(agent.value or "main", prompt.value or "", "", ""),
+                        icon="send",
+                    ).props("color=primary unelevated").classes("mt-4")
+            return
 
         with _responsive_grid(ui, "grid-cols-1 xl:grid-cols-2"):
             with ui.card().classes("cb-card w-full p-5"):

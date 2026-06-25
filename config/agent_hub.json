@@ -1,7 +1,7 @@
 {
-  "codex_command": "codex",
-  "claude_command": "claude",
-  "opencode_command": "opencode",
+  "codex_command": "codex.cmd",
+  "claude_command": "claude.cmd",
+  "opencode_command": "opencode.cmd",
   "agents": [
     {
       "id": "main",
@@ -9,7 +9,17 @@
       "workdir": "workspace",
       "session_file": "sessions/main.txt",
       "backend": "codex",
-      "model": "",
+      "model": "gpt-5.5",
+      "prompt_prefix": "",
+      "enabled": true
+    },
+    {
+      "id": "qq",
+      "name": "QQ 会话",
+      "workdir": "workspace",
+      "session_file": "sessions/qq.txt",
+      "backend": "codex",
+      "model": "gpt-5.5",
       "prompt_prefix": "",
       "enabled": true
     }

@@ -591,6 +591,10 @@ def restart_services(scope: str = "all") -> ToolActionResult:
     action_map = {
         "all": "restart",
         "bridge": "restart-bridge",
+        "onebot": "restart-onebot-runtime",
+        "onebot-runtime": "restart-onebot-runtime",
+        "qq-bridge": "restart-qq-bridge",
+        "qq": "restart-qq-bridge",
     }
     action = action_map.get(cleaned_scope)
     if action is None:
