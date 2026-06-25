@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import queue
 import subprocess
 import tempfile
 import threading
@@ -25,10 +26,200 @@ TRANSIENT_ERROR_MARKERS = (
 )
 
 
+class _CodexAppServerClient:
+    def __init__(self, command: str, *, creationflags: int, start_new_session: bool, slim_exec: bool) -> None:
+        self.command = command
+        self.creationflags = creationflags
+        self.start_new_session = start_new_session
+        self.slim_exec = slim_exec
+        self.proc: subprocess.Popen | None = None
+        self._messages: queue.Queue[dict[str, Any]] = queue.Queue()
+        self._stderr_lines: list[str] = []
+        self._next_id = 1
+        self._lock = threading.RLock()
+
+    def start(self) -> None:
+        argv = [self.command, "app-server", "--listen", "stdio://"]
+        if self.slim_exec:
+            argv.extend(["--disable", "plugins"])
+        self.proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=self.creationflags,
+            start_new_session=self.start_new_session,
+            shell=False,
+            bufsize=1,
+        )
+        threading.Thread(target=self._read_stdout, daemon=True, name="codex-app-server-stdout").start()
+        threading.Thread(target=self._read_stderr, daemon=True, name="codex-app-server-stderr").start()
+        self.request(
+            "initialize",
+            {
+                "clientInfo": {
+                    "name": "chatbridge",
+                    "title": "ChatBridge",
+                    "version": "0.1.0",
+                },
+                "capabilities": {"experimentalApi": True},
+            },
+            timeout=60,
+        )
+        self.notify("initialized", {})
+
+    def is_alive(self) -> bool:
+        return self.proc is not None and self.proc.poll() is None
+
+    def request(self, method: str, params: dict[str, object], *, timeout: float) -> dict[str, Any]:
+        request_id = self._send(method, params, expect_response=True)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            message = self._read_message(deadline)
+            if message.get("id") != request_id:
+                continue
+            if isinstance(message.get("error"), dict):
+                error = message["error"]
+                raise RuntimeError(str(error.get("message") or error))
+            result = message.get("result")
+            return result if isinstance(result, dict) else {}
+        raise RuntimeError(f"timed out waiting for app-server response: {method}")
+
+    def notify(self, method: str, params: dict[str, object]) -> None:
+        self._send(method, params, expect_response=False)
+
+    def wait_for_turn(
+        self,
+        thread_id: str,
+        turn_id: str,
+        *,
+        timeout: float,
+        on_progress: Callable[[str], None] | None,
+    ) -> tuple[str, int | None]:
+        deadline = time.time() + timeout
+        output = ""
+        pending_delta = ""
+        last_progress = ""
+        last_progress_at = 0.0
+        context_left_percent: int | None = None
+        while time.time() < deadline:
+            message = self._read_message(deadline)
+            method = str(message.get("method") or "")
+            params = message.get("params") if isinstance(message.get("params"), dict) else {}
+            if str(params.get("threadId") or "") not in {"", thread_id}:
+                continue
+            if str(params.get("turnId") or "") not in {"", turn_id}:
+                continue
+            item = params.get("item") if isinstance(params.get("item"), dict) else {}
+            if method == "item/completed" and item.get("type") == "agentMessage":
+                text = str(item.get("text") or "").strip()
+                if text:
+                    output = text
+            if method.endswith("/delta"):
+                delta = self._extract_delta(message)
+                if delta:
+                    pending_delta += delta
+                    if on_progress is not None and time.time() - last_progress_at >= PROGRESS_PUSH_INTERVAL_SECONDS:
+                        progress = pending_delta.strip()
+                        if progress and progress != last_progress:
+                            on_progress(progress)
+                            last_progress = progress
+                            last_progress_at = time.time()
+            next_context_left = self._extract_context_left_percent(message)
+            if next_context_left is not None:
+                context_left_percent = next_context_left
+            if method == "turn/completed":
+                error = ((params.get("turn") if isinstance(params.get("turn"), dict) else {}) or {}).get("error")
+                if error:
+                    raise RuntimeError(str(error))
+                return output, context_left_percent
+        raise RuntimeError(f"timed out waiting for app-server turn: {turn_id}")
+
+    def _send(self, method: str, params: dict[str, object], *, expect_response: bool) -> int | None:
+        with self._lock:
+            if self.proc is None or self.proc.stdin is None or self.proc.poll() is not None:
+                raise RuntimeError("Codex app-server is not running")
+            message: dict[str, object] = {"method": method, "params": params}
+            request_id: int | None = None
+            if expect_response:
+                request_id = self._next_id
+                self._next_id += 1
+                message["id"] = request_id
+            self.proc.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
+            self.proc.stdin.flush()
+            return request_id
+
+    def _read_message(self, deadline: float) -> dict[str, Any]:
+        timeout = max(0.1, deadline - time.time())
+        try:
+            return self._messages.get(timeout=timeout)
+        except queue.Empty as exc:
+            stderr_tail = "\n".join(self._stderr_lines[-8:])
+            raise RuntimeError(f"timed out reading Codex app-server message; stderr={stderr_tail}") from exc
+
+    def _read_stdout(self) -> None:
+        proc = self.proc
+        if proc is None or proc.stdout is None:
+            return
+        for raw_line in proc.stdout:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(message, dict):
+                self._messages.put(message)
+
+    def _read_stderr(self) -> None:
+        proc = self.proc
+        if proc is None or proc.stderr is None:
+            return
+        for raw_line in proc.stderr:
+            line = raw_line.strip()
+            if line:
+                self._stderr_lines.append(line)
+                del self._stderr_lines[:-30]
+
+    @staticmethod
+    def _extract_delta(message: dict[str, Any]) -> str:
+        params = message.get("params") if isinstance(message.get("params"), dict) else {}
+        for key in ("delta", "textDelta", "text_delta", "text"):
+            raw = params.get(key)
+            if isinstance(raw, str) and raw:
+                return raw
+        item = params.get("item") if isinstance(params.get("item"), dict) else {}
+        raw = item.get("text")
+        return raw if isinstance(raw, str) else ""
+
+    @staticmethod
+    def _extract_context_left_percent(message: dict[str, Any]) -> int | None:
+        params = message.get("params") if isinstance(message.get("params"), dict) else {}
+        raw_percent = params.get("contextLeftPercent")
+        if isinstance(raw_percent, int):
+            return max(0, min(100, raw_percent))
+        return None
+
+
 class CodexBackend(AgentBackend):
     key = "codex"
 
+    def __init__(self) -> None:
+        self._app_server_lock = threading.RLock()
+        self._app_server: _CodexAppServerClient | None = None
+
     def invoke(self, agent: AgentLike, prompt: str, session_name: str, context: BackendContext) -> dict[str, str]:
+        if context.codex_transport.strip().lower() == "app-server":
+            try:
+                with self._app_server_lock:
+                    return self._invoke_app_server(agent, prompt, session_name, context)
+            except RuntimeError as exc:
+                if context.on_progress is not None:
+                    context.on_progress(f"Codex app-server 调用失败，已回退 exec：{str(exc)[:160]}")
         last_error: RuntimeError | None = None
         for attempt in range(CODEX_TRANSIENT_RETRY_ATTEMPTS + 1):
             try:
@@ -41,6 +232,100 @@ class CodexBackend(AgentBackend):
                     context.on_progress("Codex 连接中断，正在自动重试一次...")
                 time.sleep(1)
         raise last_error or RuntimeError("Codex failed")
+
+    def _invoke_app_server(self, agent: AgentLike, prompt: str, session_name: str, context: BackendContext) -> dict[str, str]:
+        workdir = Path(agent.workdir)
+        workdir.mkdir(parents=True, exist_ok=True)
+        session_file = resolve_session_file(agent, session_name, context.session_dir)
+        session_file.parent.mkdir(parents=True, exist_ok=True)
+        existing_session = session_file.read_text(encoding="utf-8").strip() if session_file.exists() else ""
+        final_prompt = build_final_prompt(agent, prompt)
+        client = self._get_app_server(context)
+        thread_params = self._app_server_thread_params(agent, workdir, context)
+        if existing_session:
+            thread_payload = client.request("thread/resume", {**thread_params, "threadId": existing_session}, timeout=90)
+        else:
+            thread_payload = client.request("thread/start", thread_params, timeout=90)
+        thread = thread_payload.get("thread") if isinstance(thread_payload.get("thread"), dict) else {}
+        thread_id = str(thread.get("id") or existing_session).strip()
+        if not thread_id:
+            raise RuntimeError("Codex app-server did not return a thread id")
+        turn_payload = client.request(
+            "turn/start",
+            {
+                "threadId": thread_id,
+                "input": [{"type": "text", "text": final_prompt}],
+                "model": agent.model or None,
+                "cwd": str(workdir),
+                "approvalPolicy": self._approval_policy(context),
+                "sandboxPolicy": self._sandbox_policy(context),
+                "effort": context.reasoning_effort or None,
+            },
+            timeout=30,
+        )
+        turn = turn_payload.get("turn") if isinstance(turn_payload.get("turn"), dict) else {}
+        turn_id = str(turn.get("id") or "").strip()
+        if not turn_id:
+            raise RuntimeError("Codex app-server did not return a turn id")
+        output, context_left_percent = client.wait_for_turn(
+            thread_id,
+            turn_id,
+            timeout=max(60, int(getattr(context, "hub_task_timeout_seconds", 0) or 0), 60 * 30),
+            on_progress=context.on_progress,
+        )
+        if not output.strip():
+            raise RuntimeError("Codex app-server returned an empty result")
+        session_file.write_text(thread_id, encoding="utf-8")
+        result = {"output": output.strip(), "session_id": thread_id}
+        if context_left_percent is not None:
+            result["context_left_percent"] = str(context_left_percent)
+        return result
+
+    def _get_app_server(self, context: BackendContext) -> "_CodexAppServerClient":
+        if self._app_server is not None and self._app_server.is_alive():
+            return self._app_server
+        self._app_server = _CodexAppServerClient(
+            context.codex_command,
+            creationflags=context.creationflags,
+            start_new_session=context.start_new_session,
+            slim_exec=context.codex_slim_exec,
+        )
+        self._app_server.start()
+        return self._app_server
+
+    def _app_server_thread_params(self, agent: AgentLike, workdir: Path, context: BackendContext) -> dict[str, object]:
+        config: dict[str, object] = {}
+        if context.codex_slim_exec:
+            config["features"] = {"plugins": False}
+        if context.mcp_server is not None:
+            config["mcp_servers"] = {
+                context.mcp_server.name: {
+                    "command": context.mcp_server.command,
+                    "args": context.mcp_server.args,
+                }
+            }
+        return {
+            "model": agent.model or None,
+            "cwd": str(workdir),
+            "approvalPolicy": self._approval_policy(context),
+            "sandbox": self._sandbox_mode(context),
+            "config": config or None,
+            "serviceName": "chatbridge",
+        }
+
+    @staticmethod
+    def _approval_policy(context: BackendContext) -> str:
+        return "never"
+
+    @staticmethod
+    def _sandbox_mode(context: BackendContext) -> str:
+        return "workspace-write" if context.permission_mode == "default" else "danger-full-access"
+
+    @classmethod
+    def _sandbox_policy(cls, context: BackendContext) -> dict[str, str]:
+        if cls._sandbox_mode(context) == "workspace-write":
+            return {"type": "workspaceWrite"}
+        return {"type": "dangerFullAccess"}
 
     def _invoke_once(
         self,
@@ -58,6 +343,8 @@ class CodexBackend(AgentBackend):
         output_path = Path(tempfile.gettempdir()) / f"multi-codex-output-{uuid.uuid4().hex}.txt"
 
         options = ["--skip-git-repo-check", "--json", "-o", str(output_path)]
+        if context.codex_slim_exec:
+            options.extend(["--disable", "plugins", "--ignore-rules"])
         if agent.model:
             options.extend(["-m", agent.model])
         if context.reasoning_effort:

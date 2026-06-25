@@ -75,6 +75,47 @@ class McpServerInjectionTests(unittest.TestCase):
             self.assertNotIn("--trusted-internal-manager", backend.last_context.mcp_server.args)
             self.assertEqual("Main", backend.last_agent.name)
             self.assertEqual("main", backend.last_agent.id)
+            self.assertTrue(backend.last_context.codex_slim_exec)
+
+    def test_hub_passes_codex_slim_exec_setting_to_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            workdir = temp_path / "workspace"
+            session_file = temp_path / "sessions" / "main.txt"
+            workdir.mkdir(parents=True, exist_ok=True)
+            session_file.parent.mkdir(parents=True, exist_ok=True)
+            config = HubConfig(
+                codex_command="codex",
+                claude_command="claude",
+                opencode_command="opencode",
+                codex_slim_exec=False,
+                codex_transport="app-server",
+                agents=[AgentConfig("main", "Main", str(workdir), str(session_file), backend="codex")],
+            )
+            backend = RecordingBackend()
+            with (
+                patch("agent_hub.STATE_PATH", temp_path / "state" / "agent_hub_state.json"),
+                patch("agent_hub.discover_external_agent_processes", return_value=[]),
+            ):
+                hub = MultiCodexHub(config)
+                hub.backend_registry["codex"] = backend
+                task = HubTask(
+                    id="task-local-slim-001",
+                    agent_id="main",
+                    agent_name="Main",
+                    backend="codex",
+                    source="cli",
+                    sender_id="",
+                    prompt="hello",
+                    status="queued",
+                    created_at="2026-04-20T20:00:00",
+                    session_name="default",
+                )
+
+                hub._invoke_backend(config.agents[0], task)
+
+            self.assertFalse(backend.last_context.codex_slim_exec)
+            self.assertEqual("app-server", backend.last_context.codex_transport)
 
     def test_wechat_task_passes_bridge_state_overrides_to_mcp(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -214,6 +255,9 @@ class McpServerCodexBackendTests(unittest.TestCase):
 
             def fake_popen(argv: list[str], **kwargs):
                 output_path.write_text("ok", encoding="utf-8")
+                self.assertIn("--disable", argv)
+                self.assertIn("plugins", argv)
+                self.assertIn("--ignore-rules", argv)
                 self.assertIn('mcp_servers.operations.command="python3"', argv)
                 self.assertIn('mcp_servers.operations.args=["/tmp/operations_server.py"]', argv)
                 return FakeProcess(argv)

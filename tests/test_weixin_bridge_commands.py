@@ -2440,6 +2440,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
     def test_extract_passthrough_prompt_strips_one_slash(self) -> None:
         self.assertEqual(self.bridge._extract_passthrough_prompt("//status"), "/status")
         self.assertEqual(self.bridge._extract_passthrough_prompt("///help"), "//help")
+        self.assertEqual(self.bridge._extract_passthrough_prompt("//"), "/")
         self.assertIsNone(self.bridge._extract_passthrough_prompt("/status"))
 
 

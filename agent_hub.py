@@ -129,6 +129,8 @@ class HubConfig:
     codex_command: str = field(default_factory=lambda: resolve_command(DEFAULT_BACKEND_KEY))
     claude_command: str = field(default_factory=lambda: resolve_command("claude"))
     opencode_command: str = field(default_factory=lambda: resolve_command("opencode"))
+    codex_slim_exec: bool = True
+    codex_transport: str = "exec"
     agents: list[AgentConfig] = field(default_factory=list)
 
     @classmethod
@@ -162,6 +164,9 @@ class HubConfig:
         raw["codex_command"] = resolve_command(str(raw.get("codex_command") or DEFAULT_BACKEND_KEY))
         raw["claude_command"] = resolve_command(str(raw.get("claude_command") or "claude"))
         raw["opencode_command"] = resolve_command(str(raw.get("opencode_command") or "opencode"))
+        raw["codex_slim_exec"] = bool(raw.get("codex_slim_exec", True))
+        raw_transport = str(raw.get("codex_transport") or "exec").strip().lower()
+        raw["codex_transport"] = raw_transport if raw_transport in {"exec", "app-server"} else "exec"
         if not raw["agents"]:
             raw["agents"] = [
                 _default_agent(DEFAULT_MAIN_AGENT_ID),
@@ -668,6 +673,8 @@ class MultiCodexHub:
                 mcp_server=mcp_server,
                 reasoning_effort=task.reasoning_effort.strip(),
                 permission_mode=task.permission_mode.strip(),
+                codex_slim_exec=self.config.codex_slim_exec,
+                codex_transport=self.config.codex_transport,
             ),
         )
 

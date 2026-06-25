@@ -23,6 +23,7 @@ class FakeQQBridge(QQOneBotBridge):
         self.submitted: list[tuple[str, str]] = []
         self.replies: list[tuple[dict[str, object], str]] = []
         self.api_calls: list[tuple[str, dict[str, object]]] = []
+        self.ipc_responses: dict[str, object] = {}
         super().__init__(
             SimpleNamespace(backend_id="main", default_backend="codex", hub_task_timeout_seconds=30),
             api_base="http://onebot.local",
@@ -43,6 +44,10 @@ class FakeQQBridge(QQOneBotBridge):
     def _onebot_api(self, action: str, payload: dict[str, object]) -> dict[str, object]:
         self.api_calls.append((action, payload))
         return {"status": "ok"}
+
+    def _ipc_request(self, action: str, payload: dict[str, object], *, timeout_seconds: float) -> object:
+        self.api_calls.append((f"ipc:{action}", payload))
+        return self.ipc_responses.get(action, SimpleNamespace(ok=True, error="", payload={}))
 
 
 class QQOneBotBridgeTests(unittest.TestCase):
@@ -126,6 +131,79 @@ class QQOneBotBridgeTests(unittest.TestCase):
         )
 
         self.assertEqual([], bridge.submitted)
+
+    def test_status_command_is_handled_locally_without_agent_submission(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.ipc_responses["state"] = SimpleNamespace(
+            ok=True,
+            error="",
+            payload={
+                "tasks": [
+                    {
+                        "id": "task-qq-latest",
+                        "agent_id": "qq",
+                        "agent_name": "QQ 会话",
+                        "backend": "codex",
+                        "source": "qq",
+                        "sender_id": "qq:private:10001",
+                        "prompt": "hello",
+                        "status": "succeeded",
+                        "created_at": "2026-06-26T01:00:00",
+                        "started_at": "2026-06-26T01:00:01",
+                        "finished_at": "2026-06-26T01:00:02",
+                        "output": "ok",
+                        "error": "",
+                        "session_name": "qq-private-10001",
+                    }
+                ]
+            },
+        )
+
+        bridge.handle_event(
+            {
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": 10001,
+                "message": "/status",
+            }
+        )
+
+        self.assertEqual([], bridge.submitted)
+        self.assertEqual("send_private_msg", bridge.api_calls[-1][0])
+        sent_text = str(bridge.api_calls[-1][1]["message"])
+        self.assertIn("当前设置", sent_text)
+        self.assertIn("task-qq-latest", sent_text)
+
+    def test_double_slash_status_queries_codex_status_without_agent_submission(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.ipc_responses["codex_status"] = SimpleNamespace(ok=True, error="", payload={"status": "Codex status panel"})
+
+        bridge.handle_event(
+            {
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": 10001,
+                "message": "//status",
+            }
+        )
+
+        self.assertEqual([], bridge.submitted)
+        self.assertEqual("send_private_msg", bridge.api_calls[-1][0])
+        self.assertEqual("Codex status panel", bridge.api_calls[-1][1]["message"])
+
+    def test_unknown_double_slash_command_still_passes_through_to_agent(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.handle_event(
+            {
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": 10001,
+                "message": "//help",
+            }
+        )
+
+        self.assertEqual(1, len(bridge.submitted))
+        self.assertEqual("//help", bridge.submitted[0][1])
 
     def test_group_message_at_other_user_is_ignored(self) -> None:
         bridge = FakeQQBridge(self.temp_path)

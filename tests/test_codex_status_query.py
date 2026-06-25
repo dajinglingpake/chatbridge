@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import subprocess
 from contextlib import closing
 import tempfile
 import unittest
@@ -9,6 +10,7 @@ from pathlib import Path
 
 from agent_backends.codex_status_query import (
     _build_snapshot,
+    _detect_current_cli_version,
     _format_context_window,
     _format_rate_limit_lines,
     _load_latest_token_usage,
@@ -101,9 +103,11 @@ class CodexStatusQueryTests(unittest.TestCase):
                         "path": str(log_path),
                     },
                 },
+                current_cli_version="0.142.2",
             )
         panel = _render_status_panel(snapshot)
-        self.assertIn("OpenAI Codex v0.122.0", panel)
+        self.assertIn("OpenAI Codex v0.142.2", panel)
+        self.assertIn("Session CLI: v0.122.0", panel)
         self.assertIn("gpt-5.4 (reasoning high, fast)", panel)
         self.assertIn("Workspace Write", panel)
         self.assertIn("codex-user@example.test (Plus)", panel)
@@ -146,6 +150,13 @@ class CodexStatusQueryTests(unittest.TestCase):
         self.assertIn("OpenAI Codex v0.122.0", panel)
         self.assertIn("codex-user@example.test (Plus)", panel)
         self.assertIn("Rate limits: unavailable", panel)
+
+    def test_detect_current_cli_version_parses_codex_cli_output(self) -> None:
+        completed = subprocess.CompletedProcess(args=["codex", "--version"], returncode=0, stdout="codex-cli 0.142.2\n", stderr="")
+        with patch("agent_backends.codex_status_query.subprocess.run", return_value=completed) as mocked_run:
+            version = _detect_current_cli_version("codex")
+        self.assertEqual("0.142.2", version)
+        mocked_run.assert_called_once()
 
     def test_query_codex_context_left_percent_reads_local_codex_rollout(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

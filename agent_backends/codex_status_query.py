@@ -36,6 +36,7 @@ class _RateLimitBucket:
 @dataclass(frozen=True)
 class _StatusSnapshot:
     cli_version: str
+    session_cli_version: str
     model: str
     reasoning_effort: str
     service_tier: str
@@ -116,6 +117,7 @@ def query_codex_status_panel(codex_command: str, session_file: Path, workdir: Pa
     session_id = _read_session_id(session_file)
     if not session_id:
         return None
+    current_cli_version = _detect_current_cli_version(codex_command)
     client = _AppServerClient(codex_command)
     try:
         client.initialize()
@@ -124,7 +126,7 @@ def query_codex_status_panel(codex_command: str, session_file: Path, workdir: Pa
         resume_payload = client.request("thread/resume", {"threadId": session_id})
     finally:
         client.close()
-    snapshot = _build_snapshot(session_id, account_payload, limits_payload, resume_payload)
+    snapshot = _build_snapshot(session_id, account_payload, limits_payload, resume_payload, current_cli_version=current_cli_version)
     return _render_status_panel(snapshot)
 
 
@@ -145,6 +147,26 @@ def _request_optional(client: _AppServerClient, method: str, params: object) -> 
         return client.request(method, params)
     except RuntimeError:
         return {}
+
+
+def _detect_current_cli_version(codex_command: str) -> str:
+    try:
+        completed = subprocess.run(
+            [*shlex.split(codex_command), "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    output = (completed.stdout or completed.stderr or "").strip()
+    if completed.returncode != 0 or not output:
+        return ""
+    parts = output.split()
+    return parts[-1].strip() if parts else output
 
 
 def _read_session_id(session_file: Path) -> str:
@@ -187,13 +209,17 @@ def _build_snapshot(
     account_payload: dict,
     limits_payload: dict,
     resume_payload: dict,
+    *,
+    current_cli_version: str = "",
 ) -> _StatusSnapshot:
     thread = dict(resume_payload.get("thread") or {})
+    session_cli_version = str(thread.get("cliVersion") or "").strip()
     token_usage = _load_latest_token_usage(Path(str(thread.get("path") or "")))
     account_label = _format_account_label(dict(account_payload.get("account") or {}))
     primary_bucket, extra_buckets = _parse_rate_limit_buckets(dict(limits_payload))
     return _StatusSnapshot(
-        cli_version=str(thread.get("cliVersion") or "unknown"),
+        cli_version=current_cli_version.strip() or session_cli_version or "unknown",
+        session_cli_version=session_cli_version,
         model=str(resume_payload.get("model") or "-"),
         reasoning_effort=str(resume_payload.get("reasoningEffort") or "").strip(),
         service_tier=str(resume_payload.get("serviceTier") or "").strip(),
@@ -406,6 +432,8 @@ def _render_status_panel(snapshot: _StatusSnapshot) -> str:
         f"Collaboration mode: {snapshot.collaboration_mode}",
         f"Session: {snapshot.session_id}",
     ]
+    if snapshot.session_cli_version and snapshot.session_cli_version != snapshot.cli_version:
+        lines.append(f"Session CLI: v{snapshot.session_cli_version}")
     if snapshot.token_usage is not None:
         lines.extend(["", f"Context window: {_format_context_window(snapshot.token_usage)}"])
     if snapshot.primary_bucket is not None:

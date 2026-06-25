@@ -13,10 +13,12 @@ from pathlib import Path
 from typing import Any
 
 from bridge_config import BridgeConfig
+from core.bridge_command_catalog import QQ_HELP_MESSAGE_KEYS, parse_bridge_command, render_bridge_help
 from core.json_store import load_json, save_json
 from core.runtime_paths import RUNTIME_DIR, STATE_DIR
 from core.state_models import HubTask
 from core.weixin_message_format import format_duration_since, prefix_weixin_output
+from localization import Localizer
 from local_ipc import cleanup_processed_requests, create_request, wait_for_response
 
 
@@ -106,6 +108,7 @@ class QQOneBotBridge:
         self.api_base = (api_base or os.environ.get("QQ_ONEBOT_API_BASE") or "http://127.0.0.1:3000").rstrip("/")
         self.access_token = access_token or os.environ.get("QQ_ONEBOT_ACCESS_TOKEN", "")
         self.agent_id = str(os.environ.get("QQ_BRIDGE_AGENT_ID") or DEFAULT_QQ_AGENT_ID).strip() or DEFAULT_QQ_AGENT_ID
+        self.localizer = Localizer(str(getattr(config, "language", "") or ""))
         self._login_user_id = ""
         self.pending_media_context = self._load_pending_media_context()
 
@@ -126,6 +129,10 @@ class QQOneBotBridge:
                 self._remember_pending_media_context(sender_key, media_attachments)
             elif media_errors:
                 self._send_reply(event, "附件接收失败：\n" + "\n".join(media_errors))
+            return
+        command_reply, command_handled = self._handle_control_command(sender_key, text)
+        if command_handled:
+            self._send_reply(event, command_reply)
             return
         prompt = self._build_prompt_with_media(text, [*self._consume_pending_media_context(sender_key), *media_attachments], media_errors)
         task = self._submit_task(sender_key, prompt)
@@ -162,6 +169,166 @@ class QQOneBotBridge:
             raise RuntimeError(str(response.error or "submit_task failed"))
         task = response.payload.get("task")
         return task if isinstance(task, dict) else {}
+
+    def _handle_control_command(self, sender_key: str, text: str) -> tuple[str, bool]:
+        parsed = parse_bridge_command(text)
+        if parsed is None:
+            return "", False
+        if parsed.is_passthrough:
+            if parsed.passthrough_prompt.strip().lower() == "/status":
+                return self._render_codex_status(sender_key), True
+            return "", False
+
+        command = parsed.command
+        parts = list(parsed.parts)
+        if command in {"/help", "/h", "/?"}:
+            return render_bridge_help(lambda key: self._t(key), QQ_HELP_MESSAGE_KEYS), True
+        if command == "/status":
+            return self._render_status(sender_key), True
+        if command == "/task":
+            task_id = parts[1].strip() if len(parts) >= 2 else ""
+            if not task_id:
+                return self._t("bridge.task.lookup.usage"), True
+            task = self._get_task(task_id)
+            if task is None or task.sender_id != sender_key:
+                return self._t("bridge.task.lookup.not_found", task_id=task_id), True
+            return self._render_task_summary(task), True
+        if command == "/last":
+            task = self._find_latest_sender_task(sender_key)
+            if task is None:
+                return self._t("bridge.task.lookup.none"), True
+            return self._render_task_summary(task), True
+        if command == "/cancel":
+            task = self._resolve_sender_task_for_command(
+                sender_key,
+                parts[1].strip() if len(parts) >= 2 else "",
+                allowed_statuses={"queued", "running"},
+            )
+            if task is None:
+                return self._t("bridge.task.cancel.none"), True
+            response = self._ipc_request("cancel_task", {"task_id": task.id}, timeout_seconds=5)
+            if not response.ok:
+                return self._t("bridge.task.cancel.failed", task_id=task.id, error=str(response.error or "unknown error")), True
+            canceled = HubTask.from_dict(response.payload.get("task"), default_backend=self.config.default_backend)
+            if canceled is None:
+                return self._t("bridge.task.cancel.failed", task_id=task.id, error="invalid task payload"), True
+            return self._t("bridge.task.cancel.ok", task_id=canceled.id, session=canceled.session_name or self._session_name(sender_key)), True
+        if command == "/retry":
+            task = self._resolve_sender_task_for_command(sender_key, parts[1].strip() if len(parts) >= 2 else "")
+            if task is None:
+                return self._t("bridge.task.retry.none"), True
+            response = self._ipc_request("retry_task", {"task_id": task.id, "source": "qq", "sender_id": sender_key}, timeout_seconds=5)
+            if not response.ok:
+                return self._t("bridge.task.retry.failed", task_id=task.id, error=str(response.error or "unknown error")), True
+            retried = HubTask.from_dict(response.payload.get("task"), default_backend=self.config.default_backend)
+            if retried is None:
+                return self._t("bridge.task.retry.failed", task_id=task.id, error="invalid task payload"), True
+            return self._t(
+                "bridge.task.retry.ok",
+                original=task.id,
+                task_id=retried.id,
+                session=retried.session_name or self._session_name(sender_key),
+                backend=retried.backend or self.config.default_backend,
+            ), True
+        return "QQ 桥暂不支持这个桥接命令。发送 /help 查看当前支持的命令。", True
+
+    def _render_status(self, sender_key: str) -> str:
+        latest_task = self._find_latest_sender_task(sender_key)
+        latest_line = "-"
+        if latest_task is not None:
+            latest_line = f"{latest_task.id} [{self._display_task_status(latest_task.status)}]"
+        return "\n".join(
+            [
+                "当前设置",
+                f"当前助手: {self.agent_id}",
+                f"当前后端: {self.config.default_backend}",
+                f"当前会话: {self._session_name(sender_key)}",
+                f"最近任务: {latest_line}",
+            ]
+        )
+
+    def _render_codex_status(self, sender_key: str) -> str:
+        if self.config.default_backend != "codex":
+            return "当前会话后端不是 Codex，//status 只支持 Codex 会话。"
+        response = self._ipc_request(
+            "codex_status",
+            {
+                "agent_id": self.agent_id,
+                "session_name": self._session_name(sender_key),
+                "workdir": "",
+            },
+            timeout_seconds=15,
+        )
+        if not response.ok:
+            return f"Codex 状态查询失败：{response.error or 'unknown error'}"
+        status_panel = str(response.payload.get("status") or "").strip()
+        if not status_panel:
+            return "当前会话还没有可查询的 Codex 交互状态。请先在这个会话里发送一条普通消息。"
+        return status_panel
+
+    def _render_task_summary(self, task: HubTask) -> str:
+        prompt = task.prompt.strip()[:400] or "(empty)"
+        result = (task.output or task.error).strip()[:800] or "(empty)"
+        return self._t(
+            "bridge.task.lookup.summary",
+            task_id=task.id,
+            session=task.session_name or "default",
+            status=self._display_task_status(task.status),
+            agent=task.agent_name or task.agent_id,
+            backend=task.backend or self.config.default_backend,
+            model=task.model.strip() or "-",
+            prompt=prompt,
+            result=result,
+        )
+
+    def _display_task_status(self, status: str) -> str:
+        cleaned = str(status or "").strip().lower()
+        return self._t(f"bridge.task.status.{cleaned}") if cleaned else self._t("bridge.task.status.unknown")
+
+    def _resolve_sender_task_for_command(
+        self,
+        sender_key: str,
+        task_id: str,
+        *,
+        allowed_statuses: set[str] | None = None,
+    ) -> HubTask | None:
+        cleaned_id = task_id.strip()
+        if cleaned_id:
+            task = self._get_task(cleaned_id)
+            if task is None or task.sender_id != sender_key:
+                return None
+            if allowed_statuses is not None and task.status not in allowed_statuses:
+                return None
+            return task
+        return self._find_latest_sender_task(sender_key, allowed_statuses=allowed_statuses)
+
+    def _find_latest_sender_task(self, sender_key: str, *, allowed_statuses: set[str] | None = None) -> HubTask | None:
+        response = self._ipc_request("state", {}, timeout_seconds=5)
+        if not response.ok:
+            return None
+        tasks: list[HubTask] = []
+        for raw_task in response.payload.get("tasks") or []:
+            task = HubTask.from_dict(raw_task, default_backend=self.config.default_backend)
+            if task is None or task.sender_id != sender_key:
+                continue
+            if allowed_statuses is not None and task.status not in allowed_statuses:
+                continue
+            tasks.append(task)
+        if not tasks:
+            return None
+        return sorted(tasks, key=lambda item: item.finished_at or item.started_at or item.created_at, reverse=True)[0]
+
+    def _get_task(self, task_id: str) -> HubTask | None:
+        response = self._ipc_request("get_task", {"task_id": task_id}, timeout_seconds=5)
+        if not response.ok:
+            return None
+        return HubTask.from_dict(response.payload.get("task"), default_backend=self.config.default_backend)
+
+    def _ipc_request(self, action: str, payload: dict[str, Any], *, timeout_seconds: float) -> Any:
+        return wait_for_response(create_request(action, payload), timeout_seconds=timeout_seconds)
+
+    def _t(self, key: str, **kwargs: Any) -> str:
+        return self.localizer.translate(key, **kwargs)
 
     def _wait_and_reply(self, event: dict[str, Any], task_id: str) -> None:
         deadline = time.time() + max(60, int(self.config.hub_task_timeout_seconds))

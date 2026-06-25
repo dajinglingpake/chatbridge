@@ -36,6 +36,8 @@ class BackendContext:
     mcp_server: McpServerConfig | None = None
     reasoning_effort: str = ""
     permission_mode: str = ""
+    codex_slim_exec: bool = True
+    codex_transport: str = "exec"
 
 
 class AgentBackend(Protocol):

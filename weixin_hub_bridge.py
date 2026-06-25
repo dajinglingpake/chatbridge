@@ -11,7 +11,6 @@ import subprocess
 import sys
 import threading
 import time
-import unicodedata
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -26,6 +25,7 @@ from agent_hub import HubConfig
 from bridge_config import APP_DIR, CONFIG_PATH, WEIXIN_ACCOUNTS_DIR, BridgeConfig, normalize_backend
 from core.accounts import account_conversation_path, load_account_context_tokens, save_account_context_tokens
 from core.app_service import schedule_named_action
+from core.bridge_command_catalog import normalize_command_text, parse_bridge_command, render_bridge_help
 from core.context_relations import build_context_relation_lines
 from core.http_json import request_json
 from core.json_store import load_json, save_json
@@ -1742,9 +1742,10 @@ class WeixinBridge:
         return False
 
     def _handle_control_command(self, sender_id: str, text: str) -> tuple[str, bool]:
-        raw = self._normalize_command_text(text)
-        if not raw.startswith("/"):
+        parsed = parse_bridge_command(text)
+        if parsed is None or parsed.is_passthrough:
             return "", False
+        raw = parsed.raw
 
         binding = self._ensure_conversation(sender_id)
         current_session, current_meta = binding.get_current_session(
@@ -1754,63 +1755,11 @@ class WeixinBridge:
         )
         sessions = binding.sessions
 
-        parts = raw.split(maxsplit=2)
-        command = parts[0].lower()
+        parts = list(parsed.parts)
+        command = parsed.command
 
         if command in {"/help", "/h", "/?"}:
-            help_lines = [
-                self._t("bridge.help.title"),
-                self._t("bridge.help.help"),
-                self._t("bridge.help.status"),
-                self._t("bridge.help.context"),
-                self._t("bridge.help.new"),
-                self._t("bridge.help.list"),
-                self._t("bridge.help.sessions.page"),
-                self._t("bridge.help.sessions.search"),
-                self._t("bridge.help.sessions.delete"),
-                self._t("bridge.help.sessions.clear_empty"),
-                self._t("bridge.help.preview"),
-                self._t("bridge.help.history"),
-                self._t("bridge.help.export"),
-                self._t("bridge.help.showfile"),
-                self._t("bridge.help.sendfile"),
-                self._t("bridge.help.events"),
-                self._t("bridge.help.use"),
-                self._t("bridge.help.rename"),
-                self._t("bridge.help.delete"),
-                self._t("bridge.help.cancel"),
-                self._t("bridge.help.retry"),
-                self._t("bridge.help.task"),
-                self._t("bridge.help.last"),
-                self._t("bridge.help.agent.current"),
-                self._t("bridge.help.agent.list"),
-                self._t("bridge.help.agent.commands"),
-                self._t("bridge.help.agent.switch"),
-                self._t("bridge.help.restart"),
-                self._t("bridge.help.notify.current"),
-                self._t("bridge.help.notify.switch"),
-                self._t("bridge.help.backend.current"),
-                self._t("bridge.help.backend.switch"),
-                self._t("bridge.help.model"),
-                self._t("bridge.help.model.switch"),
-                self._t("bridge.help.model.reset"),
-                self._t("bridge.help.project"),
-                self._t("bridge.help.project.add"),
-                self._t("bridge.help.project.remove"),
-                self._t("bridge.help.project.list"),
-                self._t("bridge.help.project.sessions"),
-                self._t("bridge.help.project.switch"),
-                self._t("bridge.help.project.reset"),
-                self._t("bridge.help.clear"),
-                self._t("bridge.help.close"),
-                self._t("bridge.help.reset"),
-                "",
-                self._t("bridge.help.normal"),
-                self._t("bridge.help.normal.detail"),
-                self._t("bridge.help.escape"),
-            ]
-            blocks = [line for line in help_lines if line]
-            return "\n\n".join(blocks), True
+            return render_bridge_help(lambda key: self._t(key)), True
 
         if command == "/new":
             requested = parts[1].strip() if len(parts) >= 2 else ""
@@ -2803,10 +2752,10 @@ class WeixinBridge:
         )
 
     def _extract_passthrough_prompt(self, text: str) -> str | None:
-        raw = self._normalize_command_text(text)
-        if not raw.startswith("//"):
+        parsed = parse_bridge_command(text)
+        if parsed is None or not parsed.is_passthrough:
             return None
-        prompt = raw[1:].strip()
+        prompt = parsed.passthrough_prompt
         return prompt or "/"
 
     def _render_local_codex_status(
@@ -3432,12 +3381,7 @@ class WeixinBridge:
 
     @staticmethod
     def _normalize_command_text(text: str) -> str:
-        normalized = unicodedata.normalize("NFKC", str(text or ""))
-        normalized = normalized.replace("\ufeff", "").replace("\u200b", "").replace("\u200c", "").replace("\u200d", "")
-        lines = [line.strip() for line in normalized.splitlines() if line.strip()]
-        if not lines:
-            return ""
-        return lines[0]
+        return normalize_command_text(text)
 
     def _ensure_conversation(self, sender_id: str) -> WeixinConversationBinding:
         existing = self.conversations.get(sender_id)
