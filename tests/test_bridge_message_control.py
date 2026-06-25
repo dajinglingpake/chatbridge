@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from core.bridge_message_control import extract_progress_delta, should_send_progress_delta
+from core.bridge_message_control import extract_progress_delta
 
 
 class BridgeMessageControlTests(unittest.TestCase):
@@ -14,9 +14,6 @@ class BridgeMessageControlTests(unittest.TestCase):
 
     def test_extract_progress_delta_keeps_plain_added_text(self) -> None:
         self.assertEqual("第二段内容完成", extract_progress_delta("第一段内容完成\n", "第一段内容完成\n第二段内容完成"))
-
-    def test_should_send_progress_delta_rejects_only_continuation_mark(self) -> None:
-        self.assertFalse(should_send_progress_delta("，"))
 
 
 if __name__ == "__main__":

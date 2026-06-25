@@ -390,6 +390,53 @@ class QQOneBotBridgeTests(unittest.TestCase):
         self.assertIn("正在处理 QQ 消息", sent_messages[0])
         self.assertIn("QQ 消息完成", sent_messages[1])
 
+    def test_pushed_task_update_keeps_done_status_when_final_matches_progress(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.pending_tasks = {
+            "task-qq-001": BridgePendingReplyTask(
+                task_id="task-qq-001",
+                sender_key="qq:private:10001",
+                reply_target={"message_type": "private", "user_id": 10001},
+                created_at=123,
+            )
+        }
+        base_task = {
+            "id": "task-qq-001",
+            "agent_id": "qq",
+            "agent_name": "QQ 会话",
+            "backend": "codex",
+            "source": "qq",
+            "sender_id": "qq:private:10001",
+            "prompt": "hello",
+            "created_at": "2026-06-26T01:00:00",
+            "started_at": "2026-06-26T01:00:01",
+            "session_name": "qq-private-10001",
+            "workdir": "",
+            "progress_at": "2026-06-26T01:00:02",
+        }
+
+        bridge._handle_pushed_task_update({"task": {**base_task, "status": "running", "progress_text": "这是最终回答", "progress_seq": 1}})
+        bridge._handle_pushed_task_update(
+            {
+                "task": {
+                    **base_task,
+                    "status": "succeeded",
+                    "finished_at": "2026-06-26T01:00:05",
+                    "output": "这是最终回答",
+                    "error": "",
+                    "progress_text": "这是最终回答",
+                    "progress_seq": 1,
+                }
+            }
+        )
+
+        sent_messages = [payload["message"] for action, payload in bridge.api_calls if action == "send_private_msg"]
+        self.assertEqual(2, len(sent_messages))
+        self.assertTrue(sent_messages[0].startswith("running · "))
+        self.assertIn("\n\n这是最终回答", sent_messages[0])
+        self.assertTrue(sent_messages[1].startswith("done · "))
+        self.assertNotIn("\n\n", sent_messages[1])
+
     def test_process_bridge_ipc_consumes_qq_channel_update(self) -> None:
         bridge = FakeQQBridge(self.temp_path)
         bridge.pending_tasks = {
@@ -542,7 +589,7 @@ class QQOneBotBridgeTests(unittest.TestCase):
         self.assertNotIn("第一段内容完成", sent_messages[1])
         self.assertIn("完成", sent_messages[2])
 
-    def test_wait_and_reply_batches_tiny_progress_fragments(self) -> None:
+    def test_wait_and_reply_sends_tiny_progress_fragments(self) -> None:
         bridge = FakeQQBridge(self.temp_path)
         base_task = {
             "id": "task-qq-001",
@@ -574,10 +621,11 @@ class QQOneBotBridgeTests(unittest.TestCase):
             QQOneBotBridge._wait_and_reply(bridge, {"message_type": "private", "user_id": 10001}, "task-qq-001")
 
         sent_messages = [payload["message"] for action, payload in bridge.api_calls if action == "send_private_msg"]
-        self.assertEqual(2, len(sent_messages))
-        self.assertIn("刚开始分析项目", sent_messages[0])
-        self.assertNotEqual("刚", sent_messages[0].split("\n\n", 1)[-1])
-        self.assertIn("完成", sent_messages[1])
+        self.assertEqual(3, len(sent_messages))
+        self.assertEqual("刚", sent_messages[0].split("\n\n", 1)[-1])
+        self.assertIn("开始分析项目", sent_messages[1])
+        self.assertNotIn("刚", sent_messages[1].split("\n\n", 1)[-1])
+        self.assertIn("完成", sent_messages[2])
 
     def test_group_message_at_other_user_is_ignored(self) -> None:
         bridge = FakeQQBridge(self.temp_path)

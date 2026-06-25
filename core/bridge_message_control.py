@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 
-DEFAULT_PROGRESS_MIN_CHARS = 6
 DELTA_LEADING_CONTINUATION_MARKS = "，,、。.!！？?；;：:"
 
 
@@ -23,15 +22,6 @@ def extract_progress_delta(previous: object, current: object) -> str:
 
 def _clean_progress_delta(delta: object) -> str:
     return str(delta or "").strip().lstrip(DELTA_LEADING_CONTINUATION_MARKS).strip()
-
-
-def should_send_progress_delta(delta: object, *, min_chars: int = DEFAULT_PROGRESS_MIN_CHARS) -> bool:
-    cleaned = str(delta or "").strip()
-    if not cleaned:
-        return False
-    if len(cleaned) >= min_chars:
-        return True
-    return any(marker in cleaned for marker in ("\n", "。", "！", "？", ".", "!", "?"))
 
 
 def normalize_context_left_percent(value: object) -> int | None:

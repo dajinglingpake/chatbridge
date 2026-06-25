@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from typing import Any, Callable
 
-from core.bridge_message_control import extract_progress_delta, normalize_message_for_dedupe, should_send_progress_delta
+from core.bridge_message_control import extract_progress_delta, normalize_message_for_dedupe
 from core.state_models import HubTask
 from core.weixin_message_format import format_duration_since, prefix_weixin_output
 
@@ -24,12 +24,11 @@ def format_bridge_progress_reply(task: HubTask, *, progress_text: str | None = N
 def format_bridge_task_reply(task: HubTask, *, last_progress_text: str = "", context_left_percent: int | None = None) -> str:
     if task.status == "succeeded":
         output = task.output.strip() or "(empty)"
-        if last_progress_text and normalize_message_for_dedupe(output) == normalize_message_for_dedupe(last_progress_text):
-            return ""
+        body = "" if last_progress_text and normalize_message_for_dedupe(output) == normalize_message_for_dedupe(last_progress_text) else output
         return prefix_weixin_output(
             "done",
             format_duration_since(task.started_at or task.created_at, ended_at=task.finished_at),
-            output,
+            body,
             at=task.finished_at,
             context_left_percent=context_left_percent,
         )
@@ -81,7 +80,7 @@ class PollingTaskDeliveryController:
                 if latest_task.status in {"queued", "running"} and latest_task.progress_seq > last_progress_seq and latest_task.progress_text.strip():
                     progress_text = latest_task.progress_text.strip()
                     progress_delta = extract_progress_delta(last_sent_progress_text, progress_text)
-                    if should_send_progress_delta(progress_delta):
+                    if str(progress_delta or "").strip():
                         self.send_reply(
                             reply_target,
                             format_bridge_progress_reply(
@@ -126,7 +125,7 @@ class TaskUpdateDeliveryController:
         forget_pending_task: Callable[[str], None],
         send_typing_keepalive: Callable[[Any, float], float] | None = None,
         on_running: Callable[[Any, Any, HubTask], None] | None = None,
-        should_send_progress: Callable[[str], bool] = should_send_progress_delta,
+        should_send_progress: Callable[[str], bool] | None = None,
     ) -> None:
         self.send_typing_keepalive = send_typing_keepalive
         self.on_running = on_running
@@ -134,7 +133,7 @@ class TaskUpdateDeliveryController:
         self.send_terminal = send_terminal
         self.save_pending_task = save_pending_task
         self.forget_pending_task = forget_pending_task
-        self.should_send_progress = should_send_progress
+        self.should_send_progress = should_send_progress or (lambda progress_delta: bool(str(progress_delta or "").strip()))
 
     def handle_task_update(
         self,
