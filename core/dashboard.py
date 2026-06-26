@@ -13,7 +13,7 @@ except ImportError:  # pragma: no cover - optional dependency
 from bridge_config import BridgeConfig, normalize_backend
 from core.accounts import account_conversation_path
 from env_tools import collect_check_step, collect_lightweight_checks, get_full_check_sequence, get_full_check_step_label
-from core.state_models import CheckSnapshot, ExternalAgentProcessState, HubStateSnapshot, RuntimeSnapshot, WeixinBridgeRuntimeState, WeixinConversationBinding
+from core.state_models import CheckSnapshot, ExternalAgentProcessState, HubStateSnapshot, RuntimeSnapshot, BridgeRuntimeState, WeixinConversationBinding
 from runtime_stack import (
     BRIDGE_CONVERSATIONS_PATH,
     BRIDGE_ERR_LOG,
@@ -37,7 +37,7 @@ class DashboardState:
     snapshot: RuntimeSnapshot
     bridge_config: BridgeConfig
     hub_state: HubStateSnapshot
-    bridge_state: WeixinBridgeRuntimeState
+    bridge_state: BridgeRuntimeState
     bridge_conversations: dict[str, WeixinConversationBinding]
     checks: dict[str, CheckSnapshot]
     checks_in_progress: bool
@@ -290,8 +290,8 @@ def _read_hub_state(path: Path, bridge_config: BridgeConfig) -> HubStateSnapshot
     )
 
 
-def _read_bridge_state(path: Path) -> WeixinBridgeRuntimeState:
-    return WeixinBridgeRuntimeState.from_dict(read_json(path))
+def _read_bridge_state(path: Path) -> BridgeRuntimeState:
+    return BridgeRuntimeState.from_dict(read_json(path))
 
 
 def _read_bridge_conversations(path: Path, bridge_config: BridgeConfig) -> dict[str, WeixinConversationBinding]:

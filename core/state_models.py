@@ -484,7 +484,7 @@ WeixinSessionMeta = BridgeSessionMeta
 WeixinConversationBinding = BridgeConversationBinding
 
 @dataclass
-class WeixinBridgeRuntimeState:
+class BridgeRuntimeState:
     started_at: str
     last_poll_at: str = ""
     last_message_at: str = ""
@@ -498,7 +498,7 @@ class WeixinBridgeRuntimeState:
     using_local_account_storage: bool = True
 
     @classmethod
-    def create(cls, *, now: str, managed_conversations: int, account_file: str, sync_file: str) -> "WeixinBridgeRuntimeState":
+    def create(cls, *, now: str, managed_conversations: int, account_file: str, sync_file: str) -> "BridgeRuntimeState":
         return cls(
             started_at=now,
             managed_conversations=managed_conversations,
@@ -507,7 +507,7 @@ class WeixinBridgeRuntimeState:
         )
 
     @classmethod
-    def from_dict(cls, raw: object) -> "WeixinBridgeRuntimeState":
+    def from_dict(cls, raw: object) -> "BridgeRuntimeState":
         if not isinstance(raw, dict):
             return cls(started_at="")
         return cls(
@@ -551,6 +551,8 @@ class WeixinBridgeRuntimeState:
     def to_dict(self) -> JsonObject:
         return asdict(self)
 
+
+WeixinBridgeRuntimeState = BridgeRuntimeState
 
 @dataclass
 class WeixinPendingTaskState:

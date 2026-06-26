@@ -7,7 +7,6 @@ import mimetypes
 import os
 import random
 import secrets
-import subprocess
 import sys
 import threading
 import time
@@ -37,9 +36,13 @@ from core.bridge_runtime import (
     PendingMediaContextStore,
     build_prompt_with_media,
 )
+from core.bridge_media_control_runtime import BridgeMediaControlRuntime
+from core.bridge_native_menu_runtime import BridgeNativeMenuRuntime, PERMISSION_MODE_PRESETS
+from core.bridge_notify_control_runtime import BridgeNotifyControlRuntime
 from core.bridge_service_control_runtime import BridgeServiceControlRuntime, WEIXIN_RESTART_SCOPES
 from core.bridge_session_control_runtime import BridgeSessionControlRuntime
 from core.bridge_task_delivery import TaskUpdateDeliveryController
+from core.codex_model_catalog import display_model, display_reasoning_effort, load_codex_model_catalog
 from core.context_relations import build_context_relation_lines
 from core.http_json import request_json
 from core.json_store import load_json, save_json
@@ -61,7 +64,7 @@ from core.runtime_paths import (
 from core.state_models import (
     HubTask,
     IpcResponseEnvelope,
-    WeixinBridgeRuntimeState,
+    BridgeRuntimeState,
     WeixinConversationBinding,
     WeixinPendingTaskState,
     WeixinSessionMeta,
@@ -159,11 +162,6 @@ def _is_ephemeral_delivery_text(text: object) -> bool:
 
 
 SHOWFILE_BLOCKED_PATH_PARTS = frozenset({".git", ".runtime", ".venv", "__pycache__", "accounts", "sessions"})
-PERMISSION_MODE_PRESETS: tuple[tuple[str, str], ...] = (
-    ("default", "Default"),
-    ("full-access", "Full Access"),
-)
-SPECIAL_NATIVE_MENU_COMMANDS = frozenset({"/model", "/permission", "/permissions"})
 
 
 def _encrypt_aes_128_ecb(data: bytes, key: bytes) -> bytes:
@@ -271,6 +269,24 @@ class WeixinBridge:
             before_restart=lambda sender_id, scope: self._store_pending_restart_notice(sender_id, scope=scope),
             render_status=self._render_restart_status,
         )
+        self.notify_control_runtime = BridgeNotifyControlRuntime(
+            config=self.config,
+            translate=lambda key, **kwargs: self._t(key, **kwargs),
+            send_test_notice=self._send_notify_test_notice,
+        )
+        self.media_control_runtime = BridgeMediaControlRuntime(
+            translate=lambda key, **kwargs: self._t(key, **kwargs),
+            resolve_file=lambda raw_path: self._resolve_shareable_project_file(raw_path),
+            send_file=lambda reply_target, file_path: self._send_media_to_reply_target(reply_target, file_path),
+        )
+        self.native_menu_runtime = BridgeNativeMenuRuntime(
+            translate=lambda key, **kwargs: self._t(key, **kwargs),
+            now=now_iso,
+            load_model_catalog=lambda: self._load_codex_model_catalog(),
+            resolve_session_model=self._resolve_session_model,
+            resolve_session_permission_mode=self._resolve_session_permission_mode,
+            display_permission_mode=self._display_permission_mode,
+        )
         self._recent_message_keys: list[str] = []
         self._recent_message_fingerprints: dict[str, float] = {}
         self._send_worker_started = False
@@ -279,7 +295,7 @@ class WeixinBridge:
         self._runtime_config_lock = threading.Lock()
         self._pending_reconcile_last_at = 0.0
         self._pending_reconcile_cursor = 0
-        self.state = WeixinBridgeRuntimeState.create(
+        self.state = BridgeRuntimeState.create(
             now=now_iso(),
             managed_conversations=len(self.conversations),
             account_file=str(self.account_path),
@@ -663,11 +679,11 @@ class WeixinBridge:
         session_name = str(session["session_name"] or "")
         session_meta = session["session_meta"]
         text = message.text
-        active_native_menu = bool(session_meta.native_menu_command and session_meta.native_menu_options)
-        passthrough_prompt = self._extract_passthrough_prompt(text)
-        if active_native_menu and (passthrough_prompt is None or not self._is_special_native_menu_command(passthrough_prompt)):
-            native_reply, native_handled = self._handle_native_menu_reply(binding, session_name, session_meta, text)
-            if native_handled:
+        active_native_menu = self.native_menu_runtime.has_active_menu(session_meta)
+        passthrough_prompt = self.native_menu_runtime.passthrough_prompt(text)
+        if active_native_menu and (passthrough_prompt is None or not self.native_menu_runtime.is_special_command(passthrough_prompt)):
+            native_result = self.native_menu_runtime.handle_reply(session_name, session_meta, text)
+            if native_result.handled:
                 self._append_message_audit(
                     sender_id=message.sender_id,
                     text=text,
@@ -675,19 +691,14 @@ class WeixinBridge:
                     session_name=session_name or "default",
                     command=session_meta.native_menu_command,
                 )
-                self._send_runtime_reply(message.reply_target, native_reply)
+                self._send_runtime_reply(message.reply_target, native_result.reply)
                 self.state.record_handled()
                 self._save_conversations()
                 self._save_state()
                 return BridgePromptDecision(handled=True)
         if passthrough_prompt is None:
-            if self._handle_sendfile_command(
-                str(message.reply_target.get("base_url") or ""),
-                str(message.reply_target.get("token") or ""),
-                message.sender_id,
-                message.context_token,
-                text,
-            ):
+            media_result = self.media_control_runtime.handle(message.reply_target, text)
+            if media_result.handled:
                 self._append_message_audit(
                     sender_id=message.sender_id,
                     text=text,
@@ -695,6 +706,8 @@ class WeixinBridge:
                     session_name=session_name or "default",
                     command=self._normalize_command_text(text).split(maxsplit=1)[0].lower(),
                 )
+                if media_result.reply:
+                    self._send_runtime_reply(message.reply_target, media_result.reply)
                 self.state.record_handled()
                 self._save_state()
                 return BridgePromptDecision(handled=True)
@@ -727,8 +740,8 @@ class WeixinBridge:
             self.state.record_handled()
             self._save_state()
             return BridgePromptDecision(handled=True)
-        special_native_menu = self._start_special_native_menu(session_name, session_meta, passthrough_prompt)
-        if special_native_menu is not None:
+        special_native_menu = self.native_menu_runtime.start(session_name, session_meta, passthrough_prompt)
+        if special_native_menu.handled:
             self._append_message_audit(
                 sender_id=message.sender_id,
                 text=text,
@@ -736,12 +749,12 @@ class WeixinBridge:
                 session_name=session_name or "default",
                 command=passthrough_prompt.strip().lower(),
             )
-            self._send_runtime_reply(message.reply_target, special_native_menu)
+            self._send_runtime_reply(message.reply_target, special_native_menu.reply)
             self.state.record_handled()
             self._save_conversations()
             self._save_state()
             return BridgePromptDecision(handled=True)
-        if self._looks_like_agent_slash_command(passthrough_prompt):
+        if self.native_menu_runtime.looks_like_agent_slash_command(passthrough_prompt):
             self._append_message_audit(
                 sender_id=message.sender_id,
                 text=text,
@@ -1476,23 +1489,14 @@ class WeixinBridge:
         if isinstance(response, dict) and response.get("ret") not in (None, 0):
             raise RuntimeError(f"sendtyping returned ret={response.get('ret')}: {response}")
 
-    def _handle_sendfile_command(self, base_url: str, token: str, sender_id: str, context_token: Any, text: str) -> bool:
-        raw = self._normalize_command_text(text)
-        if not raw.startswith("/sendfile"):
-            return False
-        parts = raw.split(maxsplit=1)
-        if parts[0].lower() != "/sendfile":
-            return False
-        raw_path = parts[1].strip() if len(parts) >= 2 else ""
-        if not raw_path:
-            self._send_text(base_url, token, sender_id, context_token, self._t("bridge.sendfile.usage"))
-            return True
-        try:
-            file_path = self._resolve_shareable_project_file(raw_path)
-            self._send_media_file(base_url, token, sender_id, context_token, file_path)
-        except Exception as exc:  # noqa: BLE001
-            self._send_text(base_url, token, sender_id, context_token, self._t("bridge.sendfile.failed", path=raw_path, error=str(exc)))
-        return True
+    def _send_media_to_reply_target(self, reply_target: dict[str, Any], file_path: Path) -> None:
+        self._send_media_file(
+            str(reply_target.get("base_url") or ""),
+            str(reply_target.get("token") or ""),
+            str(reply_target.get("to_user_id") or ""),
+            reply_target.get("context_token"),
+            file_path,
+        )
 
     def _send_media_file(self, base_url: str, token: str, to_user_id: str, context_token: Any, file_path: Path) -> dict[str, Any]:
         guessed_mime = mimetypes.guess_type(file_path.name)[0] or ""
@@ -1865,64 +1869,25 @@ class WeixinBridge:
         service_result = self.service_control_runtime.handle(sender_id, text)
         if service_result.handled:
             return service_result.reply, True
+        notify_result = self.notify_control_runtime.handle(sender_id, text)
+        if notify_result.handled:
+            return notify_result.reply, True
         parsed = parse_bridge_command(text)
         if parsed is None or parsed.is_passthrough:
             return "", False
-        parts = list(parsed.parts)
-        command = parsed.command
-        if command == "/notify":
-            return self._handle_notify_command(parts)
         return self._t("bridge.command.unknown"), True
 
-    def _handle_notify_command(self, parts: list[str]) -> tuple[str, bool]:
-        if len(parts) < 2:
-            return self._t(
-                "bridge.notify.current",
-                service=self._t("bridge.notify.on") if self.config.service_notice_enabled else self._t("bridge.notify.off"),
-                config=self._t("bridge.notify.on") if self.config.config_notice_enabled else self._t("bridge.notify.off"),
-                task=self._t("bridge.notify.on") if self.config.task_notice_enabled else self._t("bridge.notify.off"),
-            ), True
-        desired = parts[1].strip().lower()
-        if desired == "test":
-            result = broadcast_weixin_notice_by_kind(
-                "service",
-                "通知测试",
-                f"Bridge 通知链路测试\n账号: {self.config.active_account_id or '-'}\n默认 Agent: {self.config.backend_id or 'main'}",
-                config=self.config,
-            )
-            print(f"[bridge] notify test: {result.summary}", flush=True)
-            if result.error and result.error != "disabled":
-                print(f"[bridge] notify test error: {result.error}", flush=True)
-            return self._t("bridge.notify.test", summary=result.summary), True
-        if desired not in {"on", "off", "service-on", "service-off", "config-on", "config-off", "task-on", "task-off"}:
-            return self._t("bridge.notify.usage"), True
-        if desired == "on":
-            self.config.service_notice_enabled = True
-            self.config.config_notice_enabled = True
-            self.config.task_notice_enabled = True
-        elif desired == "off":
-            self.config.service_notice_enabled = False
-            self.config.config_notice_enabled = False
-            self.config.task_notice_enabled = False
-        elif desired == "service-on":
-            self.config.service_notice_enabled = True
-        elif desired == "service-off":
-            self.config.service_notice_enabled = False
-        elif desired == "config-on":
-            self.config.config_notice_enabled = True
-        elif desired == "config-off":
-            self.config.config_notice_enabled = False
-        elif desired == "task-on":
-            self.config.task_notice_enabled = True
-        elif desired == "task-off":
-            self.config.task_notice_enabled = False
-        self.config.save()
-        return self._t(
-            "bridge.notify.switched",
-            service=self._t("bridge.notify.on") if self.config.service_notice_enabled else self._t("bridge.notify.off"),
-            config=self._t("bridge.notify.on") if self.config.config_notice_enabled else self._t("bridge.notify.off"),
-            task=self._t("bridge.notify.on") if self.config.task_notice_enabled else self._t("bridge.notify.off"),
-        ), True
+    def _send_notify_test_notice(self) -> str:
+        result = broadcast_weixin_notice_by_kind(
+            "service",
+            "通知测试",
+            f"Bridge 通知链路测试\n账号: {self.config.active_account_id or '-'}\n默认 Agent: {self.config.backend_id or 'main'}",
+            config=self.config,
+        )
+        print(f"[bridge] notify test: {result.summary}", flush=True)
+        if result.error and result.error != "disabled":
+            print(f"[bridge] notify test error: {result.error}", flush=True)
+        return result.summary
 
     def _current_session_name(self, sender_id: str) -> str:
         binding = self._ensure_conversation(sender_id)
@@ -2440,16 +2405,11 @@ class WeixinBridge:
 
     def _resolve_session_model(self, session_meta: WeixinSessionMeta) -> str:
         model = self._effective_session_model(session_meta)
-        return self._display_model(model)
+        return display_model(model)
 
     @staticmethod
     def _display_reasoning_effort(effort: str) -> str:
-        cleaned = str(effort or "").strip().lower()
-        if not cleaned:
-            return "-"
-        if cleaned == "xhigh":
-            return "Extra high"
-        return cleaned.title()
+        return display_reasoning_effort(effort)
 
     def _resolve_session_permission_mode(self, session_meta: WeixinSessionMeta) -> str:
         cleaned = session_meta.permission_mode.strip().lower()
@@ -2472,7 +2432,7 @@ class WeixinBridge:
 
     @staticmethod
     def _display_model(model: str) -> str:
-        return model.strip() or "-"
+        return display_model(model)
 
     def _render_model_status(self, session_name: str, session_meta: WeixinSessionMeta) -> str:
         session_model = self._resolve_session_model(session_meta)
@@ -2535,13 +2495,6 @@ class WeixinBridge:
             True,
         )
 
-    def _extract_passthrough_prompt(self, text: str) -> str | None:
-        parsed = parse_bridge_command(text)
-        if parsed is None or not parsed.is_passthrough:
-            return None
-        prompt = parsed.passthrough_prompt
-        return prompt or "/"
-
     def _render_local_codex_status(
         self,
         session_name: str,
@@ -2567,6 +2520,10 @@ class WeixinBridge:
         if not status_panel:
             return "当前会话还没有可查询的 Codex 交互状态。请先在这个会话里发送一条普通消息。"
         return status_panel
+
+    @staticmethod
+    def _extract_passthrough_prompt(text: str) -> str | None:
+        return BridgeNativeMenuRuntime.passthrough_prompt(text)
 
     def _render_restart_status(self) -> str:
         payload = load_json(SERVICE_ACTION_STATE_FILE, {}, expect_type=dict)
@@ -2605,336 +2562,12 @@ class WeixinBridge:
             lines.append(self._t("bridge.restart.status.error", error=error))
         return "\n".join(lines)
 
-    @staticmethod
-    def _is_special_native_menu_command(prompt: str) -> bool:
-        return str(prompt or "").strip().lower() in SPECIAL_NATIVE_MENU_COMMANDS
-
-    @staticmethod
-    def _looks_like_agent_slash_command(prompt: str | None) -> bool:
-        return str(prompt or "").strip().startswith("/")
-
-    def _start_special_native_menu(self, session_name: str, session_meta: WeixinSessionMeta, prompt: str) -> str | None:
-        command = str(prompt or "").strip().lower()
-        if command == "/model":
-            entries = self._load_codex_model_catalog()
-            if not entries:
-                session_meta.clear_native_menu()
-                session_meta.touch(now_iso())
-                return self._t("bridge.native_menu.model.empty")
-            session_meta.set_native_menu(
-                command="/model",
-                stage="select_model",
-                options=[entry["slug"] for entry in entries],
-                context=json.dumps({"entries": entries}, ensure_ascii=False),
-            )
-            session_meta.touch(now_iso())
-            return self._render_model_selection_menu(session_name, session_meta)
-        if command in {"/permission", "/permissions"}:
-            session_meta.set_native_menu(
-                command="/permissions",
-                stage="select_permission",
-                options=[value for value, _ in PERMISSION_MODE_PRESETS],
-                context="",
-            )
-            session_meta.touch(now_iso())
-            return self._render_permission_selection_menu(session_name, session_meta)
-        return None
-
-    def _handle_native_menu_reply(
-        self,
-        binding: WeixinConversationBinding,
-        session_name: str,
-        session_meta: WeixinSessionMeta,
-        text: str,
-    ) -> tuple[str, bool]:
-        del binding
-        if not session_meta.native_menu_command or not session_meta.native_menu_options:
-            return "", False
-        raw = self._normalize_command_text(text)
-        lowered = raw.lower()
-        if lowered in {"取消", "cancel", "/cancel", "q", "quit"}:
-            session_meta.clear_native_menu()
-            session_meta.touch(now_iso())
-            return self._t("bridge.native_menu.canceled", session=session_name), True
-        if lowered in {"返回", "back"}:
-            if session_meta.native_menu_command == "/model" and session_meta.native_menu_stage == "select_reasoning":
-                context = self._parse_native_menu_context(session_meta)
-                entries = context.get("entries") or []
-                session_meta.set_native_menu(
-                    command="/model",
-                    stage="select_model",
-                    options=[entry["slug"] for entry in entries if entry.get("slug")],
-                    context=json.dumps({"entries": entries}, ensure_ascii=False),
-                )
-                session_meta.touch(now_iso())
-                return self._render_model_selection_menu(session_name, session_meta), True
-            session_meta.clear_native_menu()
-            session_meta.touch(now_iso())
-            return self._t("bridge.native_menu.canceled", session=session_name), True
-        if not raw.isdigit():
-            return self._render_native_menu_invalid(session_name, session_meta), True
-        option_index = int(raw) - 1
-        if option_index < 0 or option_index >= len(session_meta.native_menu_options):
-            return self._render_native_menu_invalid(session_name, session_meta), True
-        selected = session_meta.native_menu_options[option_index]
-        if session_meta.native_menu_command == "/model":
-            return self._apply_model_menu_selection(session_name, session_meta, selected)
-        if session_meta.native_menu_command == "/permissions":
-            return self._apply_permission_menu_selection(session_name, session_meta, selected)
-        session_meta.clear_native_menu()
-        session_meta.touch(now_iso())
-        return self._t("bridge.native_menu.canceled", session=session_name), True
-
-    def _apply_model_menu_selection(
-        self,
-        session_name: str,
-        session_meta: WeixinSessionMeta,
-        selected: str,
-    ) -> tuple[str, bool]:
-        context = self._parse_native_menu_context(session_meta)
-        entries = context.get("entries") or []
-        entries_by_slug = {
-            str(entry.get("slug") or "").strip(): entry
-            for entry in entries
-            if str(entry.get("slug") or "").strip()
-        }
-        if session_meta.native_menu_stage == "select_model":
-            entry = entries_by_slug.get(selected)
-            if entry is None:
-                return self._render_native_menu_invalid(session_name, session_meta), True
-            reasoning_levels = [str(item).strip() for item in entry.get("reasoning_levels") or [] if str(item).strip()]
-            if len(reasoning_levels) <= 1:
-                default_effort = str(entry.get("default_reasoning") or "").strip()
-                chosen_effort = default_effort or (reasoning_levels[0] if reasoning_levels else "")
-                session_meta.touch(
-                    now_iso(),
-                    model=str(entry.get("slug") or "").strip(),
-                    reasoning_effort=chosen_effort,
-                )
-                session_meta.clear_native_menu()
-                return (
-                    self._t(
-                        "bridge.native_menu.model.updated",
-                        session=session_name,
-                        model=self._display_model(str(entry.get("display_name") or entry.get("slug") or "")),
-                        reasoning=self._display_reasoning_effort(chosen_effort),
-                    ),
-                    True,
-                )
-            session_meta.set_native_menu(
-                command="/model",
-                stage="select_reasoning",
-                options=reasoning_levels,
-                context=json.dumps(
-                    {
-                        "entries": entries,
-                        "selected_model": str(entry.get("slug") or "").strip(),
-                    },
-                    ensure_ascii=False,
-                ),
-            )
-            session_meta.touch(now_iso())
-            return self._render_reasoning_selection_menu(session_name, session_meta), True
-        if session_meta.native_menu_stage == "select_reasoning":
-            selected_model = str(context.get("selected_model") or "").strip()
-            entry = entries_by_slug.get(selected_model)
-            if entry is None:
-                session_meta.clear_native_menu()
-                session_meta.touch(now_iso())
-                return self._t("bridge.native_menu.canceled", session=session_name), True
-            session_meta.touch(
-                now_iso(),
-                model=selected_model,
-                reasoning_effort=selected,
-            )
-            session_meta.clear_native_menu()
-            return (
-                self._t(
-                    "bridge.native_menu.model.updated",
-                    session=session_name,
-                    model=self._display_model(str(entry.get("display_name") or entry.get("slug") or "")),
-                    reasoning=self._display_reasoning_effort(selected),
-                ),
-                True,
-            )
-        return self._render_native_menu_invalid(session_name, session_meta), True
-
-    def _apply_permission_menu_selection(
-        self,
-        session_name: str,
-        session_meta: WeixinSessionMeta,
-        selected: str,
-    ) -> tuple[str, bool]:
-        session_meta.touch(now_iso(), permission_mode=selected)
-        session_meta.clear_native_menu()
-        return (
-            self._t(
-                "bridge.native_menu.permissions.updated",
-                session=session_name,
-                mode=self._display_permission_mode(selected),
-            ),
-            True,
-        )
-
-    def _render_native_menu_invalid(self, session_name: str, session_meta: WeixinSessionMeta) -> str:
-        return self._t("bridge.native_menu.invalid") + "\n\n" + self._render_native_menu(session_name, session_meta)
-
-    def _render_native_menu(self, session_name: str, session_meta: WeixinSessionMeta) -> str:
-        if session_meta.native_menu_command == "/model":
-            if session_meta.native_menu_stage == "select_reasoning":
-                return self._render_reasoning_selection_menu(session_name, session_meta)
-            return self._render_model_selection_menu(session_name, session_meta)
-        if session_meta.native_menu_command == "/permissions":
-            return self._render_permission_selection_menu(session_name, session_meta)
-        return self._t("bridge.native_menu.canceled", session=session_name)
-
-    def _render_model_selection_menu(self, session_name: str, session_meta: WeixinSessionMeta) -> str:
-        context = self._parse_native_menu_context(session_meta)
-        entries = context.get("entries") or []
-        lines = [
-            self._t(
-                "bridge.native_menu.model.title",
-                session=session_name,
-                current=self._resolve_session_model(session_meta),
-                reasoning=self._display_reasoning_effort(session_meta.reasoning_effort),
-            )
-        ]
-        for index, entry in enumerate(entries, start=1):
-            display_name = self._display_model(str(entry.get("display_name") or entry.get("slug") or ""))
-            description = str(entry.get("description") or "").strip()
-            if description:
-                lines.append(self._t("bridge.native_menu.model.option.detail", index=index, model=display_name, detail=description))
-            else:
-                lines.append(self._t("bridge.native_menu.model.option", index=index, model=display_name))
-        lines.append(self._t("bridge.native_menu.help"))
-        return "\n".join(lines)
-
-    def _render_reasoning_selection_menu(self, session_name: str, session_meta: WeixinSessionMeta) -> str:
-        context = self._parse_native_menu_context(session_meta)
-        selected_model = str(context.get("selected_model") or "").strip()
-        entries = {
-            str(entry.get("slug") or "").strip(): entry
-            for entry in (context.get("entries") or [])
-            if str(entry.get("slug") or "").strip()
-        }
-        entry = entries.get(selected_model, {})
-        display_name = self._display_model(str(entry.get("display_name") or selected_model))
-        lines = [
-            self._t(
-                "bridge.native_menu.reasoning.title",
-                session=session_name,
-                model=display_name,
-            )
-        ]
-        for index, effort in enumerate(session_meta.native_menu_options, start=1):
-            lines.append(
-                self._t(
-                    "bridge.native_menu.reasoning.option",
-                    index=index,
-                    reasoning=self._display_reasoning_effort(effort),
-                )
-            )
-        lines.append(self._t("bridge.native_menu.help.back"))
-        return "\n".join(lines)
-
-    def _render_permission_selection_menu(self, session_name: str, session_meta: WeixinSessionMeta) -> str:
-        current_mode = self._display_permission_mode(self._resolve_session_permission_mode(session_meta))
-        lines = [
-            self._t(
-                "bridge.native_menu.permissions.title",
-                session=session_name,
-                current=current_mode,
-            )
-        ]
-        option_labels = dict(PERMISSION_MODE_PRESETS)
-        for index, option in enumerate(session_meta.native_menu_options, start=1):
-            lines.append(
-                self._t(
-                    "bridge.native_menu.permissions.option",
-                    index=index,
-                    mode=option_labels.get(option, option),
-                )
-            )
-        lines.append(self._t("bridge.native_menu.help"))
-        return "\n".join(lines)
-
-    def _parse_native_menu_context(self, session_meta: WeixinSessionMeta) -> dict[str, Any]:
-        raw = session_meta.native_menu_context.strip()
-        if not raw:
-            return {}
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
-            return {}
-        if not isinstance(payload, dict):
-            return {}
-        entries: list[dict[str, Any]] = []
-        for item in payload.get("entries") or []:
-            if not isinstance(item, dict):
-                continue
-            slug = str(item.get("slug") or "").strip()
-            if not slug:
-                continue
-            entries.append(
-                {
-                    "slug": slug,
-                    "display_name": str(item.get("display_name") or slug).strip() or slug,
-                    "description": str(item.get("description") or "").strip(),
-                    "default_reasoning": str(item.get("default_reasoning") or "").strip(),
-                    "reasoning_levels": [
-                        str(level).strip()
-                        for level in (item.get("reasoning_levels") or [])
-                        if str(level).strip()
-                    ],
-                }
-            )
-        return {
-            "entries": entries,
-            "selected_model": str(payload.get("selected_model") or "").strip(),
-        }
-
-    def _load_codex_model_catalog(self) -> list[dict[str, Any]]:
-        command = HubConfig.load().codex_command
-        completed = subprocess.run(
-            [command, "debug", "models"],
-            check=True,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-        payload = json.loads(completed.stdout or "{}")
-        raw_models = payload.get("models") if isinstance(payload, dict) else []
-        entries: list[dict[str, Any]] = []
-        for item in raw_models or []:
-            if not isinstance(item, dict):
-                continue
-            slug = str(item.get("slug") or "").strip()
-            visibility = str(item.get("visibility") or "").strip().lower()
-            if not slug or visibility not in {"list", "default", "recommended"}:
-                continue
-            reasoning_levels = [
-                str(level.get("effort") or "").strip()
-                for level in (item.get("supported_reasoning_levels") or [])
-                if isinstance(level, dict) and str(level.get("effort") or "").strip()
-            ]
-            entries.append(
-                {
-                    "slug": slug,
-                    "display_name": str(item.get("display_name") or slug).strip() or slug,
-                    "description": str(item.get("description") or "").strip(),
-                    "default_reasoning": str(item.get("default_reasoning_level") or "").strip(),
-                    "reasoning_levels": reasoning_levels,
-                    "priority": int(item.get("priority") or 0),
-                }
-            )
-        entries.sort(key=lambda item: (-int(item.get("priority") or 0), str(item.get("slug") or "")))
-        for entry in entries:
-            entry.pop("priority", None)
-        return entries
-
     def _find_agent_config(self, agent_id: str):
         return next((agent for agent in HubConfig.load().agents if agent.id == agent_id), None)
+
+    @staticmethod
+    def _load_codex_model_catalog() -> list[dict[str, Any]]:
+        return load_codex_model_catalog()
 
     def _clear_current_agent_session(self, sender_id: str, current_session: str) -> str:
         agent = self._find_agent_config(self.config.backend_id)

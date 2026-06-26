@@ -29,9 +29,13 @@ from core.bridge_runtime import (
     build_prompt_with_media,
 )
 from core.app_service import schedule_named_action
+from core.bridge_media_control_runtime import BridgeMediaControlRuntime
+from core.bridge_native_menu_runtime import BridgeNativeMenuRuntime
+from core.bridge_notify_control_runtime import BridgeNotifyControlRuntime
 from core.bridge_service_control_runtime import BridgeServiceControlRuntime, QQ_RESTART_SCOPES
 from core.bridge_session_control_runtime import BridgeSessionControlRuntime
 from core.bridge_task_delivery import PollingTaskDeliveryController, TaskUpdateDeliveryController, format_bridge_progress_reply, format_bridge_task_reply
+from core.codex_model_catalog import load_codex_model_catalog
 from core.json_store import load_json, save_json
 from core.runtime_paths import RUNTIME_DIR, SERVICE_ACTION_STATE_PATH, SESSION_DIR, STATE_DIR, WORKSPACE_DIR
 from core.state_models import HubTask, BridgeConversationBinding, BridgeSessionMeta
@@ -164,6 +168,23 @@ class QQOneBotBridge:
             restart_scopes=QQ_RESTART_SCOPES,
             translate=lambda key, **kwargs: self._t(key, **kwargs),
         )
+        self.notify_control_runtime = BridgeNotifyControlRuntime(
+            config=self.config,
+            translate=lambda key, **kwargs: self._t(key, **kwargs),
+            send_test_notice=lambda: self._t("bridge.notify.qq.test_unsupported"),
+        )
+        self.media_control_runtime = BridgeMediaControlRuntime(
+            translate=lambda key, **kwargs: self._t(key, **kwargs),
+            resolve_file=lambda raw_path: self._resolve_shareable_project_file(raw_path),
+            send_file=lambda reply_target, file_path: self._send_media_to_reply_target(reply_target, file_path),
+        )
+        self.native_menu_runtime = BridgeNativeMenuRuntime(
+            translate=lambda key, **kwargs: self._t(key, **kwargs),
+            now=self._now_iso,
+            load_model_catalog=load_codex_model_catalog,
+            resolve_session_model=self._resolve_session_model,
+            resolve_session_permission_mode=self._resolve_session_permission_mode,
+        )
         self.message_runtime = BridgeMessageRuntime(
             pending_media=self.pending_media_store,
             resolve_session=lambda message: message.session_name,
@@ -234,11 +255,38 @@ class QQOneBotBridge:
         return task if isinstance(task, dict) else {}
 
     def _prepare_runtime_prompt(self, message: IncomingBridgeMessage, _session_name: str) -> BridgePromptDecision:
+        binding = self._ensure_conversation(message.sender_id)
+        session_name, session_meta = binding.get_current_session(
+            default_backend=self.config.default_backend,
+            now=self._now_iso(),
+            normalize_backend=self._normalize_backend,
+        )
+        passthrough_prompt = self.native_menu_runtime.passthrough_prompt(message.text)
+        if self.native_menu_runtime.has_active_menu(session_meta) and (passthrough_prompt is None or not self.native_menu_runtime.is_special_command(passthrough_prompt)):
+            native_result = self.native_menu_runtime.handle_reply(session_name, session_meta, message.text)
+            if native_result.handled:
+                self._save_conversations()
+                if native_result.reply:
+                    self._send_reply(message.reply_target, native_result.reply)
+                return BridgePromptDecision(handled=True)
+        if passthrough_prompt is None:
+            media_result = self.media_control_runtime.handle(message.reply_target, message.text)
+            if media_result.handled:
+                if media_result.reply:
+                    self._send_reply(message.reply_target, media_result.reply)
+                return BridgePromptDecision(handled=True)
         reply, handled = self._handle_control_command(message.sender_id, message.text)
         if handled:
             if reply:
                 self._send_reply(message.reply_target, reply)
             return BridgePromptDecision(handled=True)
+        if passthrough_prompt is not None:
+            native_start = self.native_menu_runtime.start(session_name, session_meta, passthrough_prompt)
+            if native_start.handled:
+                self._save_conversations()
+                if native_start.reply:
+                    self._send_reply(message.reply_target, native_start.reply)
+                return BridgePromptDecision(handled=True)
         cleaned_text = str(message.text or "").strip()
         if cleaned_text.startswith("/") and not cleaned_text.startswith("//"):
             self._send_reply(message.reply_target, "QQ 桥暂不支持这个桥接命令。发送 /help 查看当前支持的命令。")
@@ -246,7 +294,7 @@ class QQOneBotBridge:
         return BridgePromptDecision(prompt=message.text.strip())
 
     def _handle_control_command(self, sender_key: str, text: str) -> tuple[str, bool]:
-        for runtime in (self.control_runtime, self.session_control_runtime, self.service_control_runtime):
+        for runtime in (self.control_runtime, self.session_control_runtime, self.service_control_runtime, self.notify_control_runtime):
             result = runtime.handle(sender_key, text)
             if result.handled:
                 return result.reply, True
@@ -746,6 +794,37 @@ class QQOneBotBridge:
             return f"File not found: {raw_path}"
         return candidate.read_text(encoding="utf-8", errors="replace")[:3000] or "(empty)"
 
+    def _resolve_shareable_project_file(self, raw_path: str) -> Path:
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = APP_DIR / candidate
+        resolved = candidate.resolve()
+        if not resolved.exists() or not resolved.is_file():
+            raise FileNotFoundError(raw_path)
+        allowed_roots = [APP_DIR.resolve(), RUNTIME_DIR.resolve()]
+        if not any(resolved == root or root in resolved.parents for root in allowed_roots):
+            raise ValueError(f"file is outside allowed roots: {raw_path}")
+        return resolved
+
+    def _send_media_to_reply_target(self, reply_target: dict[str, Any], file_path: Path) -> None:
+        message_type = str(reply_target.get("message_type") or "").strip().lower()
+        if message_type == "group":
+            payload = {
+                "group_id": reply_target.get("group_id"),
+                "file": str(file_path),
+                "name": file_path.name,
+            }
+            response = self._onebot_api("upload_group_file", payload)
+            _log(f"sent file group_id={reply_target.get('group_id')} status={response.get('status')} retcode={response.get('retcode')} file={file_path.name}")
+            return
+        payload = {
+            "user_id": reply_target.get("user_id"),
+            "file": str(file_path),
+            "name": file_path.name,
+        }
+        response = self._onebot_api("upload_private_file", payload)
+        _log(f"sent file user_id={reply_target.get('user_id')} status={response.get('status')} retcode={response.get('retcode')} file={file_path.name}")
+
     def _render_recent_events(self, sender_key: str, *, limit: int) -> str:
         del sender_key, limit
         return "QQ events are not recorded separately yet."
@@ -760,6 +839,10 @@ class QQOneBotBridge:
 
     def _resolve_session_model(self, session_meta: BridgeSessionMeta) -> str:
         return session_meta.model.strip() or "-"
+
+    @staticmethod
+    def _resolve_session_permission_mode(session_meta: BridgeSessionMeta) -> str:
+        return session_meta.permission_mode.strip().lower() or "full-access"
 
     def _render_model_status(self, session_name: str, session_meta: BridgeSessionMeta) -> str:
         return f"Current model\nSession: {session_name}\nModel: {self._resolve_session_model(session_meta)}"

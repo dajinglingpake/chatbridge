@@ -44,6 +44,7 @@ from core.mcp_service import (
     list_agents,
     execute_sender_command,
     restart_services,
+    send_bridge_media,
     send_weixin_media,
     start_agent_session,
 )
@@ -182,7 +183,7 @@ def _build_tool_specs() -> dict[str, ToolSpec]:
         ),
         "send_weixin_media": ToolSpec(
             name="send_weixin_media",
-            description="发送项目内允许的图片或文件到指定微信发送方，复用 /sendfile 的安全校验和 iLink 媒体上传链路。",
+            description="兼容旧工具名；发送项目内允许的图片或文件到指定微信发送方。",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -192,6 +193,22 @@ def _build_tool_specs() -> dict[str, ToolSpec]:
                 "required": ["target_sender_id", "path"],
             },
             handler=lambda args: send_weixin_media(
+                str(args.get("target_sender_id") or ""),
+                str(args.get("path") or ""),
+            ),
+        ),
+        "send_bridge_media": ToolSpec(
+            name="send_bridge_media",
+            description="发送项目内允许的图片或文件到指定发送方；微信和 QQ 会分别走对应平台发送链路。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "target_sender_id": {"type": "string", "description": "目标发送方 ID，例如微信 sender 或 qq:private:<user_id>。"},
+                    "path": {"type": "string", "description": "项目内文件路径；允许 .runtime/exports 下的导出文件。"},
+                },
+                "required": ["target_sender_id", "path"],
+            },
+            handler=lambda args: send_bridge_media(
                 str(args.get("target_sender_id") or ""),
                 str(args.get("path") or ""),
             ),

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Callable
 
 from agent_backends import supported_backend_keys
-from core.state_models import CheckSnapshot, RuntimeSnapshot, WeixinBridgeRuntimeState
+from core.state_models import CheckSnapshot, RuntimeSnapshot, BridgeRuntimeState
 
 Translator = Callable[[str], str]
 
@@ -132,7 +132,7 @@ def build_badge(snapshot: RuntimeSnapshot, translator: Callable[..., str] | None
 
 def build_overview_lines(
     snapshot: RuntimeSnapshot,
-    bridge_state: WeixinBridgeRuntimeState,
+    bridge_state: BridgeRuntimeState,
     active_account_id: str,
     translator: Callable[..., str] | None = None,
 ) -> list[str]:
@@ -268,7 +268,7 @@ def build_quickstart_lines(
 
 def build_issues(
     snapshot: RuntimeSnapshot,
-    bridge_state: WeixinBridgeRuntimeState,
+    bridge_state: BridgeRuntimeState,
     checks: dict[str, CheckSnapshot],
     translator: Callable[..., str] | None = None,
 ) -> list[IssueItem]:

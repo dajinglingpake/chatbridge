@@ -121,6 +121,7 @@
   "bridge.notify.switched": "系统通知已更新\\n服务生命周期: {service}\\n配置变更: {config}\\n任务通知: {task}",
   "bridge.notify.usage": "用法: /notify <on|off|service-on|service-off|config-on|config-off|task-on|task-off|test>",
   "bridge.notify.test": "已触发测试通知\\n发送结果: {summary}",
+  "bridge.notify.qq.test_unsupported": "QQ 桥当前没有平台广播通知链路。",
   "bridge.backend.current": "当前设置\\n当前会话: {session}\\n当前后端: {backend}",
   "bridge.backend.usage": "用法: /backend <backend>",
   "bridge.backend.switched": "已切换当前会话后端: {backend}\\n会话: {session}",

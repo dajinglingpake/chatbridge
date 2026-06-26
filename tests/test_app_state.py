@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from core.app_state import build_badge, build_issues, build_overview_lines, decide_primary_action
-from core.state_models import CheckSnapshot, RuntimeSnapshot, WeixinBridgeRuntimeState
+from core.state_models import CheckSnapshot, RuntimeSnapshot, BridgeRuntimeState
 
 
 class AppStateTests(unittest.TestCase):
@@ -88,7 +88,7 @@ class AppStateTests(unittest.TestCase):
             qq_user_id="2493227263",
             qq_nickname="纳西妲",
         )
-        bridge_state = WeixinBridgeRuntimeState(
+        bridge_state = BridgeRuntimeState(
             started_at="2026-01-01T00:00:00",
             last_poll_at="2026-01-01T00:01:00",
             last_message_at="2026-01-01T00:02:00",
@@ -116,7 +116,7 @@ class AppStateTests(unittest.TestCase):
             qq_bridge_pid=None,
             log_dir=".runtime/logs",
         )
-        bridge_state = WeixinBridgeRuntimeState(
+        bridge_state = BridgeRuntimeState(
             started_at="2026-01-01T00:00:00",
             last_error=" bridge failed ",
         )

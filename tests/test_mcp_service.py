@@ -12,6 +12,7 @@ from core.mcp_service import (
     execute_sender_command,
     get_sender_snapshot,
     restart_services,
+    send_bridge_media,
     send_weixin_media,
     start_agent_session,
     list_senders,
@@ -101,6 +102,23 @@ class McpServiceTests(unittest.TestCase):
         result = send_weixin_media("sender-a", "")
         self.assertFalse(result.ok)
         self.assertIn("path 不能为空", result.summary)
+
+    def test_send_bridge_media_dispatches_qq_sender(self) -> None:
+        target_file = self.app_dir / "docs" / "diagram.png"
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+        target_file.write_bytes(b"png-data")
+        fake_bridge = SimpleNamespace(
+            _resolve_shareable_project_file=lambda raw_path: target_file,
+            _send_media_to_reply_target=unittest.mock.Mock(),
+        )
+        with patch("qq_onebot_bridge.QQOneBotBridge", return_value=fake_bridge):
+            with patch("core.mcp_service.BridgeConfig.load", return_value=SimpleNamespace()):
+                result = send_bridge_media("qq:private:10001", "docs/diagram.png")
+        self.assertTrue(result.ok)
+        reply_target, sent_file = fake_bridge._send_media_to_reply_target.call_args.args
+        self.assertEqual({"message_type": "private", "user_id": "10001"}, reply_target)
+        self.assertNotEqual(target_file, sent_file)
+        self.assertEqual(target_file.read_bytes(), sent_file.read_bytes())
 
     def test_start_agent_session_submits_first_prompt(self) -> None:
         fake_agent = SimpleNamespace(

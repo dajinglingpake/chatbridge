@@ -121,6 +121,7 @@
   "bridge.notify.switched": "System notices updated\\nService lifecycle: {service}\\nConfiguration changes: {config}\\nTask notices: {task}",
   "bridge.notify.usage": "Usage: /notify <on|off|service-on|service-off|config-on|config-off|task-on|task-off|test>",
   "bridge.notify.test": "Test notice triggered\\nDelivery result: {summary}",
+  "bridge.notify.qq.test_unsupported": "QQ bridge does not currently have a platform broadcast notice channel.",
   "bridge.backend.current": "Current setup\\nCurrent session: {session}\\nCurrent backend: {backend}",
   "bridge.backend.usage": "Usage: /backend <backend>",
   "bridge.backend.switched": "Switched backend for current session: {backend}\\nSession: {session}",

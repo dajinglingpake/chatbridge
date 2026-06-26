@@ -154,7 +154,7 @@ def get_tool_guide() -> ToolActionResult:
         "只读查询: get_sender_snapshot | list_agents | get_task | get_command_catalog。",
         "目标发送方操作: execute_sender_command(target_sender_id, command)。",
         "服务重启: restart_services(scope='all'|'bridge'|'qq'|'qq-bridge'|'onebot')，异步安排重启，避免工具调用过程中把当前进程杀掉。",
-        "微信媒体发送: send_weixin_media(target_sender_id, path)，发送项目内允许的图片或文件。",
+        "媒体发送: send_bridge_media(target_sender_id, path)，发送项目内允许的图片或文件。",
         "新 Agent 会话: start_agent_session(agent_id, session_name, prompt, ...)。",
         "Agent 委派: delegate_task(agent_id, prompt, ...)。这不会隐式切换当前发送方的会话。",
         f"当前支持的会话后端: {backend_choices}",
@@ -183,7 +183,7 @@ def get_tool_guide() -> ToolActionResult:
             "mutating_tools": [
                 "execute_sender_command",
                 "restart_services",
-                "send_weixin_media",
+                "send_bridge_media",
                 "start_agent_session",
                 "delegate_task",
             ],
@@ -608,13 +608,21 @@ def restart_services(scope: str = "all") -> ToolActionResult:
     )
 
 
-def send_weixin_media(target_sender_id: str, path: str) -> ToolActionResult:
+def send_bridge_media(target_sender_id: str, path: str) -> ToolActionResult:
     cleaned_sender_id = str(target_sender_id or "").strip()
     cleaned_path = str(path or "").strip()
     if not cleaned_sender_id:
         return ToolActionResult(ok=False, summary="target_sender_id 不能为空")
     if not cleaned_path:
         return ToolActionResult(ok=False, summary="path 不能为空")
+    if _is_qq_sender_id(cleaned_sender_id):
+        return _send_qq_media(cleaned_sender_id, cleaned_path)
+    return _send_weixin_media(cleaned_sender_id, cleaned_path)
+
+def send_weixin_media(target_sender_id: str, path: str) -> ToolActionResult:
+    return send_bridge_media(target_sender_id, path)
+
+def _send_weixin_media(cleaned_sender_id: str, cleaned_path: str) -> ToolActionResult:
     bridge = WeixinBridge(BridgeConfig.load())
     try:
         account = bridge._load_account()
@@ -639,6 +647,37 @@ def send_weixin_media(target_sender_id: str, path: str) -> ToolActionResult:
             "response": response,
         },
     )
+
+def _send_qq_media(cleaned_sender_id: str, cleaned_path: str) -> ToolActionResult:
+    from qq_onebot_bridge import QQOneBotBridge
+
+    bridge = QQOneBotBridge(BridgeConfig.load())
+    try:
+        original_file_path = bridge._resolve_shareable_project_file(cleaned_path)
+        file_path = _prepare_media_delivery_copy(original_file_path)
+        reply_target = _qq_reply_target_from_sender_id(cleaned_sender_id)
+        bridge._send_media_to_reply_target(reply_target, file_path)
+    except Exception as exc:  # noqa: BLE001
+        return ToolActionResult(ok=False, summary=f"发送媒体失败：{exc}")
+    return ToolActionResult(
+        ok=True,
+        summary=f"已发送 {file_path.name} 到 {cleaned_sender_id}。",
+        data={
+            "target_sender_id": cleaned_sender_id,
+            "path": str(file_path),
+            "source_path": str(original_file_path),
+            "file_name": file_path.name,
+            "response": {},
+        },
+    )
+
+def _qq_reply_target_from_sender_id(sender_id: str) -> JsonObject:
+    parts = sender_id.split(":")
+    if len(parts) >= 4 and parts[0] == "qq" and parts[1] == "group":
+        return {"message_type": "group", "group_id": parts[2], "user_id": parts[3]}
+    if len(parts) >= 3 and parts[0] == "qq" and parts[1] == "private":
+        return {"message_type": "private", "user_id": parts[2]}
+    raise ValueError(f"不支持的 QQ sender_id: {sender_id}")
 
 
 def delegate_task(

@@ -28,7 +28,15 @@ class FakeQQBridge(QQOneBotBridge):
         self.api_calls: list[tuple[str, dict[str, object]]] = []
         self.ipc_responses: dict[str, object] = {}
         super().__init__(
-            SimpleNamespace(backend_id="main", default_backend="codex", hub_task_timeout_seconds=30),
+            SimpleNamespace(
+                backend_id="main",
+                default_backend="codex",
+                hub_task_timeout_seconds=30,
+                service_notice_enabled=True,
+                config_notice_enabled=True,
+                task_notice_enabled=True,
+                save=lambda: None,
+            ),
             api_base="http://onebot.local",
         )
 
@@ -218,6 +226,25 @@ class QQOneBotBridgeTests(unittest.TestCase):
         self.assertEqual("send_private_msg", bridge.api_calls[-1][0])
         self.assertEqual("scheduled onebot", bridge.api_calls[-1][1]["message"])
         mocked_schedule.assert_called_once_with("restart-onebot-runtime", delay_seconds=1.0)
+
+    def test_sendfile_command_uploads_private_file_without_agent_submission(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        target_file = self.temp_path / "diagram.png"
+        target_file.write_bytes(b"png-data")
+        with patch.object(bridge, "_resolve_shareable_project_file", return_value=target_file):
+            bridge.handle_event(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "user_id": 10001,
+                    "message": "/sendfile docs/diagram.png",
+                }
+            )
+
+        self.assertEqual([], bridge.submitted)
+        self.assertEqual("upload_private_file", bridge.api_calls[-1][0])
+        self.assertEqual(10001, bridge.api_calls[-1][1]["user_id"])
+        self.assertEqual(str(target_file), bridge.api_calls[-1][1]["file"])
 
     def test_double_slash_status_queries_codex_status_without_agent_submission(self) -> None:
         bridge = FakeQQBridge(self.temp_path)

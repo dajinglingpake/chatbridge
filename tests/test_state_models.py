@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 
 from bridge_config import normalize_backend
-from core.state_models import AgentRuntimeState, CheckSnapshot, HubStateSnapshot, HubTask, IpcRequestEnvelope, IpcResponseEnvelope, RuntimeSnapshot, WeixinBridgeRuntimeState, WeixinConversationBinding
+from core.state_models import AgentRuntimeState, CheckSnapshot, HubStateSnapshot, HubTask, IpcRequestEnvelope, IpcResponseEnvelope, RuntimeSnapshot, BridgeRuntimeState, WeixinConversationBinding
 
 
 class StateModelTests(unittest.TestCase):
@@ -115,7 +115,7 @@ class StateModelTests(unittest.TestCase):
         self.assertEqual("default", binding.last_regular_session)
 
     def test_weixin_bridge_runtime_state_tracks_mutations(self) -> None:
-        state = WeixinBridgeRuntimeState.create(
+        state = BridgeRuntimeState.create(
             now="2026-01-01T00:00:00",
             managed_conversations=1,
             account_file="a.json",
@@ -139,7 +139,7 @@ class StateModelTests(unittest.TestCase):
         self.assertEqual("b.json", state.account_file)
 
     def test_weixin_bridge_runtime_state_from_dict_recovers_defaults(self) -> None:
-        state = WeixinBridgeRuntimeState.from_dict(
+        state = BridgeRuntimeState.from_dict(
             {
                 "started_at": "2026-01-01T00:00:00",
                 "handled_messages": 3,
