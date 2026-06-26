@@ -390,6 +390,7 @@ class CodexBackend(AgentBackend):
         error_message = ""
         last_progress = ""
         last_progress_at = 0.0
+        last_progress_perf_at = 0.0
         pending_delta = ""
         context_left_percent: int | None = None
         assert proc.stderr is not None
@@ -464,14 +465,20 @@ class CodexBackend(AgentBackend):
                     continue
                 last_progress = progress
                 last_progress_at = now
+                last_progress_perf_at = time.perf_counter()
                 context.on_progress(progress)
+        stdout_done_at = time.perf_counter()
         if context.on_progress is not None:
             trailing_chunk, pending_delta = self._take_stream_chunk(pending_delta, force=True)
             if trailing_chunk and trailing_chunk != last_progress:
+                last_progress_perf_at = time.perf_counter()
                 context.on_progress(trailing_chunk)
+        wait_started_at = time.perf_counter()
         completed_returncode = self._wait_for_exit(proc)
+        process_exit_at = time.perf_counter()
         stdout_thread.join(timeout=1)
         stderr_thread.join(timeout=1)
+        threads_joined_at = time.perf_counter()
         if not error_message:
             error_message = "".join(stderr_lines).strip()
         if completed_returncode != 0:
@@ -485,6 +492,18 @@ class CodexBackend(AgentBackend):
             raise RuntimeError("Codex returned an empty result")
         if session_id:
             session_file.write_text(session_id, encoding="utf-8")
+        now_perf = time.perf_counter()
+        progress_to_stdout_done_ms = int((stdout_done_at - last_progress_perf_at) * 1000) if last_progress_perf_at else -1
+        print(
+            "[codex-perf] exec_finalize "
+            f"pid={getattr(proc, 'pid', '-')} "
+            f"returncode={completed_returncode} "
+            f"progress_to_stdout_done_ms={progress_to_stdout_done_ms} "
+            f"wait_exit_ms={int((process_exit_at - wait_started_at) * 1000)} "
+            f"join_threads_ms={int((threads_joined_at - process_exit_at) * 1000)} "
+            f"read_output_ms={int((now_perf - threads_joined_at) * 1000)}",
+            flush=True,
+        )
         result = {"output": output, "session_id": session_id}
         if context_left_percent is not None:
             result["context_left_percent"] = str(context_left_percent)
