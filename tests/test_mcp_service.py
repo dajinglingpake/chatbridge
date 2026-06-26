@@ -36,6 +36,17 @@ class McpServiceTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertIn("已对发送方 sender-a 执行桥命令 /status", result.summary)
 
+    def test_execute_sender_command_dispatches_qq_sender(self) -> None:
+        fake_bridge = SimpleNamespace(_handle_control_command=lambda sender_id, command: ("qq ok", True))
+        with patch("qq_onebot_bridge.QQOneBotBridge", return_value=fake_bridge) as mocked_qq_bridge:
+            with patch("core.mcp_service.WeixinBridge") as mocked_weixin_bridge:
+                with patch("core.mcp_service.BridgeConfig.load", return_value=SimpleNamespace()):
+                    result = execute_sender_command("qq:private:10001", "/restart")
+        self.assertTrue(result.ok)
+        self.assertEqual("qq ok", result.data["reply"])
+        mocked_qq_bridge.assert_called_once()
+        mocked_weixin_bridge.assert_not_called()
+
     def test_restart_services_schedules_async_restart(self) -> None:
         with patch(
             "core.mcp_service.schedule_named_action",
@@ -45,6 +56,16 @@ class McpServiceTests(unittest.TestCase):
         self.assertTrue(result.ok)
         mocked_schedule.assert_called_once_with("restart", delay_seconds=1.0)
         self.assertEqual("restart", result.data["action"])
+
+    def test_restart_services_schedules_qq_bridge_restart(self) -> None:
+        with patch(
+            "core.mcp_service.schedule_named_action",
+            return_value=ServiceResult(ok=True, message="已安排在 1.00 秒后执行服务操作：restart-qq-bridge"),
+        ) as mocked_schedule:
+            result = restart_services("qq")
+        self.assertTrue(result.ok)
+        mocked_schedule.assert_called_once_with("restart-qq-bridge", delay_seconds=1.0)
+        self.assertEqual("restart-qq-bridge", result.data["action"])
 
     def test_restart_services_rejects_unknown_scope(self) -> None:
         result = restart_services("hub")

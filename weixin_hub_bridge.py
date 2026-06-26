@@ -37,6 +37,7 @@ from core.bridge_runtime import (
     PendingMediaContextStore,
     build_prompt_with_media,
 )
+from core.bridge_service_control_runtime import BridgeServiceControlRuntime, WEIXIN_RESTART_SCOPES
 from core.bridge_session_control_runtime import BridgeSessionControlRuntime
 from core.bridge_task_delivery import TaskUpdateDeliveryController
 from core.context_relations import build_context_relation_lines
@@ -260,6 +261,15 @@ class WeixinBridge:
             adapter=self,
             app_dir=APP_DIR,
             supported_backends=SUPPORTED_BACKENDS,
+        )
+        self.service_control_runtime = BridgeServiceControlRuntime(
+            schedule_action=lambda action: schedule_named_action(action, delay_seconds=1.0).message,
+            render_usage=lambda: self._t("bridge.restart.usage"),
+            state_path=SERVICE_ACTION_STATE_FILE,
+            default_restart_scope="all",
+            restart_scopes=WEIXIN_RESTART_SCOPES,
+            before_restart=lambda sender_id, scope: self._store_pending_restart_notice(sender_id, scope=scope),
+            render_status=self._render_restart_status,
         )
         self._recent_message_keys: list[str] = []
         self._recent_message_fingerprints: dict[str, float] = {}
@@ -1852,30 +1862,17 @@ class WeixinBridge:
         session_result = self.session_control_runtime.handle(sender_id, text)
         if session_result.handled:
             return session_result.reply, True
+        service_result = self.service_control_runtime.handle(sender_id, text)
+        if service_result.handled:
+            return service_result.reply, True
         parsed = parse_bridge_command(text)
         if parsed is None or parsed.is_passthrough:
             return "", False
         parts = list(parsed.parts)
         command = parsed.command
-        if command == "/restart":
-            return self._handle_restart_command(sender_id, parts)
         if command == "/notify":
             return self._handle_notify_command(parts)
         return self._t("bridge.command.unknown"), True
-
-    def _handle_restart_command(self, sender_id: str, parts: list[str]) -> tuple[str, bool]:
-        scope = parts[1].strip().lower() if len(parts) >= 2 else "all"
-        if scope == "status":
-            return self._render_restart_status(), True
-        if scope in {"", "all"}:
-            self._store_pending_restart_notice(sender_id, scope="all")
-            result = schedule_named_action("restart", delay_seconds=1.0)
-            return result.message, True
-        if scope == "bridge":
-            self._store_pending_restart_notice(sender_id, scope="bridge")
-            result = schedule_named_action("restart-bridge", delay_seconds=1.0)
-            return result.message, True
-        return self._t("bridge.restart.usage"), True
 
     def _handle_notify_command(self, parts: list[str]) -> tuple[str, bool]:
         if len(parts) < 2:

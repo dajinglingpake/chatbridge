@@ -171,11 +171,11 @@ def _build_tool_specs() -> dict[str, ToolSpec]:
         ),
         "restart_services": ToolSpec(
             name="restart_services",
-            description="异步重启运行中的服务。scope=all 会重启 Hub 和 Bridge；scope=bridge 只重启 Bridge。",
+            description="异步重启运行中的服务。scope=all 会重启全栈；scope=bridge/weixin 重启微信 Bridge；scope=qq/qq-bridge 重启 QQ Bridge；scope=onebot 重启 OneBot Runtime。",
             input_schema={
                 "type": "object",
                 "properties": {
-                    "scope": {"type": "string", "description": "可选，all 或 bridge，默认 all。"},
+                    "scope": {"type": "string", "description": "可选，all、bridge、weixin、qq、qq-bridge、onebot 或 onebot-runtime，默认 all。"},
                 },
             },
             handler=lambda args: restart_services(str(args.get("scope") or "all")),

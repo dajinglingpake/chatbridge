@@ -60,12 +60,16 @@ class QQOneBotBridgeTests(unittest.TestCase):
         self.temp_path = Path(self._tempdir.name)
         self.state_path = self.temp_path / "qq_media.json"
         self.pending_tasks_path = self.temp_path / "qq_pending_tasks.json"
+        self.service_action_state_path = self.temp_path / "service_action_state.json"
         media_patcher = patch("qq_onebot_bridge.ONEBOT_STATE_PATH", self.state_path)
         task_patcher = patch("qq_onebot_bridge.QQ_PENDING_TASKS_PATH", self.pending_tasks_path)
+        service_action_patcher = patch("qq_onebot_bridge.SERVICE_ACTION_STATE_PATH", self.service_action_state_path)
         media_patcher.start()
         task_patcher.start()
+        service_action_patcher.start()
         self.addCleanup(media_patcher.stop)
         self.addCleanup(task_patcher.stop)
+        self.addCleanup(service_action_patcher.stop)
 
     def test_media_only_message_caches_attachment_for_next_text(self) -> None:
         bridge = FakeQQBridge(self.temp_path)
@@ -180,6 +184,40 @@ class QQOneBotBridgeTests(unittest.TestCase):
         sent_text = str(bridge.api_calls[-1][1]["message"])
         self.assertIn("当前设置", sent_text)
         self.assertIn("task-qq-latest", sent_text)
+
+    def test_restart_command_schedules_qq_bridge_restart(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        with patch("qq_onebot_bridge.schedule_named_action", return_value=SimpleNamespace(message="scheduled qq bridge")) as mocked_schedule:
+            bridge.handle_event(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "user_id": 10001,
+                    "message": "/restart",
+                }
+            )
+
+        self.assertEqual([], bridge.submitted)
+        self.assertEqual("send_private_msg", bridge.api_calls[-1][0])
+        self.assertEqual("scheduled qq bridge", bridge.api_calls[-1][1]["message"])
+        mocked_schedule.assert_called_once_with("restart-qq-bridge", delay_seconds=1.0)
+
+    def test_restart_onebot_command_schedules_onebot_restart(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        with patch("qq_onebot_bridge.schedule_named_action", return_value=SimpleNamespace(message="scheduled onebot")) as mocked_schedule:
+            bridge.handle_event(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "user_id": 10001,
+                    "message": "/restart onebot",
+                }
+            )
+
+        self.assertEqual([], bridge.submitted)
+        self.assertEqual("send_private_msg", bridge.api_calls[-1][0])
+        self.assertEqual("scheduled onebot", bridge.api_calls[-1][1]["message"])
+        mocked_schedule.assert_called_once_with("restart-onebot-runtime", delay_seconds=1.0)
 
     def test_double_slash_status_queries_codex_status_without_agent_submission(self) -> None:
         bridge = FakeQQBridge(self.temp_path)

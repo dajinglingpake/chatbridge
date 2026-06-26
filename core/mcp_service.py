@@ -11,6 +11,7 @@ from agent_backends import supported_backend_keys
 from agent_hub import HubConfig
 from bridge_config import APP_DIR, BridgeConfig, normalize_backend
 from core.app_service import schedule_named_action, submit_hub_task
+from core.bridge_service_control_runtime import MCP_RESTART_SCOPES, resolve_restart_action
 from core.context_relations import build_context_relation_lines
 from core.dashboard import load_dashboard_state
 from core.json_store import load_json
@@ -152,7 +153,7 @@ def get_tool_guide() -> ToolActionResult:
         "内置工具直接作用于当前发送方的当前会话。",
         "只读查询: get_sender_snapshot | list_agents | get_task | get_command_catalog。",
         "目标发送方操作: execute_sender_command(target_sender_id, command)。",
-        "服务重启: restart_services(scope='all'|'bridge')，异步安排重启，避免工具调用过程中把当前进程杀掉。",
+        "服务重启: restart_services(scope='all'|'bridge'|'qq'|'qq-bridge'|'onebot')，异步安排重启，避免工具调用过程中把当前进程杀掉。",
         "微信媒体发送: send_weixin_media(target_sender_id, path)，发送项目内允许的图片或文件。",
         "新 Agent 会话: start_agent_session(agent_id, session_name, prompt, ...)。",
         "Agent 委派: delegate_task(agent_id, prompt, ...)。这不会隐式切换当前发送方的会话。",
@@ -571,7 +572,12 @@ def execute_sender_command(
         return ToolActionResult(ok=False, summary="target_sender_id 不能为空")
     if not cleaned_command.startswith("/"):
         return ToolActionResult(ok=False, summary="command 必须以 / 开头")
-    bridge = WeixinBridge(BridgeConfig.load())
+    if _is_qq_sender_id(cleaned_sender_id):
+        from qq_onebot_bridge import QQOneBotBridge
+
+        bridge = QQOneBotBridge(BridgeConfig.load())
+    else:
+        bridge = WeixinBridge(BridgeConfig.load())
     reply, handled = bridge._handle_control_command(cleaned_sender_id, cleaned_command)
     if not handled:
         return ToolActionResult(ok=False, summary=f"桥接层未处理命令: {cleaned_command}")
@@ -586,17 +592,12 @@ def execute_sender_command(
     )
 
 
+def _is_qq_sender_id(sender_id: str) -> bool:
+    return sender_id.strip().lower().startswith("qq:")
+
 def restart_services(scope: str = "all") -> ToolActionResult:
     cleaned_scope = str(scope or "").strip().lower() or "all"
-    action_map = {
-        "all": "restart",
-        "bridge": "restart-bridge",
-        "onebot": "restart-onebot-runtime",
-        "onebot-runtime": "restart-onebot-runtime",
-        "qq-bridge": "restart-qq-bridge",
-        "qq": "restart-qq-bridge",
-    }
-    action = action_map.get(cleaned_scope)
+    action = resolve_restart_action(cleaned_scope, default_scope="all", restart_scopes=MCP_RESTART_SCOPES)
     if action is None:
         return ToolActionResult(ok=False, summary=f"scope 不支持：{cleaned_scope}")
     result = schedule_named_action(action, delay_seconds=1.0)

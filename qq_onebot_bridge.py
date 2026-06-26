@@ -28,10 +28,12 @@ from core.bridge_runtime import (
     PendingMediaContextStore,
     build_prompt_with_media,
 )
+from core.app_service import schedule_named_action
+from core.bridge_service_control_runtime import BridgeServiceControlRuntime, QQ_RESTART_SCOPES
 from core.bridge_session_control_runtime import BridgeSessionControlRuntime
 from core.bridge_task_delivery import PollingTaskDeliveryController, TaskUpdateDeliveryController, format_bridge_progress_reply, format_bridge_task_reply
 from core.json_store import load_json, save_json
-from core.runtime_paths import RUNTIME_DIR, SESSION_DIR, STATE_DIR, WORKSPACE_DIR
+from core.runtime_paths import RUNTIME_DIR, SERVICE_ACTION_STATE_PATH, SESSION_DIR, STATE_DIR, WORKSPACE_DIR
 from core.state_models import HubTask, BridgeConversationBinding, BridgeSessionMeta
 from localization import Localizer
 from local_ipc import bridge_request_dir, cleanup_processed_requests, create_request, mark_bridge_processed, read_request, wait_for_response
@@ -154,6 +156,14 @@ class QQOneBotBridge:
             app_dir=APP_DIR,
             supported_backends=set(getattr(config, "supported_backends", []) or {"codex", "claude", "opencode"}),
         )
+        self.service_control_runtime = BridgeServiceControlRuntime(
+            schedule_action=lambda action: schedule_named_action(action, delay_seconds=1.0).message,
+            render_usage=lambda: self._t("bridge.restart.qq.usage"),
+            state_path=SERVICE_ACTION_STATE_PATH,
+            default_restart_scope="qq-bridge",
+            restart_scopes=QQ_RESTART_SCOPES,
+            translate=lambda key, **kwargs: self._t(key, **kwargs),
+        )
         self.message_runtime = BridgeMessageRuntime(
             pending_media=self.pending_media_store,
             resolve_session=lambda message: message.session_name,
@@ -224,21 +234,23 @@ class QQOneBotBridge:
         return task if isinstance(task, dict) else {}
 
     def _prepare_runtime_prompt(self, message: IncomingBridgeMessage, _session_name: str) -> BridgePromptDecision:
-        command = self.control_runtime.handle(message.sender_id, message.text)
-        if command.handled:
-            if command.reply:
-                self._send_reply(message.reply_target, command.reply)
-            return BridgePromptDecision(handled=True)
-        session_command = self.session_control_runtime.handle(message.sender_id, message.text)
-        if session_command.handled:
-            if session_command.reply:
-                self._send_reply(message.reply_target, session_command.reply)
+        reply, handled = self._handle_control_command(message.sender_id, message.text)
+        if handled:
+            if reply:
+                self._send_reply(message.reply_target, reply)
             return BridgePromptDecision(handled=True)
         cleaned_text = str(message.text or "").strip()
         if cleaned_text.startswith("/") and not cleaned_text.startswith("//"):
             self._send_reply(message.reply_target, "QQ 桥暂不支持这个桥接命令。发送 /help 查看当前支持的命令。")
             return BridgePromptDecision(handled=True)
         return BridgePromptDecision(prompt=message.text.strip())
+
+    def _handle_control_command(self, sender_key: str, text: str) -> tuple[str, bool]:
+        for runtime in (self.control_runtime, self.session_control_runtime, self.service_control_runtime):
+            result = runtime.handle(sender_key, text)
+            if result.handled:
+                return result.reply, True
+        return "", False
 
     def _submit_runtime_task(
         self,
