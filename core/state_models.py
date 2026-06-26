@@ -284,7 +284,7 @@ class HubStateSnapshot:
 
 
 @dataclass
-class WeixinSessionMeta:
+class BridgeSessionMeta:
     backend: str
     created_at: str
     updated_at: str
@@ -305,7 +305,7 @@ class WeixinSessionMeta:
         default_backend: str,
         now: str,
         normalize_backend: Callable[[str], str],
-    ) -> "WeixinSessionMeta":
+    ) -> "BridgeSessionMeta":
         if not isinstance(raw, dict):
             return cls(
                 backend=normalize_backend(default_backend),
@@ -371,18 +371,18 @@ class WeixinSessionMeta:
 
 
 @dataclass
-class WeixinConversationBinding:
+class BridgeConversationBinding:
     current_session: str = "default"
     last_regular_session: str = "default"
-    sessions: dict[str, WeixinSessionMeta] = field(default_factory=dict)
+    sessions: dict[str, BridgeSessionMeta] = field(default_factory=dict)
 
     @classmethod
-    def create(cls, *, default_backend: str, now: str) -> "WeixinConversationBinding":
+    def create(cls, *, default_backend: str, now: str) -> "BridgeConversationBinding":
         return cls(
             current_session="default",
             last_regular_session="default",
             sessions={
-                "default": WeixinSessionMeta(
+                "default": BridgeSessionMeta(
                     backend=default_backend,
                     created_at=now,
                     updated_at=now,
@@ -398,17 +398,17 @@ class WeixinConversationBinding:
         default_backend: str,
         now: str,
         normalize_backend: Callable[[str], str],
-    ) -> "WeixinConversationBinding":
+    ) -> "BridgeConversationBinding":
         if not isinstance(raw, dict):
             return cls.create(default_backend=default_backend, now=now)
-        sessions: dict[str, WeixinSessionMeta] = {}
+        sessions: dict[str, BridgeSessionMeta] = {}
         raw_sessions = raw.get("sessions")
         if isinstance(raw_sessions, dict):
             for name, meta in raw_sessions.items():
                 session_name = str(name or "").strip()
                 if not session_name:
                     continue
-                sessions[session_name] = WeixinSessionMeta.from_dict(
+                sessions[session_name] = BridgeSessionMeta.from_dict(
                     meta,
                     default_backend=default_backend,
                     now=now,
@@ -416,13 +416,13 @@ class WeixinConversationBinding:
                 )
         current_session = str(raw.get("current_session") or "default").strip() or "default"
         if not sessions:
-            sessions["default"] = WeixinSessionMeta(
+            sessions["default"] = BridgeSessionMeta(
                 backend=normalize_backend(default_backend),
                 created_at=now,
                 updated_at=now,
             )
         if current_session not in sessions:
-            sessions[current_session] = WeixinSessionMeta(
+            sessions[current_session] = BridgeSessionMeta(
                 backend=normalize_backend(default_backend),
                 created_at=now,
                 updated_at=now,
@@ -443,11 +443,11 @@ class WeixinConversationBinding:
         default_backend: str,
         now: str,
         normalize_backend: Callable[[str], str],
-    ) -> WeixinSessionMeta:
+    ) -> BridgeSessionMeta:
         cleaned_name = session_name.strip() or "default"
         session = self.sessions.get(cleaned_name)
         if session is None:
-            session = WeixinSessionMeta(
+            session = BridgeSessionMeta(
                 backend=normalize_backend(default_backend),
                 created_at=now,
                 updated_at=now,
@@ -463,7 +463,7 @@ class WeixinConversationBinding:
         default_backend: str,
         now: str,
         normalize_backend: Callable[[str], str],
-    ) -> tuple[str, WeixinSessionMeta]:
+    ) -> tuple[str, BridgeSessionMeta]:
         session = self.ensure_session(
             self.current_session,
             default_backend=default_backend,
@@ -479,6 +479,9 @@ class WeixinConversationBinding:
             "sessions": {name: meta.to_dict() for name, meta in self.sessions.items()},
         }
 
+
+WeixinSessionMeta = BridgeSessionMeta
+WeixinConversationBinding = BridgeConversationBinding
 
 @dataclass
 class WeixinBridgeRuntimeState:

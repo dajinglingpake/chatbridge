@@ -250,6 +250,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
             "done (resend=2) · 10s · 18:09:46\n\nfinal output",
             retried,
         )
+        self.assertEqual(retried, format_weixin_reply(retried))
 
     def test_format_retried_delivery_text_keeps_generic_reply_header_compact(self) -> None:
         original = format_weixin_reply("hello", at="2026-04-24T17:04:32")
@@ -258,6 +259,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
             "reply (resend=5) · - · 17:04:32\n\nhello",
             retried,
         )
+        self.assertEqual(retried, format_weixin_reply(retried))
 
     def setUp(self) -> None:
         self._tempdir = tempfile.TemporaryDirectory()
@@ -2446,4 +2448,3 @@ class WeixinBridgeCommandTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -56,7 +56,8 @@ def has_weixin_reply_header(text: str) -> bool:
     if not first_line:
         return False
     parts = first_line[0].split(" · ")
-    return len(parts) in {3, 4} and parts[0] in {"running", "done", "reply", "notice"}
+    status = parts[0].split(maxsplit=1)[0]
+    return len(parts) in {3, 4} and status in {"running", "done", "reply", "notice"}
 
 
 def format_weixin_reply(text: str, *, status: str = "reply", elapsed: str = "-", at: str | None = None) -> str:

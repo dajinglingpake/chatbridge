@@ -81,8 +81,6 @@ def find_default_onebot_runtime_executable() -> Path | None:
 
 
 def find_installed_napcat_launcher() -> Path | None:
-    if not IS_WINDOWS:
-        return None
     runtime_dir = ONEBOT_RUNTIME_DIR / NAPCAT_RUNTIME_NAME
     candidates = [
         runtime_dir / NAPCAT_CHATBRIDGE_LAUNCHER,
@@ -406,8 +404,6 @@ def _write_napcat_config(runtime_dir: Path) -> None:
 
 
 def _write_napcat_launcher(runtime_dir: Path) -> None:
-    if not IS_WINDOWS:
-        return
     launcher = runtime_dir / NAPCAT_CHATBRIDGE_LAUNCHER
     payload = r"""@echo off
 chcp 65001 >nul

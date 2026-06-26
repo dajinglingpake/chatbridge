@@ -12,22 +12,34 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from bridge_config import BridgeConfig
-from core.bridge_command_catalog import QQ_HELP_MESSAGE_KEYS, parse_bridge_command, render_bridge_help
+from agent_hub import HubConfig
+from bridge_config import APP_DIR, BridgeConfig, normalize_backend
+from core.bridge_command_catalog import QQ_HELP_MESSAGE_KEYS
+from core.bridge_control_runtime import BridgeControlRuntime
 from core.bridge_message_control import (
     normalize_context_left_percent,
 )
 from core.bridge_pending_tasks import BridgePendingReplyTask, JsonBackedTaskStore
+from core.bridge_runtime import (
+    BridgeMessageRuntime,
+    BridgePromptDecision,
+    BridgeSubmittedTask,
+    IncomingBridgeMessage,
+    PendingMediaContextStore,
+    build_prompt_with_media,
+)
+from core.bridge_session_control_runtime import BridgeSessionControlRuntime
 from core.bridge_task_delivery import PollingTaskDeliveryController, TaskUpdateDeliveryController, format_bridge_progress_reply, format_bridge_task_reply
 from core.json_store import load_json, save_json
-from core.runtime_paths import RUNTIME_DIR, STATE_DIR
-from core.state_models import HubTask
+from core.runtime_paths import RUNTIME_DIR, SESSION_DIR, STATE_DIR, WORKSPACE_DIR
+from core.state_models import HubTask, BridgeConversationBinding, BridgeSessionMeta
 from localization import Localizer
 from local_ipc import bridge_request_dir, cleanup_processed_requests, create_request, mark_bridge_processed, read_request, wait_for_response
 
 
 ONEBOT_STATE_PATH = STATE_DIR / "qq_onebot_pending_media_context.json"
 QQ_PENDING_TASKS_PATH = STATE_DIR / "qq_pending_tasks.json"
+QQ_CONVERSATIONS_PATH = STATE_DIR / "qq_conversations.json"
 ONEBOT_UPLOAD_DIR = RUNTIME_DIR / "uploads" / "qq"
 MEDIA_CONTEXT_TTL_SECONDS = 10 * 60
 PENDING_TASK_TTL_SECONDS = 24 * 60 * 60
@@ -118,7 +130,40 @@ class QQOneBotBridge:
         self.localizer = Localizer(str(getattr(config, "language", "") or ""))
         self._login_user_id = ""
         self._typing_status_available = True
-        self.pending_media_context = self._load_pending_media_context()
+        self.conversations = self._load_conversations()
+        self.pending_media_store = PendingMediaContextStore(
+            ONEBOT_STATE_PATH,
+            ttl_seconds=MEDIA_CONTEXT_TTL_SECONDS,
+            now_seconds=now_seconds,
+        )
+        self.pending_media_context = self.pending_media_store.contexts
+        self.control_runtime = BridgeControlRuntime(
+            help_message_keys=QQ_HELP_MESSAGE_KEYS,
+            translate=lambda key, **kwargs: self._t(key, **kwargs),
+            default_backend=lambda: self.config.default_backend,
+            agent_id=lambda: self.agent_id,
+            session_name=self._session_name,
+            get_task=self._get_task,
+            find_latest_sender_task=lambda sender_key, allowed_statuses: self._find_latest_sender_task(sender_key, allowed_statuses=allowed_statuses),
+            ipc_request=lambda action, payload, timeout_seconds: self._ipc_request(action, payload, timeout_seconds=timeout_seconds),
+            retry_source="qq",
+            unsupported_message=None,
+        )
+        self.session_control_runtime = BridgeSessionControlRuntime(
+            adapter=self,
+            app_dir=APP_DIR,
+            supported_backends=set(getattr(config, "supported_backends", []) or {"codex", "claude", "opencode"}),
+        )
+        self.message_runtime = BridgeMessageRuntime(
+            pending_media=self.pending_media_store,
+            resolve_session=lambda message: message.session_name,
+            prepare_prompt=self._prepare_runtime_prompt,
+            submit_task=self._submit_runtime_task,
+            remember_pending_task=self._remember_submitted_runtime_task,
+            send_reply=self._send_reply,
+            on_after_submit=self._start_submitted_task_delivery,
+            log=_log,
+        )
         self.pending_task_store = JsonBackedTaskStore(
             QQ_PENDING_TASKS_PATH,
             from_dict=lambda raw: BridgePendingReplyTask.from_dict(raw, ttl_seconds=PENDING_TASK_TTL_SECONDS),
@@ -138,26 +183,18 @@ class QQOneBotBridge:
         sender_key = self._sender_key(event)
         text = _format_text_segments(event.get("message"))
         media_attachments, media_errors = self._extract_media_attachments(sender_key, event.get("message"))
-        _log(f"message sender={sender_key} type={message_type} text_preview={text[:80]!r} media={len(media_attachments)} media_errors={len(media_errors)}")
-        if not text:
-            if media_attachments:
-                self._remember_pending_media_context(sender_key, media_attachments)
-            elif media_errors:
-                self._send_reply(event, "附件接收失败：\n" + "\n".join(media_errors))
-            return
-        command_reply, command_handled = self._handle_control_command(sender_key, text)
-        if command_handled:
-            self._send_reply(event, command_reply)
-            return
-        prompt = self._build_prompt_with_media(text, [*self._consume_pending_media_context(sender_key), *media_attachments], media_errors)
-        task = self._submit_task(sender_key, prompt)
-        task_id = str(task.get("id") or "").strip()
-        if not task_id:
-            self._send_reply(event, "任务提交失败：Hub 没有返回 task id")
-            return
-        _log(f"submitted task_id={task_id} sender={sender_key}")
-        self._remember_pending_task(task_id, event, sender_key)
-        self._typing_sent_at_by_task[task_id] = self._send_typing_keepalive(event, 0.0)
+        self.message_runtime.handle_message(
+            IncomingBridgeMessage(
+                sender_id=sender_key,
+                text=text,
+                reply_target=self._reply_event_snapshot(event),
+                source="qq",
+                session_name=self._session_name(sender_key),
+                attachments=media_attachments,
+                attachment_errors=media_errors,
+                message_type=message_type,
+            )
+        )
 
     def _start_thread(self, name: str, target: Any, *args: Any) -> None:
         def run_target() -> None:
@@ -186,137 +223,32 @@ class QQOneBotBridge:
         task = response.payload.get("task")
         return task if isinstance(task, dict) else {}
 
-    def _handle_control_command(self, sender_key: str, text: str) -> tuple[str, bool]:
-        parsed = parse_bridge_command(text)
-        if parsed is None:
-            return "", False
-        if parsed.is_passthrough:
-            if parsed.passthrough_prompt.strip().lower() == "/status":
-                return self._render_codex_status(sender_key), True
-            return "", False
+    def _prepare_runtime_prompt(self, message: IncomingBridgeMessage, _session_name: str) -> BridgePromptDecision:
+        command = self.control_runtime.handle(message.sender_id, message.text)
+        if command.handled:
+            if command.reply:
+                self._send_reply(message.reply_target, command.reply)
+            return BridgePromptDecision(handled=True)
+        session_command = self.session_control_runtime.handle(message.sender_id, message.text)
+        if session_command.handled:
+            if session_command.reply:
+                self._send_reply(message.reply_target, session_command.reply)
+            return BridgePromptDecision(handled=True)
+        cleaned_text = str(message.text or "").strip()
+        if cleaned_text.startswith("/") and not cleaned_text.startswith("//"):
+            self._send_reply(message.reply_target, "QQ 桥暂不支持这个桥接命令。发送 /help 查看当前支持的命令。")
+            return BridgePromptDecision(handled=True)
+        return BridgePromptDecision(prompt=message.text.strip())
 
-        command = parsed.command
-        parts = list(parsed.parts)
-        if command in {"/help", "/h", "/?"}:
-            return render_bridge_help(lambda key: self._t(key), QQ_HELP_MESSAGE_KEYS), True
-        if command == "/status":
-            return self._render_status(sender_key), True
-        if command == "/task":
-            task_id = parts[1].strip() if len(parts) >= 2 else ""
-            if not task_id:
-                return self._t("bridge.task.lookup.usage"), True
-            task = self._get_task(task_id)
-            if task is None or task.sender_id != sender_key:
-                return self._t("bridge.task.lookup.not_found", task_id=task_id), True
-            return self._render_task_summary(task), True
-        if command == "/last":
-            task = self._find_latest_sender_task(sender_key)
-            if task is None:
-                return self._t("bridge.task.lookup.none"), True
-            return self._render_task_summary(task), True
-        if command == "/cancel":
-            task = self._resolve_sender_task_for_command(
-                sender_key,
-                parts[1].strip() if len(parts) >= 2 else "",
-                allowed_statuses={"queued", "running"},
-            )
-            if task is None:
-                return self._t("bridge.task.cancel.none"), True
-            response = self._ipc_request("cancel_task", {"task_id": task.id}, timeout_seconds=5)
-            if not response.ok:
-                return self._t("bridge.task.cancel.failed", task_id=task.id, error=str(response.error or "unknown error")), True
-            canceled = HubTask.from_dict(response.payload.get("task"), default_backend=self.config.default_backend)
-            if canceled is None:
-                return self._t("bridge.task.cancel.failed", task_id=task.id, error="invalid task payload"), True
-            return self._t("bridge.task.cancel.ok", task_id=canceled.id, session=canceled.session_name or self._session_name(sender_key)), True
-        if command == "/retry":
-            task = self._resolve_sender_task_for_command(sender_key, parts[1].strip() if len(parts) >= 2 else "")
-            if task is None:
-                return self._t("bridge.task.retry.none"), True
-            response = self._ipc_request("retry_task", {"task_id": task.id, "source": "qq", "sender_id": sender_key}, timeout_seconds=5)
-            if not response.ok:
-                return self._t("bridge.task.retry.failed", task_id=task.id, error=str(response.error or "unknown error")), True
-            retried = HubTask.from_dict(response.payload.get("task"), default_backend=self.config.default_backend)
-            if retried is None:
-                return self._t("bridge.task.retry.failed", task_id=task.id, error="invalid task payload"), True
-            return self._t(
-                "bridge.task.retry.ok",
-                original=task.id,
-                task_id=retried.id,
-                session=retried.session_name or self._session_name(sender_key),
-                backend=retried.backend or self.config.default_backend,
-            ), True
-        return "QQ 桥暂不支持这个桥接命令。发送 /help 查看当前支持的命令。", True
-
-    def _render_status(self, sender_key: str) -> str:
-        latest_task = self._find_latest_sender_task(sender_key)
-        latest_line = "-"
-        if latest_task is not None:
-            latest_line = f"{latest_task.id} [{self._display_task_status(latest_task.status)}]"
-        return "\n".join(
-            [
-                "当前设置",
-                f"当前助手: {self.agent_id}",
-                f"当前后端: {self.config.default_backend}",
-                f"当前会话: {self._session_name(sender_key)}",
-                f"最近任务: {latest_line}",
-            ]
-        )
-
-    def _render_codex_status(self, sender_key: str) -> str:
-        if self.config.default_backend != "codex":
-            return "当前会话后端不是 Codex，//status 只支持 Codex 会话。"
-        response = self._ipc_request(
-            "codex_status",
-            {
-                "agent_id": self.agent_id,
-                "session_name": self._session_name(sender_key),
-                "workdir": "",
-            },
-            timeout_seconds=15,
-        )
-        if not response.ok:
-            return f"Codex 状态查询失败：{response.error or 'unknown error'}"
-        status_panel = str(response.payload.get("status") or "").strip()
-        if not status_panel:
-            return "当前会话还没有可查询的 Codex 交互状态。请先在这个会话里发送一条普通消息。"
-        return status_panel
-
-    def _render_task_summary(self, task: HubTask) -> str:
-        prompt = task.prompt.strip()[:400] or "(empty)"
-        result = (task.output or task.error).strip()[:800] or "(empty)"
-        return self._t(
-            "bridge.task.lookup.summary",
-            task_id=task.id,
-            session=task.session_name or "default",
-            status=self._display_task_status(task.status),
-            agent=task.agent_name or task.agent_id,
-            backend=task.backend or self.config.default_backend,
-            model=task.model.strip() or "-",
-            prompt=prompt,
-            result=result,
-        )
-
-    def _display_task_status(self, status: str) -> str:
-        cleaned = str(status or "").strip().lower()
-        return self._t(f"bridge.task.status.{cleaned}") if cleaned else self._t("bridge.task.status.unknown")
-
-    def _resolve_sender_task_for_command(
+    def _submit_runtime_task(
         self,
-        sender_key: str,
-        task_id: str,
-        *,
-        allowed_statuses: set[str] | None = None,
-    ) -> HubTask | None:
-        cleaned_id = task_id.strip()
-        if cleaned_id:
-            task = self._get_task(cleaned_id)
-            if task is None or task.sender_id != sender_key:
-                return None
-            if allowed_statuses is not None and task.status not in allowed_statuses:
-                return None
-            return task
-        return self._find_latest_sender_task(sender_key, allowed_statuses=allowed_statuses)
+        message: IncomingBridgeMessage,
+        _session_name: str,
+        prompt: str,
+        _passthrough: bool,
+    ) -> BridgeSubmittedTask:
+        task = self._submit_task(message.sender_id, prompt)
+        return BridgeSubmittedTask(task_id=str(task.get("id") or "").strip(), payload=task)
 
     def _find_latest_sender_task(self, sender_key: str, *, allowed_statuses: set[str] | None = None) -> HubTask | None:
         response = self._ipc_request("state", {}, timeout_seconds=5)
@@ -595,63 +527,310 @@ class QQOneBotBridge:
         return f"qq:private:{event.get('user_id')}"
 
     def _session_name(self, sender_key: str) -> str:
-        return _safe_path_part(sender_key)
+        binding = self._ensure_conversation(sender_key)
+        session_name, _ = binding.get_current_session(
+            default_backend=self.config.default_backend,
+            now=self._now_iso(),
+            normalize_backend=self._normalize_backend,
+        )
+        return session_name or _safe_path_part(sender_key)
+
+    @staticmethod
+    def _now_iso() -> str:
+        from core.weixin_message_format import now_iso
+
+        return now_iso()
+
+    @staticmethod
+    def _normalize_backend(value: str) -> str:
+        return normalize_backend(value)
+
+    def _load_conversations(self) -> dict[str, BridgeConversationBinding]:
+        payload = load_json(QQ_CONVERSATIONS_PATH, {}, expect_type=dict)
+        conversations: dict[str, BridgeConversationBinding] = {}
+        now = self._now_iso()
+        for sender_key, raw in payload.items():
+            cleaned = str(sender_key or "").strip()
+            if cleaned:
+                conversations[cleaned] = BridgeConversationBinding.from_dict(
+                    raw,
+                    default_backend=self.config.default_backend,
+                    now=now,
+                    normalize_backend=normalize_backend,
+                )
+        return conversations
+
+    def _save_conversations(self) -> None:
+        save_json(QQ_CONVERSATIONS_PATH, {key: value.to_dict() for key, value in self.conversations.items()})
+
+    def _ensure_conversation(self, sender_key: str) -> BridgeConversationBinding:
+        cleaned = str(sender_key or "").strip()
+        binding = self.conversations.get(cleaned)
+        if binding is None:
+            binding = BridgeConversationBinding.create(default_backend=normalize_backend(self.config.default_backend), now=self._now_iso())
+            binding.current_session = _safe_path_part(cleaned)
+            binding.last_regular_session = binding.current_session
+            binding.sessions = {
+                binding.current_session: self._new_session_meta(),
+            }
+            self.conversations[cleaned] = binding
+            self._save_conversations()
+        return binding
+
+    def _remove_conversation(self, sender_key: str) -> None:
+        self.conversations.pop(str(sender_key or "").strip(), None)
+        self._save_conversations()
+
+    def _new_session_meta(
+        self,
+        backend: Any = "",
+        *,
+        workdir: str = "",
+        model: str = "",
+        reasoning_effort: str = "",
+        permission_mode: str = "",
+    ) -> BridgeSessionMeta:
+        now = self._now_iso()
+        return BridgeSessionMeta(
+            backend=normalize_backend(str(backend or self.config.default_backend)),
+            created_at=now,
+            updated_at=now,
+            workdir=workdir.strip(),
+            model=model.strip(),
+            reasoning_effort=reasoning_effort.strip(),
+            permission_mode=permission_mode.strip(),
+        )
+
+    def _allocate_session_name(self, binding: BridgeConversationBinding, requested: str) -> str:
+        base = self._sanitize_session_name(requested, fallback="session")
+        if base not in binding.sessions:
+            return base
+        index = 2
+        while f"{base}-{index}" in binding.sessions:
+            index += 1
+        return f"{base}-{index}"
+
+    @staticmethod
+    def _sanitize_session_name(requested: str, *, fallback: str) -> str:
+        return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in requested).strip("-_") or fallback
+
+    @staticmethod
+    def _sanitize_project_name(requested: str) -> str:
+        return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in requested).strip("-_")
+
+    @staticmethod
+    def _split_named_path_args(raw: str) -> tuple[str, str]:
+        parts = str(raw or "").strip().split(maxsplit=1)
+        if len(parts) < 2:
+            return (parts[0], "") if parts else ("", "")
+        return parts[0].strip(), parts[1].strip()
+
+    def _load_sender_tasks(self, sender_key: str) -> list[HubTask]:
+        response = self._ipc_request("state", {}, timeout_seconds=5)
+        if not response.ok:
+            return []
+        tasks: list[HubTask] = []
+        for raw_task in response.payload.get("tasks") or []:
+            task = HubTask.from_dict(raw_task, default_backend=self.config.default_backend)
+            if task is not None and task.sender_id == sender_key:
+                tasks.append(task)
+        return sorted(tasks, key=lambda item: item.finished_at or item.started_at or item.created_at, reverse=True)
+
+    def _resolve_fallback_session_target(self, binding: BridgeConversationBinding) -> str:
+        if binding.last_regular_session and binding.last_regular_session in binding.sessions:
+            return binding.last_regular_session
+        return next(iter(binding.sessions.keys()), "")
+
+    def _render_context(self, session_name: str, session_meta: BridgeSessionMeta) -> str:
+        return "\n".join(
+            [
+                f"当前会话: {session_name}",
+                f"当前后端: {session_meta.backend}",
+                f"当前模型: {self._resolve_session_model(session_meta)}",
+                f"当前项目: {self._resolve_session_workdir(session_meta)}",
+            ]
+        )
+
+    def _render_session_list(
+        self,
+        sender_key: str,
+        binding: BridgeConversationBinding,
+        *,
+        page: int = 1,
+        query: str = "",
+        project_path: str | None = "",
+        scope_label: str = "",
+    ) -> str:
+        del project_path, scope_label
+        tasks_by_session: dict[str, list[HubTask]] = {}
+        for task in self._load_sender_tasks(sender_key):
+            tasks_by_session.setdefault(task.session_name or "default", []).append(task)
+        names = [name for name in binding.sessions if not query.strip() or query.strip().lower() in name.lower()]
+        total_pages = max(1, (len(names) + 10 - 1) // 10)
+        current_page = min(max(page, 1), total_pages)
+        page_names = names[(current_page - 1) * 10 : current_page * 10]
+        lines = [f"Sessions: page {current_page}/{total_pages}"]
+        for name in page_names:
+            marker = "*" if name == binding.current_session else "-"
+            latest = tasks_by_session.get(name, [None])[0]
+            summary = self._task_summary_excerpt(latest) if latest is not None else "-"
+            lines.append(f"{marker} {name} [{binding.sessions[name].backend}] {summary}")
+        if len(lines) == 1:
+            lines.append("(empty)")
+        return "\n".join(lines)
+
+    def _bulk_delete_sessions(self, binding: BridgeConversationBinding, raw_names: str) -> tuple[str, bool]:
+        deleted: list[str] = []
+        skipped: list[str] = []
+        for name in [item.strip() for item in raw_names.split(",") if item.strip()]:
+            if name == "default" or name not in binding.sessions:
+                skipped.append(name)
+                continue
+            binding.sessions.pop(name, None)
+            deleted.append(name)
+        if binding.current_session not in binding.sessions:
+            binding.current_session = self._resolve_fallback_session_target(binding) or next(iter(binding.sessions), "default")
+        self._save_conversations()
+        return f"Deleted: {', '.join(deleted) or '-'}\nSkipped: {', '.join(skipped) or '-'}\nCurrent session: {binding.current_session}", True
+
+    def _clear_empty_sessions(self, sender_key: str, binding: BridgeConversationBinding) -> tuple[str, bool]:
+        sessions_with_tasks = {task.session_name or "default" for task in self._load_sender_tasks(sender_key)}
+        deleted: list[str] = []
+        for name in list(binding.sessions):
+            if name in {binding.current_session, "default"} or name in sessions_with_tasks:
+                continue
+            binding.sessions.pop(name, None)
+            deleted.append(name)
+        self._save_conversations()
+        return f"Deleted: {', '.join(deleted) or '-'}\nCurrent session: {binding.current_session}", True
+
+    def _render_session_preview(self, sender_key: str, session_name: str, binding: BridgeConversationBinding) -> str:
+        tasks = [task for task in self._load_sender_tasks(sender_key) if (task.session_name or "default") == session_name]
+        lines = [f"Session preview: {session_name}", f"Backend: {binding.sessions.get(session_name, self._new_session_meta()).backend}", f"Tasks: {len(tasks)}"]
+        for task in tasks[:3]:
+            lines.append(f"- {task.id} [{task.status}] {self._task_summary_excerpt(task)}")
+        return "\n".join(lines)
+
+    def _render_session_history(self, sender_key: str, session_name: str, binding: BridgeConversationBinding) -> str:
+        return self._render_session_preview(sender_key, session_name, binding)
+
+    def _export_session_history(self, sender_key: str, session_name: str, binding: BridgeConversationBinding) -> tuple[str, bool]:
+        del binding
+        export_dir = RUNTIME_DIR / "exports"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        path = export_dir / f"{_safe_path_part(sender_key)}__{_safe_path_part(session_name)}.md"
+        tasks = [task for task in self._load_sender_tasks(sender_key) if (task.session_name or "default") == session_name]
+        lines = [f"# Session Export: {session_name}", "", f"- Sender: {sender_key}", f"- Task Count: {len(tasks)}", ""]
+        for task in reversed(tasks):
+            lines.extend([f"## {task.id}", "", task.prompt or "(empty)", "", task.output or task.error or "(empty)", ""])
+        path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+        return f"Session history exported: {path}", True
+
+    def _render_project_file_preview(self, raw_path: str) -> str:
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = APP_DIR / candidate
+        if not candidate.exists() or not candidate.is_file():
+            return f"File not found: {raw_path}"
+        return candidate.read_text(encoding="utf-8", errors="replace")[:3000] or "(empty)"
+
+    def _render_recent_events(self, sender_key: str, *, limit: int) -> str:
+        del sender_key, limit
+        return "QQ events are not recorded separately yet."
+
+    def _task_summary_excerpt(self, task: HubTask | None) -> str:
+        if task is None:
+            return "-"
+        return " ".join((task.output or task.error or task.prompt or "").split())[:80] or "-"
+
+    def _resolve_session_workdir(self, session_meta: BridgeSessionMeta) -> str:
+        return session_meta.workdir.strip() or str(WORKSPACE_DIR.resolve())
+
+    def _resolve_session_model(self, session_meta: BridgeSessionMeta) -> str:
+        return session_meta.model.strip() or "-"
+
+    def _render_model_status(self, session_name: str, session_meta: BridgeSessionMeta) -> str:
+        return f"Current model\nSession: {session_name}\nModel: {self._resolve_session_model(session_meta)}"
+
+    def _render_project_status(self, session_name: str, session_meta: BridgeSessionMeta) -> str:
+        return f"Current project\nSession: {session_name}\nDirectory: {self._resolve_session_workdir(session_meta)}"
+
+    def _project_spaces(self) -> dict[str, str]:
+        spaces = self._load_registered_project_spaces()
+        if WORKSPACE_DIR.exists():
+            for child in sorted(item for item in WORKSPACE_DIR.iterdir() if item.is_dir()):
+                spaces.setdefault(child.name, str(child.resolve()))
+        return spaces
+
+    def _load_registered_project_spaces(self) -> dict[str, str]:
+        payload = load_json(STATE_DIR / "project_spaces.json", {}, expect_type=dict)
+        return {str(key): str(value) for key, value in payload.items()}
+
+    def _save_registered_project_spaces(self, spaces: dict[str, str]) -> None:
+        save_json(STATE_DIR / "project_spaces.json", spaces)
+
+    def _resolve_project_workdir(self, project_arg: str) -> str | None:
+        spaces = self._project_spaces()
+        if project_arg in spaces:
+            return spaces[project_arg]
+        candidate = Path(project_arg).expanduser()
+        if not candidate.is_absolute():
+            candidate = APP_DIR / candidate
+        return str(candidate.resolve()) if candidate.exists() and candidate.is_dir() else None
+
+    def _render_project_list(self, session_meta: BridgeSessionMeta) -> str:
+        current = self._resolve_session_workdir(session_meta)
+        lines = ["Available project directories:"]
+        for name, path in self._project_spaces().items():
+            marker = "*" if path == current else "-"
+            lines.append(f"{marker} {name}: {path}")
+        return "\n".join(lines)
+
+    def _render_project_session_list(self, sender_key: str, binding: BridgeConversationBinding, project_arg: str) -> tuple[str, bool]:
+        del project_arg
+        return self._render_session_list(sender_key, binding), True
+
+    def _render_agent_details(self, agent_id: str) -> str:
+        agent = next((item for item in self._load_agents() if item.id == agent_id), None)
+        if agent is None:
+            return f"Agent not found: {agent_id}"
+        return f"Current assistant: {agent.id}\nBackend: {agent.backend or '-'}\nModel: {agent.model or '-'}\nDirectory: {agent.workdir or '-'}"
+
+    def _render_agent_list(self) -> str:
+        lines = ["Available assistants:"]
+        for agent in self._load_agents():
+            marker = "*" if agent.id == self.agent_id else "-"
+            lines.append(f"{marker} {agent.id} | {agent.backend or '-'} | {agent.model or '-'}")
+        return "\n".join(lines)
+
+    def _render_agent_command_help(self) -> str:
+        return "Agent command help is shared with the selected backend CLI."
+
+    @staticmethod
+    def _load_agents() -> list[Any]:
+        return list(HubConfig.load().agents)
+
+    def _set_backend_agent(self, agent_id: str) -> None:
+        self.agent_id = agent_id
+
+    def _clear_current_agent_session(self, sender_key: str, current_session: str) -> str:
+        del sender_key
+        session_file = SESSION_DIR / f"{_safe_path_part(current_session)}.jsonl"
+        if session_file.exists():
+            session_file.write_text("", encoding="utf-8")
+        return f"Cleared current agent session: {current_session}"
 
     def _load_pending_media_context(self) -> dict[str, list[dict[str, str]]]:
-        payload = load_json(ONEBOT_STATE_PATH, {}, expect_type=dict)
-        if not isinstance(payload, dict):
-            return {}
-        current = now_seconds()
-        contexts: dict[str, list[dict[str, str]]] = {}
-        for sender_key, raw_items in payload.items():
-            if not isinstance(raw_items, list):
-                continue
-            items: list[dict[str, str]] = []
-            for item in raw_items:
-                if not isinstance(item, dict):
-                    continue
-                created_at = int(item.get("created_at") or 0)
-                if created_at and current - created_at > MEDIA_CONTEXT_TTL_SECONDS:
-                    continue
-                path = str(item.get("path") or "").strip()
-                if path:
-                    items.append(
-                        {
-                            "kind": str(item.get("kind") or "file"),
-                            "name": str(item.get("name") or Path(path).name),
-                            "path": path,
-                            "created_at": str(created_at or current),
-                        }
-                    )
-            if items:
-                contexts[str(sender_key)] = items
-        return contexts
+        return self.pending_media_store.contexts
 
     def _save_pending_media_context(self) -> None:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        save_json(ONEBOT_STATE_PATH, self.pending_media_context)
+        self.pending_media_store.save()
 
     def _remember_pending_media_context(self, sender_key: str, attachments: list[dict[str, str]]) -> None:
-        current = str(now_seconds())
-        pending = self.pending_media_context.get(sender_key, [])
-        pending.extend({**attachment, "created_at": current} for attachment in attachments)
-        self.pending_media_context[sender_key] = pending[-10:]
-        self._save_pending_media_context()
+        self.pending_media_store.remember(sender_key, attachments)
 
     def _consume_pending_media_context(self, sender_key: str) -> list[dict[str, str]]:
-        raw_items = self.pending_media_context.pop(sender_key, [])
-        current = now_seconds()
-        items: list[dict[str, str]] = []
-        for item in raw_items:
-            try:
-                created_at = int(item.get("created_at") or 0)
-            except (TypeError, ValueError):
-                created_at = 0
-            if current - created_at <= MEDIA_CONTEXT_TTL_SECONDS:
-                items.append(item)
-        if raw_items:
-            self._save_pending_media_context()
-        return items
+        return self.pending_media_store.consume(sender_key)
 
     def _save_pending_tasks(self) -> None:
         self.pending_task_store.save(self.pending_tasks)
@@ -664,6 +843,18 @@ class QQOneBotBridge:
             created_at=now_seconds(),
         )
         self._save_pending_tasks()
+
+    def _remember_submitted_runtime_task(self, message: IncomingBridgeMessage, _session_name: str, submitted: BridgeSubmittedTask) -> None:
+        self.pending_tasks[submitted.task_id] = BridgePendingReplyTask(
+            task_id=submitted.task_id,
+            sender_key=message.sender_id,
+            reply_target=dict(message.reply_target),
+            created_at=now_seconds(),
+        )
+        self._save_pending_tasks()
+
+    def _start_submitted_task_delivery(self, message: IncomingBridgeMessage, _session_name: str, submitted: BridgeSubmittedTask) -> None:
+        self._typing_sent_at_by_task[submitted.task_id] = self._send_typing_keepalive(message.reply_target, 0.0)
 
     def _update_pending_task_progress(self, task_id: str, *, last_progress_seq: int, last_progress_text: str) -> None:
         pending = self.pending_tasks.get(task_id)
@@ -701,17 +892,7 @@ class QQOneBotBridge:
 
     @staticmethod
     def _build_prompt_with_media(prompt: str, attachments: list[dict[str, str]], errors: list[str]) -> str:
-        parts = [prompt.strip()] if prompt.strip() else []
-        if attachments:
-            lines = ["用户发送了以下 QQ 附件，已保存到本地："]
-            for attachment in attachments:
-                label = "图片" if attachment.get("kind") == "image" else "文件"
-                lines.append(f"- {label}: {attachment.get('name') or '-'}")
-                lines.append(f"  本地路径: {attachment.get('path') or '-'}")
-            parts.append("\n".join(lines))
-        if errors:
-            parts.append("以下 QQ 附件接收失败：\n" + "\n".join(errors))
-        return "\n\n".join(part for part in parts if part).strip()
+        return build_prompt_with_media(prompt, attachments, errors)
 
     def make_handler(self) -> type[BaseHTTPRequestHandler]:
         bridge = self
