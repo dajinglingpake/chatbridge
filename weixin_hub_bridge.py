@@ -113,6 +113,8 @@ PENDING_TASK_RECONCILE_TIMEOUT_SECONDS = 2.0
 PERF_LOG_MIN_SECONDS = 0.25
 ACTIVE_GETUPDATES_SLOW_LOG_SECONDS = 1.0
 CONTEXT_LEFT_QUERY_TIMEOUT_SECONDS = 2.0
+PROGRESS_REPLY_MAX_QUEUE_AGE_SECONDS = 30
+NOTICE_MAX_QUEUE_AGE_SECONDS = 30
 MEDIA_SEND_MAX_BYTES = 25 * 1024 * 1024
 MEDIA_RECEIVE_MAX_BYTES = 50 * 1024 * 1024
 MEDIA_CONTEXT_TTL_SECONDS = 10 * 60
@@ -160,6 +162,23 @@ def _is_ephemeral_delivery_text(text: object) -> bool:
         return False
     return first_line[0].split(" · ", 1)[0].split(maxsplit=1)[0] == "running"
 
+def _is_stale_ephemeral_delivery(text: object, queue_delay_ms: int | None) -> bool:
+    return (
+        queue_delay_ms is not None
+        and queue_delay_ms > PROGRESS_REPLY_MAX_QUEUE_AGE_SECONDS * 1000
+        and _is_ephemeral_delivery_text(text)
+    )
+
+
+def _is_notice_delivery_message(message: dict[str, object]) -> bool:
+    return str(message.get("source") or "").strip().lower() == "notice"
+
+def _is_stale_notice_delivery(message: dict[str, object], queue_delay_ms: int | None) -> bool:
+    return (
+        queue_delay_ms is not None
+        and queue_delay_ms > NOTICE_MAX_QUEUE_AGE_SECONDS * 1000
+        and _is_notice_delivery_message(message)
+    )
 
 SHOWFILE_BLOCKED_PATH_PARTS = frozenset({".git", ".runtime", ".venv", "__pycache__", "accounts", "sessions"})
 
@@ -415,20 +434,50 @@ class WeixinBridge:
                         )
                     text = str(message.get("text") or "")
                     attempt = int(message.get("attempt") or 0)
+                    if _is_stale_ephemeral_delivery(text, queue_delay_ms):
+                        preview = " ".join(text.split())[:160]
+                        print(
+                            f"[bridge] dropped stale progress reply to={message.get('to_user_id', '')} "
+                            f"age_ms={queue_delay_ms} attempt={attempt} preview={preview}",
+                            flush=True,
+                        )
+                        continue
+                    if _is_stale_notice_delivery(message, queue_delay_ms):
+                        preview = " ".join(text.split())[:160]
+                        print(
+                            f"[bridge] dropped stale notice to={message.get('to_user_id', '')} "
+                            f"age_ms={queue_delay_ms} attempt={attempt} preview={preview}",
+                            flush=True,
+                        )
+                        continue
                     if attempt > 0:
                         text = self._format_retried_delivery_text(text, attempt)
+                    to_user_id = str(message.get("to_user_id") or "")
+                    queued_context_token = str(message.get("context_token") or "")
+                    context_token = self._resolve_context_token_for_delivery(to_user_id, queued_context_token)
+                    if context_token != queued_context_token:
+                        print(
+                            f"[bridge] refreshed queued reply context token to={to_user_id} "
+                            f"attempt={attempt}",
+                            flush=True,
+                        )
                     self._deliver_text_now(
                         base_url,
                         token,
-                        str(message.get("to_user_id") or ""),
-                        str(message.get("context_token") or ""),
+                        to_user_id,
+                        context_token,
                         text,
                         log_failure=False,
                     )
                 except Exception as exc:  # noqa: BLE001
                     attempt = int(message.get("attempt") or 0)
                     permanent = _is_permanent_delivery_error(exc)
-                    if not permanent and attempt == 0:
+                    if (
+                        not permanent
+                        and attempt == 0
+                        and not _is_ephemeral_delivery_text(message.get("text"))
+                        and not _is_notice_delivery_message(message)
+                    ):
                         print(
                             "[bridge] async send "
                             f"retry scheduled to={message.get('to_user_id', '')} "
@@ -1351,16 +1400,22 @@ class WeixinBridge:
     def _handle_async_send_failure(self, message: dict[str, object], error: Exception) -> None:
         attempt = int(message.get("attempt") or 0)
         permanent = _is_permanent_delivery_error(error)
-        if not permanent and attempt < MAX_RETRY_ATTEMPTS:
-            requeue_text_message(message)
-            return
         preview = " ".join(str(message.get("text") or "").split())[:160]
         attempts = attempt + 1
         if _is_ephemeral_delivery_text(message.get("text")):
             print(
-                f"[bridge] dropped expired progress reply to={message.get('to_user_id', '')} attempts={attempts} preview={preview}",
+                f"[bridge] dropped transient progress reply to={message.get('to_user_id', '')} attempts={attempts} preview={preview}",
                 flush=True,
             )
+            return
+        if _is_notice_delivery_message(message):
+            print(
+                f"[bridge] dropped transient notice to={message.get('to_user_id', '')} attempts={attempts} preview={preview}",
+                flush=True,
+            )
+            return
+        if not permanent and attempt < MAX_RETRY_ATTEMPTS:
+            requeue_text_message(message)
             return
         record_failed_delivery(
             to_user_id=str(message.get("to_user_id") or ""),
@@ -1612,7 +1667,14 @@ class WeixinBridge:
         save_account_context_tokens(self.account_path, self.context_tokens)
 
     def _resolve_context_token_for_sender(self, tracked: WeixinPendingTaskState) -> str:
-        return self.context_tokens.get(tracked.sender_id, "") or tracked.context_token
+        return self._resolve_context_token_for_delivery(tracked.sender_id, tracked.context_token)
+
+    def _resolve_context_token_for_delivery(self, sender_id: str, fallback_context_token: Any) -> str:
+        cleaned_sender_id = str(sender_id or "").strip()
+        latest_context_token = str(self.context_tokens.get(cleaned_sender_id, "") or "").strip()
+        if latest_context_token:
+            return latest_context_token
+        return str(fallback_context_token or "").strip()
 
     def _append_event_log(self, event: str, **payload: Any) -> None:
         LOG_DIR.mkdir(parents=True, exist_ok=True)

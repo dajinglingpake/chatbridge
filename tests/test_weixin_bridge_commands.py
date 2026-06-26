@@ -352,6 +352,19 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         )
         self.assertTrue(WeixinBridge._message_matches_active_account(bridge, {}))
 
+    def test_delivery_context_token_prefers_latest_sender_token(self) -> None:
+        bridge = object.__new__(WeixinBridge)
+        bridge.context_tokens = {"sender-test": "fresh-context"}
+
+        self.assertEqual(
+            "fresh-context",
+            WeixinBridge._resolve_context_token_for_delivery(bridge, "sender-test", "queued-context"),
+        )
+        self.assertEqual(
+            "queued-context",
+            WeixinBridge._resolve_context_token_for_delivery(bridge, "missing-sender", "queued-context"),
+        )
+
     def test_notify_command_renders_multiline_status(self) -> None:
         reply, handled = self.bridge._handle_control_command("sender-test", "/notify")
         self.assertTrue(handled)

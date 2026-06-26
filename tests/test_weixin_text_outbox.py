@@ -63,5 +63,20 @@ class WeixinTextOutboxTests(unittest.TestCase):
         self.assertEqual("/tmp/bot-a.json", queued[0]["account_file"])
 
 
+    def test_enqueue_text_message_drops_superseded_messages_for_same_recipient(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            outbox_path = Path(temp_dir) / "weixin_text_outbox.jsonl"
+            with patch("core.weixin_text_outbox.OUTBOX_PATH", outbox_path):
+                enqueue_text_message(to_user_id="sender-test", context_token="ctx", text="reply · - · 19:10:30\n\nold answer")
+                enqueue_text_message(to_user_id="other-sender", context_token="ctx", text="done · 26s · ctx 47% · 19:10:35")
+                enqueue_text_message(to_user_id="sender-test", context_token="ctx", text="reply · - · 19:11:00\n\nnew work")
+                queued = pop_text_messages(limit=10)
+
+        self.assertEqual(
+            ["done · 26s · ctx 47% · 19:10:35", "reply · - · 19:11:00\n\nnew work"],
+            [str(item["text"]) for item in queued],
+        )
+        self.assertEqual(["other-sender", "sender-test"], [str(item["to_user_id"]) for item in queued])
+
 if __name__ == "__main__":
     unittest.main()

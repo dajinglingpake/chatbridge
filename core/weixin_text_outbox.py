@@ -38,7 +38,7 @@ def enqueue_text_message(
         "created_at_ms": now_ms,
         "retry_not_before": 0,
     }
-    _append_payload(payload)
+    _append_payload(payload, drop_superseded_recipient=True)
 
 
 def requeue_text_message(payload: dict[str, object]) -> None:
@@ -82,9 +82,26 @@ def pop_text_messages(*, limit: int = 20) -> list[dict[str, object]]:
         return messages
 
 
-def _append_payload(payload: dict[str, object]) -> None:
+def _append_payload(payload: dict[str, object], *, drop_superseded_recipient: bool = False) -> None:
     OUTBOX_PATH.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(payload, ensure_ascii=False) + "\n"
     with sender_send_lock("__weixin_text_outbox__", timeout_seconds=15.0):
+        if drop_superseded_recipient and OUTBOX_PATH.exists():
+            to_user_id = str(payload.get("to_user_id") or "").strip()
+            kept_lines: list[str] = []
+            for raw_line in OUTBOX_PATH.read_text(encoding="utf-8").splitlines():
+                if not raw_line.strip():
+                    continue
+                try:
+                    existing = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(existing, dict) and str(existing.get("to_user_id") or "").strip() == to_user_id:
+                    continue
+                kept_lines.append(raw_line)
+            if kept_lines:
+                OUTBOX_PATH.write_text("\n".join(kept_lines) + "\n", encoding="utf-8")
+            else:
+                OUTBOX_PATH.unlink(missing_ok=True)
         with OUTBOX_PATH.open("a", encoding="utf-8") as handle:
             handle.write(line)

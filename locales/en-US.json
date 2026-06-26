@@ -208,7 +208,7 @@
   "bridge.task.canceled": "{backend} task was canceled\\nTask ID: {task_id}\\nSession: {session}\\nSession ID: {session_id}\\nReason: {error}\\n\\n{hint}",
   "bridge.task.failed": "{backend} task failed\\nTask ID: {task_id}\\nSession: {session}\\nSession ID: {session_id}\\nReason: {error}\\n\\n{hint}",
   "bridge.delivery_retry.header": "(resend={attempt})",
-  "bridge.delivery_failed.notice": "A previous message failed to send and has stopped retrying.\\nFailed messages: {count}\\nAttempts: {attempts}\\nReason: {error}\\nPreview: {preview}",
+  "bridge.delivery_failed.notice": "Historical message delivery failed and has stopped retrying.\\nFailed messages: {count}\\nAttempts: {attempts}\\nReason: {error}\\nPreview: {preview}",
   "ui.summary.checking": "Checking current status...",
   "ui.next_step.initial": "The app will detect the environment, WeChat login status, and backend processes automatically.",
   "ui.status.checking": "Checking",
