@@ -208,6 +208,7 @@ class MultiCodexHub:
         self._restore_previous_state()
         for agent in self.config.agents:
             self._ensure_agent(agent)
+        self._reconcile_restored_runtime_states()
         self._save_state()
 
     def _restore_previous_state(self) -> None:
@@ -246,6 +247,18 @@ class MultiCodexHub:
         if agent.id not in self.started_workers:
             threading.Thread(target=self._worker, args=(agent.id,), daemon=True).start()
             self.started_workers.add(agent.id)
+
+    def _reconcile_restored_runtime_states(self) -> None:
+        agent_ids = set(self.runtimes)
+        agent_ids.update(agent.id for agent in self.config.agents)
+        for agent_id in agent_ids:
+            runtime = self.runtimes.setdefault(agent_id, AgentRuntimeState(updated_at=now_iso()))
+            runtime.queue_size = self._queued_task_count(agent_id)
+            if runtime.status == "running" and not any(
+                task.agent_id == agent_id and task.status == "running" for task in self.tasks
+            ):
+                runtime.status = "idle"
+            runtime.updated_at = now_iso()
 
     def list_agents(self) -> list[dict[str, Any]]:
         return [{**asdict(agent), "runtime": self.runtimes.get(agent.id, AgentRuntimeState()).to_dict()} for agent in self.config.agents]
@@ -588,8 +601,12 @@ class MultiCodexHub:
             self.cancel_requested_task_ids.remove(task_id)
             return True
 
+    def _is_cancel_requested(self, task_id: str) -> bool:
+        with self.lock:
+            return task_id in self.cancel_requested_task_ids
+
     def _notify_task_result(self, task: HubTask, succeeded: bool) -> None:
-        if task.source.strip().lower().startswith("wechat"):
+        if self._bridge_channel_for_task(task):
             return
         task_id = task.id
         agent_name = task.agent_name or task.agent_id
@@ -621,7 +638,7 @@ class MultiCodexHub:
         broadcast_weixin_notice_by_kind("task", "任务执行失败", detail)
 
     def _notify_task_canceled(self, task: HubTask) -> None:
-        if task.source.strip().lower().startswith("wechat"):
+        if self._bridge_channel_for_task(task):
             return
         task_id = task.id
         agent_name = task.agent_name or task.agent_id
@@ -670,11 +687,13 @@ class MultiCodexHub:
                 on_process_started=lambda pid: self._register_running_task_pid(task.id, pid),
                 on_progress=lambda text: self._update_task_progress(task.id, text),
                 on_context_left_percent=lambda percent: self._update_task_context_left_percent(task.id, percent),
+                is_cancel_requested=lambda: self._is_cancel_requested(task.id),
                 mcp_server=mcp_server,
                 reasoning_effort=task.reasoning_effort.strip(),
                 permission_mode=task.permission_mode.strip(),
                 codex_slim_exec=self.config.codex_slim_exec,
                 codex_transport=self.config.codex_transport,
+                hub_task_timeout_seconds=600,
             ),
         )
 

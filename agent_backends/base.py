@@ -33,11 +33,13 @@ class BackendContext:
     on_process_started: Callable[[int], None] | None = None
     on_progress: Callable[[str], None] | None = None
     on_context_left_percent: Callable[[int], None] | None = None
+    is_cancel_requested: Callable[[], bool] | None = None
     mcp_server: McpServerConfig | None = None
     reasoning_effort: str = ""
     permission_mode: str = ""
     codex_slim_exec: bool = True
     codex_transport: str = "exec"
+    hub_task_timeout_seconds: int = 600
 
 
 class AgentBackend(Protocol):

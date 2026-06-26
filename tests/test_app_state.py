@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from core.app_state import build_badge, build_issues, build_overview_lines, decide_primary_action
+from core.app_state import build_badge, build_issues, build_overview_lines, decide_primary_action, infer_bridge_mode
 from core.state_models import CheckSnapshot, RuntimeSnapshot, BridgeRuntimeState
 
 
@@ -71,6 +71,41 @@ class AppStateTests(unittest.TestCase):
 
         self.assertEqual("运行中", badge.text)
         self.assertEqual("start", action)
+        self.assertEqual("qq", infer_bridge_mode(snapshot))
+
+    def test_full_qq_stack_running_has_no_process_mismatch_issue(self) -> None:
+        snapshot = RuntimeSnapshot(
+            hub_running=True,
+            hub_pid=101,
+            bridge_running=False,
+            bridge_pid=None,
+            onebot_runtime_running=True,
+            onebot_runtime_pid=303,
+            qq_bridge_running=True,
+            qq_bridge_pid=404,
+            codex_processes=[],
+            log_dir=".runtime/logs",
+        )
+
+        issues = build_issues(snapshot, BridgeRuntimeState(started_at=""), {})
+
+        self.assertEqual([], issues)
+
+    def test_full_weixin_stack_infers_weixin_mode(self) -> None:
+        snapshot = RuntimeSnapshot(
+            hub_running=True,
+            hub_pid=101,
+            bridge_running=True,
+            bridge_pid=202,
+            onebot_runtime_running=False,
+            onebot_runtime_pid=None,
+            qq_bridge_running=False,
+            qq_bridge_pid=None,
+            codex_processes=[],
+            log_dir=".runtime/logs",
+        )
+
+        self.assertEqual("weixin", infer_bridge_mode(snapshot))
 
     def test_build_overview_lines_renders_bridge_state_fields(self) -> None:
         snapshot = RuntimeSnapshot(

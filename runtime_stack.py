@@ -189,7 +189,21 @@ def _find_processes_by_script(script_path: Path) -> list[object]:
         normalized_joined = joined.replace("\\", "/")
         if any(target in joined or target in normalized_joined for target in targets):
             matches.append(proc)
-    return sorted(matches, key=lambda item: getattr(item, "pid", 0))
+    return _filter_child_process_matches(sorted(matches, key=lambda item: getattr(item, "pid", 0)))
+
+
+def _filter_child_process_matches(processes: list[object]) -> list[object]:
+    matched_pids = {getattr(proc, "pid", None) for proc in processes}
+    filtered: list[object] = []
+    for proc in processes:
+        try:
+            parent_pid = proc.ppid()
+        except (AttributeError, psutil.Error, OSError):
+            parent_pid = None
+        if parent_pid in matched_pids:
+            continue
+        filtered.append(proc)
+    return filtered
 
 
 def _find_processes_by_markers(markers: tuple[str, ...]) -> list[object]:
@@ -482,17 +496,21 @@ def start_managed(
     env: dict[str, str] | None = None,
 ) -> str:
     running = _find_processes_by_script(script_path)
+    duplicate_pids: list[int] = []
     if running:
-        primary = running[0]
-        duplicate_pids: list[int] = []
-        for proc in running[1:]:
-            duplicate_pids.append(proc.pid)
+        if len(running) == 1:
+            primary = running[0]
+            _write_pid_file(pid_file, primary.pid)
+            return f"{name} already running (PID {primary.pid})"
+        duplicate_pids = [proc.pid for proc in running]
+        for proc in running:
             _taskkill(proc.pid)
-        _write_pid_file(pid_file, primary.pid)
-        if duplicate_pids:
-            rendered = ", ".join(str(pid) for pid in duplicate_pids)
-            return f"{name} already running (PID {primary.pid}); cleaned duplicate PIDs {rendered}"
-        return f"{name} already running (PID {primary.pid})"
+        _clear_pid_file(pid_file)
+        remaining = _wait_for_script_processes_to_exit(script_path)
+        if remaining:
+            rendered_remaining = ", ".join(str(proc.pid) for proc in remaining)
+            rendered_duplicates = ", ".join(str(pid) for pid in duplicate_pids)
+            return f"{name} restart blocked after cleaning duplicate PIDs {rendered_duplicates}; still running PIDs {rendered_remaining}"
 
     ensure_runtime_dirs()
     python_cmd = _get_python_command(gui=False)
@@ -507,6 +525,9 @@ def start_managed(
             start_new_session=not IS_WINDOWS,
         )
     _write_pid_file(pid_file, proc.pid)
+    if duplicate_pids:
+        rendered = ", ".join(str(pid) for pid in duplicate_pids)
+        return f"{name} restarted after cleaning duplicate PIDs {rendered} (PID {proc.pid})"
     return f"{name} started (PID {proc.pid})"
 
 
@@ -680,6 +701,15 @@ def _taskkill(pid: int) -> None:
         pass
 
 
+def _wait_for_script_processes_to_exit(script_path: Path, *, timeout_seconds: float = 5.0) -> list[object]:
+    deadline = time.monotonic() + max(0.1, timeout_seconds)
+    remaining = _find_processes_by_script(script_path)
+    while remaining and time.monotonic() < deadline:
+        time.sleep(0.1)
+        remaining = _find_processes_by_script(script_path)
+    return remaining
+
+
 def stop_managed(name: str, script_path: Path, pid_file: Path) -> str:
     running = _find_processes_by_script(script_path)
     if not running:
@@ -689,7 +719,12 @@ def stop_managed(name: str, script_path: Path, pid_file: Path) -> str:
     for proc in running:
         stopped_pids.append(proc.pid)
         _taskkill(proc.pid)
+    remaining = _wait_for_script_processes_to_exit(script_path)
     _clear_pid_file(pid_file)
+    if remaining:
+        rendered_remaining = ", ".join(str(proc.pid) for proc in remaining)
+        rendered_stopped = ", ".join(str(pid) for pid in stopped_pids)
+        return f"{name} stop requested (PIDs {rendered_stopped}); still running PIDs {rendered_remaining}"
     if len(stopped_pids) == 1:
         return f"{name} stopped (PID {stopped_pids[0]})"
     rendered = ", ".join(str(pid) for pid in stopped_pids)
@@ -764,6 +799,17 @@ def restart_qq_bridge() -> list[str]:
     return [stop_bridge(), stop_qq_bridge(), start_qq_bridge(env=env)]
 
 
+def restart_qq_stack() -> list[str]:
+    env = _managed_subprocess_env()
+    messages = [stop_bridge()]
+    messages.append(stop_qq_bridge())
+    messages.append(stop_managed("Hub", HUB_SCRIPT, HUB_PID_FILE))
+    messages.append(start_managed("Hub", HUB_SCRIPT, HUB_PID_FILE, HUB_OUT_LOG, HUB_ERR_LOG, env=env))
+    time.sleep(1.5)
+    messages.append(start_qq_bridge(env=env))
+    return messages
+
+
 def restart_onebot_runtime() -> list[str]:
     env = _onebot_runtime_env()
     return [stop_bridge(), stop_qq_bridge(), stop_onebot_runtime(), start_onebot_runtime(env=env), start_qq_bridge(env=env)]
@@ -779,9 +825,13 @@ def stop_all() -> list[str]:
 
 def restart_all() -> list[str]:
     env = _managed_subprocess_env()
-    messages = [stop_managed("Bridge", BRIDGE_SCRIPT, BRIDGE_PID_FILE)]
+    messages = [stop_qq_bridge()]
+    messages.append(stop_onebot_runtime())
+    messages.append(stop_managed("Bridge", BRIDGE_SCRIPT, BRIDGE_PID_FILE))
     messages.append(stop_managed("Hub", HUB_SCRIPT, HUB_PID_FILE))
-    messages.extend(start_all(env=env))
+    messages.append(start_managed("Hub", HUB_SCRIPT, HUB_PID_FILE, HUB_OUT_LOG, HUB_ERR_LOG, env=env))
+    time.sleep(1.5)
+    messages.append(start_managed("Bridge", BRIDGE_SCRIPT, BRIDGE_PID_FILE, BRIDGE_OUT_LOG, BRIDGE_ERR_LOG, env=env))
     return messages
 
 

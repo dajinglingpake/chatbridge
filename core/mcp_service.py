@@ -17,6 +17,7 @@ from core.dashboard import load_dashboard_state
 from core.json_store import load_json
 from core.runtime_paths import PROJECT_SPACES_PATH, RUNTIME_DIR, WORKSPACE_DIR
 from core.state_models import HubTask, JsonObject, WeixinConversationBinding, WeixinSessionMeta
+from runtime_stack import get_runtime_snapshot
 from weixin_hub_bridge import DEFAULT_WEIXIN_BASE_URL, EVENT_LOG_PATH, WeixinBridge
 
 
@@ -153,7 +154,7 @@ def get_tool_guide() -> ToolActionResult:
         "内置工具直接作用于当前发送方的当前会话。",
         "只读查询: get_sender_snapshot | list_agents | get_task | get_command_catalog。",
         "目标发送方操作: execute_sender_command(target_sender_id, command)。",
-        "服务重启: restart_services(scope='all'|'bridge'|'qq'|'qq-bridge'|'onebot')，异步安排重启，避免工具调用过程中把当前进程杀掉。",
+        "服务重启: restart_services(scope='current'|'all'|'weixin'|'bridge'|'qq'|'qq-bridge'|'onebot')，current/all 会按当前运行模式重启对应平台，异步安排重启，避免工具调用过程中把当前进程杀掉。",
         "媒体发送: send_bridge_media(target_sender_id, path)，发送项目内允许的图片或文件。",
         "新 Agent 会话: start_agent_session(agent_id, session_name, prompt, ...)。",
         "Agent 委派: delegate_task(agent_id, prompt, ...)。这不会隐式切换当前发送方的会话。",
@@ -597,7 +598,7 @@ def _is_qq_sender_id(sender_id: str) -> bool:
 
 def restart_services(scope: str = "all") -> ToolActionResult:
     cleaned_scope = str(scope or "").strip().lower() or "all"
-    action = resolve_restart_action(cleaned_scope, default_scope="all", restart_scopes=MCP_RESTART_SCOPES)
+    action = _resolve_mcp_restart_action(cleaned_scope)
     if action is None:
         return ToolActionResult(ok=False, summary=f"scope 不支持：{cleaned_scope}")
     result = schedule_named_action(action, delay_seconds=1.0)
@@ -606,6 +607,15 @@ def restart_services(scope: str = "all") -> ToolActionResult:
         summary=result.message,
         data={"scope": cleaned_scope, "action": action},
     )
+
+def _resolve_mcp_restart_action(scope: str) -> str | None:
+    cleaned_scope = str(scope or "").strip().lower() or "all"
+    if cleaned_scope in {"all", "current"}:
+        snapshot = get_runtime_snapshot(include_agent_processes=False)
+        if (snapshot.qq_bridge_running or snapshot.onebot_runtime_running) and not snapshot.bridge_running:
+            return "restart-qq-stack"
+        return "restart"
+    return resolve_restart_action(cleaned_scope, default_scope="all", restart_scopes=MCP_RESTART_SCOPES)
 
 
 def send_bridge_media(target_sender_id: str, path: str) -> ToolActionResult:

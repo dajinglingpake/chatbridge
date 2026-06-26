@@ -226,6 +226,8 @@ class CodexBackend(AgentBackend):
                 return self._invoke_once(agent, prompt, session_name, context)
             except RuntimeError as exc:
                 last_error = exc
+                if self._is_cancel_requested(context):
+                    raise
                 if attempt >= CODEX_TRANSIENT_RETRY_ATTEMPTS or not self._is_transient_error(str(exc)):
                     raise
                 if context.on_progress is not None:
@@ -391,22 +393,52 @@ class CodexBackend(AgentBackend):
         pending_delta = ""
         context_left_percent: int | None = None
         assert proc.stderr is not None
+        stdout_events: queue.Queue[dict[str, object] | None] = queue.Queue()
 
         def read_stderr() -> None:
             for raw_line in proc.stderr:
                 stderr_lines.append(raw_line)
 
+        def read_stdout() -> None:
+            stdout = proc.stdout
+            if stdout is None:
+                stdout_events.put(None)
+                return
+            for raw_line in stdout:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(event, dict):
+                    stdout_events.put(event)
+            stdout_events.put(None)
+
         stderr_thread = threading.Thread(target=read_stderr, daemon=True)
         stderr_thread.start()
         assert proc.stdout is not None
-        for raw_line in proc.stdout:
-            line = raw_line.strip()
-            if not line:
-                continue
+        stdout_thread = threading.Thread(target=read_stdout, daemon=True)
+        stdout_thread.start()
+        timeout_seconds = max(1, int(getattr(context, "hub_task_timeout_seconds", 600) or 600))
+        deadline = time.time() + timeout_seconds
+        while True:
+            if self._is_cancel_requested(context):
+                terminate_process_tree(int(getattr(proc, "pid", 0) or 0))
+                raise RuntimeError("Task canceled during execution.")
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                terminate_process_tree(int(getattr(proc, "pid", 0) or 0))
+                raise RuntimeError(f"Codex request timed out after {timeout_seconds} seconds")
             try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
+                event = stdout_events.get(timeout=min(0.5, remaining))
+            except queue.Empty:
+                if proc.poll() is not None:
+                    break
                 continue
+            if event is None:
+                break
             if event.get("type") == "thread.started" and event.get("thread_id"):
                 session_id = str(event["thread_id"])
             if event.get("type") == "error" and event.get("message"):
@@ -438,6 +470,7 @@ class CodexBackend(AgentBackend):
             if trailing_chunk and trailing_chunk != last_progress:
                 context.on_progress(trailing_chunk)
         completed_returncode = self._wait_for_exit(proc)
+        stdout_thread.join(timeout=1)
         stderr_thread.join(timeout=1)
         if not error_message:
             error_message = "".join(stderr_lines).strip()
@@ -474,6 +507,10 @@ class CodexBackend(AgentBackend):
     def _is_transient_error(message: str) -> bool:
         lowered = str(message or "").lower()
         return any(marker in lowered for marker in TRANSIENT_ERROR_MARKERS)
+
+    @staticmethod
+    def _is_cancel_requested(context: BackendContext) -> bool:
+        return bool(context.is_cancel_requested and context.is_cancel_requested())
 
     def _take_stream_chunk(self, buffer: str, *, force: bool) -> tuple[str, str]:
         normalized = buffer.replace("\r", "")

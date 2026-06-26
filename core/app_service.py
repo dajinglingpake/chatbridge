@@ -23,6 +23,7 @@ from runtime_stack import (
     restart_bridge,
     restart_onebot_runtime,
     restart_qq_bridge,
+    restart_qq_stack,
     start_all,
     start_onebot_runtime,
     start_qq_stack,
@@ -51,7 +52,14 @@ QQ_ISOLATED_ACTIONS = {
     "start-qq-bridge",
     "stop-qq-bridge",
     "restart-qq-bridge",
+    "restart-qq-stack",
     "prepare-qq-login",
+}
+WEIXIN_NOTICE_ACTIONS = {
+    "start",
+    "start-weixin",
+    "restart",
+    "restart-bridge",
 }
 
 
@@ -97,6 +105,7 @@ def _parse_hub_agents(raw: object) -> list[HubAgentSnapshot]:
 def run_named_action(action: str) -> ServiceResult:
     actions: dict[str, ActionRunner] = {
         "start": start_all,
+        "start-weixin": start_all,
         "stop": stop_all,
         "restart": restart_all,
         "restart-bridge": restart_bridge,
@@ -106,6 +115,7 @@ def run_named_action(action: str) -> ServiceResult:
         "start-qq-bridge": start_qq_stack,
         "stop-qq-bridge": lambda: [stop_qq_bridge()],
         "restart-qq-bridge": restart_qq_bridge,
+        "restart-qq-stack": restart_qq_stack,
         "prepare-qq-login": start_qq_stack,
         "emergency-stop": emergency_stop,
     }
@@ -118,12 +128,16 @@ def run_named_action(action: str) -> ServiceResult:
         return ServiceResult(ok=True, message=f"{result_message} | {pre_notice.summary}")
     if action in QQ_ISOLATED_ACTIONS:
         return ServiceResult(ok=True, message=result_message)
+    if action not in WEIXIN_NOTICE_ACTIONS:
+        return ServiceResult(ok=True, message=result_message)
     notice = broadcast_weixin_notice_by_kind("service", f"服务操作: {action}", result_message)
     return ServiceResult(ok=True, message=f"{result_message} | {notice.summary}")
 
 
 def _broadcast_pre_stop_notice(action: str):
     snapshot = get_runtime_snapshot(include_agent_processes=False)
+    if not snapshot.bridge_running:
+        return None
     detail = (
         f"即将执行服务停止操作: {action}\n"
         f"Hub PID: {snapshot.hub_pid or '-'}\n"
@@ -139,7 +153,7 @@ def _broadcast_pre_stop_notice(action: str):
 
 def schedule_named_action(action: str, *, delay_seconds: float = 1.0) -> ServiceResult:
     cleaned_action = action.strip()
-    if cleaned_action not in {"start", "stop", "restart", "restart-bridge", "start-onebot-runtime", "stop-onebot-runtime", "restart-onebot-runtime", "start-qq-bridge", "stop-qq-bridge", "restart-qq-bridge", "prepare-qq-login", "emergency-stop"}:
+    if cleaned_action not in {"start", "start-weixin", "stop", "restart", "restart-bridge", "start-onebot-runtime", "stop-onebot-runtime", "restart-onebot-runtime", "start-qq-bridge", "stop-qq-bridge", "restart-qq-bridge", "restart-qq-stack", "prepare-qq-login", "emergency-stop"}:
         return ServiceResult(ok=False, message=f"未知操作：{cleaned_action or action}")
 
     safe_delay = max(0.0, float(delay_seconds))
@@ -294,9 +308,13 @@ def submit_hub_task(
         task = _parse_hub_task(response.payload.get("task"))
         task_id = task.id if task is not None else ""
         message = f"任务已入队：{task_id or request_id}"
+        if source.strip().lower().startswith("qq"):
+            return ServiceResult(ok=True, message=message)
         notice = broadcast_weixin_notice_by_kind("task", "提交任务", message)
         return ServiceResult(ok=True, message=f"{message} | {notice.summary}")
     message = f"提交失败：{response.error or 'unknown error'}"
+    if source.strip().lower().startswith("qq"):
+        return ServiceResult(ok=False, message=message)
     notice = broadcast_weixin_notice_by_kind("task", "提交任务", message)
     return ServiceResult(ok=False, message=f"{message} | {notice.summary}")
 

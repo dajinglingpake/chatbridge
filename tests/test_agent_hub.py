@@ -116,6 +116,13 @@ class AgentHubCancellationTests(unittest.TestCase):
             self.assertEqual(task_id, canceled_task["id"])
 
             self._wait_until(lambda: str((hub.get_task(task_id) or {}).get("status") or "") == "canceled")
+            self._wait_until(
+                lambda: (
+                    task_id not in hub.running_task_pids
+                    and hub.runtimes["main"].status == "idle"
+                    and hub.runtimes["main"].queue_size == 0
+                )
+            )
 
             final_task = hub.get_task(task_id) or {}
             self.assertEqual("canceled", final_task.get("status"))
@@ -124,6 +131,7 @@ class AgentHubCancellationTests(unittest.TestCase):
             runtime = hub.runtimes["main"]
             self.assertEqual("idle", runtime.status)
             self.assertEqual(0, runtime.failure_count)
+            hub.queues["main"].join()
 
     def test_render_codex_status_runs_in_hub_context(self) -> None:
         workdir = self.temp_path / "workspace"
@@ -228,7 +236,16 @@ class AgentHubCancellationTests(unittest.TestCase):
                             "workdir": str(workdir),
                         },
                     ],
-                    "agents": [],
+                    "agents": [
+                        {
+                            "id": "main",
+                            "runtime": {
+                                "status": "running",
+                                "queue_size": 2,
+                                "updated_at": "2026-04-24T00:02:00",
+                            },
+                        }
+                    ],
                 },
                 ensure_ascii=False,
             ),
@@ -247,6 +264,9 @@ class AgentHubCancellationTests(unittest.TestCase):
         self.assertIn("before this task could run", str(queued.get("error") or ""))
         self.assertEqual("unknown_after_restart", running.get("status"))
         self.assertIn("while this task was running", str(running.get("error") or ""))
+        runtime = hub.runtimes["main"]
+        self.assertEqual("idle", runtime.status)
+        self.assertEqual(0, runtime.queue_size)
 
     def test_progress_update_pushes_task_update_to_bridge_ipc(self) -> None:
         workdir = self.temp_path / "workspace"
@@ -329,6 +349,77 @@ class AgentHubCancellationTests(unittest.TestCase):
         self.assertEqual("task_update", action)
         self.assertEqual("task-qq-push-001", payload["task"]["id"])
         self.assertEqual("qq", mocked_push.call_args.kwargs["channel"])
+
+    def test_qq_task_result_does_not_broadcast_weixin_notice(self) -> None:
+        workdir = self.temp_path / "workspace"
+        session_file = self.temp_path / "sessions" / "main.txt"
+        workdir.mkdir(parents=True, exist_ok=True)
+        session_file.parent.mkdir(parents=True, exist_ok=True)
+        config = HubConfig(
+            codex_command="codex",
+            claude_command="claude",
+            opencode_command="opencode",
+            agents=[AgentConfig("qq", "QQ", str(workdir), str(session_file), backend="codex")],
+        )
+        task = HubTask(
+            id="task-qq-notify-001",
+            agent_id="qq",
+            agent_name="QQ",
+            backend="codex",
+            source="qq",
+            sender_id="qq:private:10001",
+            prompt="hello",
+            status="succeeded",
+            created_at="2026-06-26T00:00:00",
+            session_name="qq-private-10001",
+            workdir=str(workdir),
+            output="done",
+        )
+        with (
+            patch("agent_hub.STATE_PATH", self.temp_path / "state" / "agent_hub_state.json"),
+            patch("agent_hub.discover_external_agent_processes", return_value=[]),
+            patch("agent_hub.broadcast_weixin_notice_by_kind") as mocked_broadcast,
+        ):
+            hub = MultiCodexHub(config)
+            hub._notify_task_result(task, succeeded=True)
+            hub._notify_task_canceled(task)
+
+        mocked_broadcast.assert_not_called()
+
+    def test_desktop_task_result_still_broadcasts_weixin_notice(self) -> None:
+        workdir = self.temp_path / "workspace"
+        session_file = self.temp_path / "sessions" / "main.txt"
+        workdir.mkdir(parents=True, exist_ok=True)
+        session_file.parent.mkdir(parents=True, exist_ok=True)
+        config = HubConfig(
+            codex_command="codex",
+            claude_command="claude",
+            opencode_command="opencode",
+            agents=[AgentConfig("main", "Main", str(workdir), str(session_file), backend="codex")],
+        )
+        task = HubTask(
+            id="task-desktop-notify-001",
+            agent_id="main",
+            agent_name="Main",
+            backend="codex",
+            source="desktop",
+            sender_id="",
+            prompt="hello",
+            status="succeeded",
+            created_at="2026-06-26T00:00:00",
+            session_name="default",
+            workdir=str(workdir),
+            output="done",
+        )
+        with (
+            patch("agent_hub.STATE_PATH", self.temp_path / "state" / "agent_hub_state.json"),
+            patch("agent_hub.discover_external_agent_processes", return_value=[]),
+            patch("agent_hub.broadcast_weixin_notice_by_kind") as mocked_broadcast,
+        ):
+            hub = MultiCodexHub(config)
+            hub._notify_task_result(task, succeeded=True)
+
+        mocked_broadcast.assert_called_once()
 
     def test_progress_update_still_succeeds_when_bridge_push_fails(self) -> None:
         workdir = self.temp_path / "workspace"

@@ -13,19 +13,19 @@ WEIXIN_RESTART_SCOPES = {
 }
 
 QQ_RESTART_SCOPES = {
-    "qq": "restart-qq-bridge",
+    "qq": "restart-qq-stack",
     "qq-bridge": "restart-qq-bridge",
     "bridge": "restart-qq-bridge",
     "onebot": "restart-onebot-runtime",
     "onebot-runtime": "restart-onebot-runtime",
-    "all": "restart",
+    "all": "restart-qq-stack",
 }
 
 MCP_RESTART_SCOPES = {
     **WEIXIN_RESTART_SCOPES,
     "weixin": "restart-bridge",
     "wechat": "restart-bridge",
-    "qq": "restart-qq-bridge",
+    "qq": "restart-qq-stack",
     "qq-bridge": "restart-qq-bridge",
     "onebot": "restart-onebot-runtime",
     "onebot-runtime": "restart-onebot-runtime",

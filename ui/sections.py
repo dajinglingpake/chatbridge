@@ -270,13 +270,13 @@ def render_home_section(
                         ui.label(model.home.badge_text).classes(f"{badge_class} self-start")
                 with ui.row().classes("gap-2 pt-4 flex-wrap"):
                     if active_mode == "weixin":
-                        ui.button(_tr(t, "ui.web.action.switch_weixin_mode", "切换到微信模式"), on_click=lambda: on_run_action("start"), icon="play_arrow")
+                        ui.button(_tr(t, "ui.web.action.switch_weixin_mode", "切换到微信模式"), on_click=lambda: on_run_action("start-weixin"), icon="play_arrow")
                         ui.button(_tr(t, "ui.primary.stop.label", "停止服务"), on_click=lambda: on_run_action("stop"), icon="stop")
                         ui.button(_tr(t, "ui.web.action.restart", "重启服务"), on_click=lambda: on_run_action("restart"), icon="restart_alt")
                     else:
                         ui.button(_tr(t, "ui.primary.start.label", "启动服务"), on_click=lambda: on_run_action("start-qq-bridge"), icon="play_arrow")
-                        ui.button(_tr(t, "ui.primary.stop.label", "停止服务"), on_click=lambda: on_run_action("stop-qq-bridge"), icon="stop")
-                        ui.button(_tr(t, "ui.web.action.restart", "重启服务"), on_click=lambda: on_run_action("restart-qq-bridge"), icon="restart_alt")
+                        ui.button(_tr(t, "ui.primary.stop.label", "停止服务"), on_click=lambda: on_run_action("stop"), icon="stop")
+                        ui.button(_tr(t, "ui.web.action.restart", "重启服务"), on_click=lambda: on_run_action("restart-qq-stack"), icon="restart_alt")
                         ui.button(_tr(t, "ui.web.action.restart_onebot_runtime", "重启 QQ OneBot"), on_click=lambda: on_run_action("restart-onebot-runtime"), icon="restart_alt").props("outline")
                     ui.button(_tr(t, "ui.web.action.emergency_stop", "紧急停止"), on_click=lambda: on_run_action("emergency-stop"), color="negative", icon="warning")
 

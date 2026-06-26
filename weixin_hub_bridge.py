@@ -25,23 +25,34 @@ from bridge_config import APP_DIR, CONFIG_PATH, WEIXIN_ACCOUNTS_DIR, BridgeConfi
 from core.accounts import account_conversation_path, load_account_context_tokens, save_account_context_tokens
 from core.app_service import schedule_named_action
 from core.bridge_command_catalog import HELP_MESSAGE_KEYS, normalize_command_text, parse_bridge_command
+from core.bridge_command_router import BridgeCommandRouter
+from core.bridge_conversation_runtime import BridgeConversationRuntime
 from core.bridge_control_runtime import BridgeControlRuntime
 from core.bridge_message_control import normalize_context_left_percent, normalize_message_for_dedupe
 from core.bridge_pending_tasks import JsonBackedTaskStore
 from core.bridge_runtime import (
     BridgeMessageRuntime,
-    BridgePromptDecision,
     BridgeSubmittedTask,
     IncomingBridgeMessage,
     PendingMediaContextStore,
-    build_prompt_with_media,
 )
 from core.bridge_media_control_runtime import BridgeMediaControlRuntime
 from core.bridge_native_menu_runtime import BridgeNativeMenuRuntime, PERMISSION_MODE_PRESETS
 from core.bridge_notify_control_runtime import BridgeNotifyControlRuntime
+from core.bridge_prompt_runtime import BridgePromptRuntime
 from core.bridge_service_control_runtime import BridgeServiceControlRuntime, WEIXIN_RESTART_SCOPES
 from core.bridge_session_control_runtime import BridgeSessionControlRuntime
+from core.bridge_session_utils import (
+    allocate_session_name,
+    create_session_meta,
+    resolve_fallback_session_target,
+    sanitize_project_name,
+    sanitize_session_name,
+    split_named_path_args,
+)
 from core.bridge_task_delivery import TaskUpdateDeliveryController
+from core.bridge_task_query_runtime import BridgeTaskQueryRuntime
+from core.bridge_task_submit_runtime import BridgeTaskSubmitContext, BridgeTaskSubmitRuntime
 from core.codex_model_catalog import display_model, display_reasoning_effort, load_codex_model_catalog
 from core.context_relations import build_context_relation_lines
 from core.http_json import request_json
@@ -242,10 +253,20 @@ class WeixinBridge:
             now_seconds=lambda: int(time.time()),
         )
         self.pending_media_context = self.pending_media_store.contexts
+        self.conversation_runtime = BridgeConversationRuntime(
+            ensure_conversation=self._ensure_conversation,
+            default_backend=lambda: self.config.default_backend,
+            now=now_iso,
+            normalize_backend=normalize_backend,
+        )
+        self.task_query_runtime = BridgeTaskQueryRuntime(
+            ipc_request=lambda action, payload, timeout_seconds: self._ipc_request(action, payload, timeout_seconds=timeout_seconds),
+            default_backend=lambda: self.config.default_backend,
+        )
         self.message_runtime = BridgeMessageRuntime(
             pending_media=self.pending_media_store,
-            resolve_session=self._resolve_runtime_session,
-            prepare_prompt=self._prepare_runtime_prompt,
+            resolve_session=self.conversation_runtime.resolve_session,
+            prepare_prompt=lambda message, session: self.prompt_runtime.prepare_for_session(message, session),
             submit_task=self._submit_runtime_task,
             remember_pending_task=self._remember_runtime_pending_task,
             send_reply=self._send_runtime_reply,
@@ -265,8 +286,11 @@ class WeixinBridge:
             default_backend=lambda: self.config.default_backend,
             agent_id=lambda: self.config.backend_id,
             session_name=lambda sender_id: self._current_session_name(sender_id),
-            get_task=self._get_task_for_control,
-            find_latest_sender_task=lambda sender_id, allowed_statuses: self._find_latest_sender_task(sender_id, allowed_statuses=allowed_statuses),
+            get_task=self.task_query_runtime.get_task,
+            find_latest_sender_task=lambda sender_id, allowed_statuses: self.task_query_runtime.find_latest_sender_task(
+                sender_id,
+                allowed_statuses=allowed_statuses,
+            ),
             ipc_request=lambda action, payload, timeout_seconds: self._ipc_request(action, payload, timeout_seconds=timeout_seconds),
             retry_source="wechat",
             unsupported_message=None,
@@ -293,6 +317,15 @@ class WeixinBridge:
             translate=lambda key, **kwargs: self._t(key, **kwargs),
             send_test_notice=self._send_notify_test_notice,
         )
+        self.command_router = BridgeCommandRouter(
+            (
+                self.control_runtime,
+                self.session_control_runtime,
+                self.service_control_runtime,
+                self.notify_control_runtime,
+            ),
+            unknown_bridge_command_reply=lambda: self._t("bridge.command.unknown"),
+        )
         self.media_control_runtime = BridgeMediaControlRuntime(
             translate=lambda key, **kwargs: self._t(key, **kwargs),
             resolve_file=lambda raw_path: self._resolve_shareable_project_file(raw_path),
@@ -305,6 +338,23 @@ class WeixinBridge:
             resolve_session_model=self._resolve_session_model,
             resolve_session_permission_mode=self._resolve_session_permission_mode,
             display_permission_mode=self._display_permission_mode,
+        )
+        self.prompt_runtime = BridgePromptRuntime(
+            native_menu=self.native_menu_runtime,
+            media_control=self.media_control_runtime,
+            handle_control=self.command_router.handle,
+            send_reply=self._send_runtime_reply,
+            save_conversations=self._save_conversations,
+            unsupported_agent_slash_reply=lambda command: self._t("bridge.passthrough.unsupported", command=command),
+            unsupported_bridge_command_reply=lambda command: self._t("bridge.passthrough.unsupported", command=command),
+            render_local_passthrough=self._render_local_codex_status,
+            on_handled=self._runtime_prompt_handled,
+            save_state=self._save_state,
+        )
+        self.task_submit_runtime = BridgeTaskSubmitRuntime(
+            ipc_request=lambda action, payload, timeout_seconds: self._ipc_request(action, payload, timeout_seconds=timeout_seconds),
+            resolve_context=self._resolve_task_submit_context,
+            on_complete=self._task_submit_completed,
         )
         self._recent_message_keys: list[str] = []
         self._recent_message_fingerprints: dict[str, float] = {}
@@ -714,111 +764,16 @@ class WeixinBridge:
         self.state.record_failed()
         self._save_state()
 
-    def _resolve_runtime_session(self, message: IncomingBridgeMessage) -> dict[str, Any]:
-        binding = self._ensure_conversation(message.sender_id)
-        session_name, session_meta = binding.get_current_session(
-            default_backend=self.config.default_backend,
-            now=now_iso(),
-            normalize_backend=normalize_backend,
+    def _runtime_prompt_handled(self, message: IncomingBridgeMessage, route: str, command: str, session: Any) -> None:
+        session_name = str(session.get("session_name") or "default") if isinstance(session, dict) else "default"
+        self._append_message_audit(
+            sender_id=message.sender_id,
+            text=message.text,
+            route=route,
+            session_name=session_name,
+            command=command,
         )
-        return {"binding": binding, "session_name": session_name, "session_meta": session_meta}
-
-    def _prepare_runtime_prompt(self, message: IncomingBridgeMessage, session: dict[str, Any]) -> BridgePromptDecision:
-        binding = session["binding"]
-        session_name = str(session["session_name"] or "")
-        session_meta = session["session_meta"]
-        text = message.text
-        active_native_menu = self.native_menu_runtime.has_active_menu(session_meta)
-        passthrough_prompt = self.native_menu_runtime.passthrough_prompt(text)
-        if active_native_menu and (passthrough_prompt is None or not self.native_menu_runtime.is_special_command(passthrough_prompt)):
-            native_result = self.native_menu_runtime.handle_reply(session_name, session_meta, text)
-            if native_result.handled:
-                self._append_message_audit(
-                    sender_id=message.sender_id,
-                    text=text,
-                    route="native_menu_reply",
-                    session_name=session_name or "default",
-                    command=session_meta.native_menu_command,
-                )
-                self._send_runtime_reply(message.reply_target, native_result.reply)
-                self.state.record_handled()
-                self._save_conversations()
-                self._save_state()
-                return BridgePromptDecision(handled=True)
-        if passthrough_prompt is None:
-            media_result = self.media_control_runtime.handle(message.reply_target, text)
-            if media_result.handled:
-                self._append_message_audit(
-                    sender_id=message.sender_id,
-                    text=text,
-                    route="media_command",
-                    session_name=session_name or "default",
-                    command=self._normalize_command_text(text).split(maxsplit=1)[0].lower(),
-                )
-                if media_result.reply:
-                    self._send_runtime_reply(message.reply_target, media_result.reply)
-                self.state.record_handled()
-                self._save_state()
-                return BridgePromptDecision(handled=True)
-            reply, handled = self._handle_control_command(message.sender_id, text)
-            if handled:
-                self._append_message_audit(
-                    sender_id=message.sender_id,
-                    text=text,
-                    route="control_command",
-                    session_name=session_name or "default",
-                    command=self._normalize_command_text(text).split(maxsplit=1)[0].lower(),
-                )
-                if reply:
-                    self._send_runtime_reply(message.reply_target, reply)
-                    self.state.record_handled()
-                self._save_state()
-                return BridgePromptDecision(handled=True)
-            return BridgePromptDecision(prompt=text.strip())
-
-        local_codex_status = self._render_local_codex_status(session_name, session_meta, passthrough_prompt)
-        if local_codex_status is not None:
-            self._append_message_audit(
-                sender_id=message.sender_id,
-                text=text,
-                route="passthrough_local_status",
-                session_name=session_name or "default",
-                command=passthrough_prompt.strip().lower(),
-            )
-            self._send_runtime_reply(message.reply_target, local_codex_status)
-            self.state.record_handled()
-            self._save_state()
-            return BridgePromptDecision(handled=True)
-        special_native_menu = self.native_menu_runtime.start(session_name, session_meta, passthrough_prompt)
-        if special_native_menu.handled:
-            self._append_message_audit(
-                sender_id=message.sender_id,
-                text=text,
-                route="native_menu_start",
-                session_name=session_name or "default",
-                command=passthrough_prompt.strip().lower(),
-            )
-            self._send_runtime_reply(message.reply_target, special_native_menu.reply)
-            self.state.record_handled()
-            self._save_conversations()
-            self._save_state()
-            return BridgePromptDecision(handled=True)
-        if self.native_menu_runtime.looks_like_agent_slash_command(passthrough_prompt):
-            self._append_message_audit(
-                sender_id=message.sender_id,
-                text=text,
-                route="passthrough_unsupported",
-                session_name=session_name or "default",
-                command=passthrough_prompt.strip().lower(),
-            )
-            self._send_runtime_reply(
-                message.reply_target,
-                self._t("bridge.passthrough.unsupported", command=passthrough_prompt.strip()),
-            )
-            self.state.record_handled()
-            self._save_state()
-            return BridgePromptDecision(handled=True)
-        return BridgePromptDecision(prompt=passthrough_prompt, passthrough=True)
+        self.state.record_handled()
 
     def _runtime_empty_prompt(self, message: IncomingBridgeMessage, _session: dict[str, Any]) -> None:
         self._append_message_audit(
@@ -855,39 +810,26 @@ class WeixinBridge:
         prompt: str,
         _passthrough: bool,
     ) -> BridgeSubmittedTask:
+        return self.task_submit_runtime.submit(message, session, prompt)
+
+    def _resolve_task_submit_context(self, message: IncomingBridgeMessage, session: dict[str, Any]) -> BridgeTaskSubmitContext:
         session_name = str(session["session_name"] or "")
         session_meta = session["session_meta"]
-        task_backend = session_meta.backend
-        task_workdir = self._resolve_session_workdir(session_meta)
-        task_model = self._effective_session_model(session_meta)
-        submit_started = time.perf_counter()
-        response = self._ipc_request(
-            "submit_task",
-            {
-                "agent_id": self.config.backend_id,
-                "prompt": prompt,
-                "source": message.source,
-                "sender_id": message.sender_id,
-                "session_name": session_name,
-                "backend": task_backend,
-                "workdir": task_workdir,
-                "model": task_model,
-                "reasoning_effort": session_meta.reasoning_effort,
-                "permission_mode": session_meta.permission_mode,
-                "bridge_conversations_path": str(CONVERSATION_PATH),
-                "bridge_event_log_path": str(EVENT_LOG_PATH),
-                "context_token": message.context_token,
-            },
-            timeout_seconds=60,
+        return BridgeTaskSubmitContext(
+            agent_id=self.config.backend_id,
+            session_name=session_name,
+            backend=session_meta.backend,
+            workdir=self._resolve_session_workdir(session_meta),
+            model=self._effective_session_model(session_meta),
+            reasoning_effort=session_meta.reasoning_effort,
+            permission_mode=session_meta.permission_mode,
+            bridge_conversations_path=str(CONVERSATION_PATH),
+            bridge_event_log_path=str(EVENT_LOG_PATH),
+            context_token=message.context_token,
         )
-        self._log_perf("submit_task_ipc", submit_started, sender_id=message.sender_id, status="ok" if response.ok else "not_ok")
-        if not response.ok:
-            raise RuntimeError(str(response.error or "submit_task failed"))
-        task = response.payload.get("task") or {}
-        task_id = str(task.get("id") or "")
-        if not task_id:
-            raise RuntimeError("submit_task returned invalid task payload")
-        return BridgeSubmittedTask(task_id=task_id, payload=task)
+
+    def _task_submit_completed(self, message: IncomingBridgeMessage, _context: BridgeTaskSubmitContext, started_at: float, response: Any) -> None:
+        self._log_perf("submit_task_ipc", started_at, sender_id=message.sender_id, status="ok" if response.ok else "not_ok")
 
     def _remember_runtime_pending_task(self, message: IncomingBridgeMessage, session: dict[str, Any], submitted: BridgeSubmittedTask) -> None:
         session_name = str(session["session_name"] or "")
@@ -1873,10 +1815,6 @@ class WeixinBridge:
         safe = self._safe_path_part(candidate)
         return safe if safe and safe != "unknown" else fallback
 
-    @staticmethod
-    def _build_prompt_with_media(prompt: str, attachments: list[dict[str, str]], errors: list[str]) -> str:
-        return build_prompt_with_media(prompt, attachments, errors)
-
     def _message_key(self, msg: dict[str, Any], text: str) -> str:
         media_fingerprint: list[dict[str, str]] = []
         for item in msg.get("item_list") or []:
@@ -1922,22 +1860,7 @@ class WeixinBridge:
         return False
 
     def _handle_control_command(self, sender_id: str, text: str) -> tuple[str, bool]:
-        common_result = self.control_runtime.handle(sender_id, text)
-        if common_result.handled:
-            return common_result.reply, True
-        session_result = self.session_control_runtime.handle(sender_id, text)
-        if session_result.handled:
-            return session_result.reply, True
-        service_result = self.service_control_runtime.handle(sender_id, text)
-        if service_result.handled:
-            return service_result.reply, True
-        notify_result = self.notify_control_runtime.handle(sender_id, text)
-        if notify_result.handled:
-            return notify_result.reply, True
-        parsed = parse_bridge_command(text)
-        if parsed is None or parsed.is_passthrough:
-            return "", False
-        return self._t("bridge.command.unknown"), True
+        return self.command_router.handle(sender_id, text)
 
     def _send_notify_test_notice(self) -> str:
         result = broadcast_weixin_notice_by_kind(
@@ -1980,12 +1903,6 @@ class WeixinBridge:
         self.conversations.pop(sender_id, None)
         self._save_conversations()
 
-    def _get_task_for_control(self, task_id: str) -> HubTask | None:
-        lookup = self._ipc_request("get_task", {"task_id": task_id}, timeout_seconds=5)
-        if not lookup.ok:
-            return None
-        return HubTask.from_dict(lookup.payload.get("task"), default_backend=self.config.default_backend)
-
     def _render_control_status(self, sender_id: str) -> str:
         binding = self._ensure_conversation(sender_id)
         current_session, current_meta = binding.get_current_session(
@@ -1995,32 +1912,11 @@ class WeixinBridge:
         )
         return self._render_status(binding, current_session, current_meta.backend)
 
-    def _find_latest_sender_task(self, sender_id: str, *, allowed_statuses: set[str] | None = None) -> HubTask | None:
-        sender_tasks = self._load_sender_tasks(sender_id)
-        if allowed_statuses is not None:
-            sender_tasks = [task for task in sender_tasks if task.status in allowed_statuses]
-        return sender_tasks[0] if sender_tasks else None
-
     def _load_sender_tasks(self, sender_id: str) -> list[HubTask]:
-        state = self._ipc_request("state", {}, timeout_seconds=5)
-        if not state.ok:
-            return []
-        sender_tasks: list[HubTask] = []
-        for raw_task in state.payload.get("tasks") or []:
-            task = HubTask.from_dict(raw_task, default_backend=self.config.default_backend)
-            if task is None or task.sender_id != sender_id:
-                continue
-            sender_tasks.append(task)
-        return sorted(
-            sender_tasks,
-            key=lambda item: item.finished_at or item.started_at or item.created_at,
-            reverse=True,
-        )
+        return self.task_query_runtime.load_sender_tasks(sender_id)
 
     def _resolve_fallback_session_target(self, binding: WeixinConversationBinding) -> str:
-        if binding.last_regular_session and binding.last_regular_session in binding.sessions:
-            return binding.last_regular_session
-        return next(iter(binding.sessions.keys()), "")
+        return resolve_fallback_session_target(binding)
 
     def _render_session_list(
         self,
@@ -2906,10 +2802,12 @@ class WeixinBridge:
         reasoning_effort: str = "",
         permission_mode: str = "",
     ) -> WeixinSessionMeta:
-        return WeixinSessionMeta(
-            backend=normalize_backend(str(backend or self.config.default_backend)),
-            created_at=now_iso(),
-            updated_at=now_iso(),
+        return create_session_meta(
+            WeixinSessionMeta,
+            backend=backend,
+            default_backend=self.config.default_backend,
+            now=now_iso(),
+            normalize_backend=normalize_backend,
             workdir=workdir.strip(),
             model=model.strip(),
             reasoning_effort=reasoning_effort.strip(),
@@ -2917,20 +2815,13 @@ class WeixinBridge:
         )
 
     def _allocate_session_name(self, binding: WeixinConversationBinding, requested: str) -> str:
-        sessions = binding.sessions
-        base = self._sanitize_session_name(requested, fallback="session")
-        if base not in sessions:
-            return base
-        index = 2
-        while f"{base}-{index}" in sessions:
-            index += 1
-        return f"{base}-{index}"
+        return allocate_session_name(binding, requested)
 
     def _sanitize_session_name(self, requested: str, *, fallback: str) -> str:
-        return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in requested).strip("-_") or fallback
+        return sanitize_session_name(requested, fallback=fallback)
 
     def _sanitize_project_name(self, requested: str) -> str:
-        return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in requested).strip("-_")
+        return sanitize_project_name(requested)
 
     def _store_pending_restart_notice(self, sender_id: str, *, scope: str) -> None:
         cleaned_sender_id = str(sender_id or "").strip()
@@ -2948,13 +2839,7 @@ class WeixinBridge:
 
     @staticmethod
     def _split_named_path_args(raw: str) -> tuple[str, str]:
-        cleaned = raw.strip()
-        if not cleaned:
-            return "", ""
-        parts = cleaned.split(maxsplit=1)
-        if len(parts) < 2:
-            return parts[0], ""
-        return parts[0].strip(), parts[1].strip()
+        return split_named_path_args(raw)
 
     def _load_account(self) -> dict[str, Any]:
         self._ensure_local_account_storage()
@@ -3033,18 +2918,6 @@ class WeixinBridge:
     def _save_pending_tasks(self) -> None:
         with self._pending_tasks_save_lock:
             self.pending_task_store.save(self.pending_tasks)
-
-    def _load_pending_media_context(self) -> dict[str, list[dict[str, str]]]:
-        return self.pending_media_store.contexts
-
-    def _save_pending_media_context(self) -> None:
-        self.pending_media_store.save()
-
-    def _remember_pending_media_context(self, sender_id: str, attachments: list[dict[str, str]]) -> None:
-        self.pending_media_store.remember(str(sender_id or "").strip(), attachments)
-
-    def _consume_pending_media_context(self, sender_id: str) -> list[dict[str, str]]:
-        return self.pending_media_store.consume(str(sender_id or "").strip())
 
     def _load_conversations(self) -> dict[str, Any]:
         source_path = self.conversation_path

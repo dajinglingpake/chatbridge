@@ -3,9 +3,10 @@ from __future__ import annotations
 import subprocess
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from core.app_service import ServiceResult, run_named_action, schedule_named_action
+from core.app_service import ServiceResult, run_named_action, schedule_named_action, submit_hub_task
 from core.weixin_notifier import NoticeResult
 
 
@@ -60,13 +61,33 @@ class AppServiceTests(unittest.TestCase):
             patch("core.app_service.get_runtime_snapshot") as mocked_snapshot,
             patch("core.app_service.time.sleep") as mocked_sleep,
         ):
-            mocked_snapshot.return_value = MagicMock(hub_pid=101, bridge_pid=202)
+            mocked_snapshot.return_value = MagicMock(hub_pid=101, bridge_pid=202, bridge_running=True)
             result = run_named_action("stop")
 
         self.assertTrue(result.ok)
         self.assertEqual(["notify", "stop"], events)
         mocked_notify.assert_called_once()
         mocked_sleep.assert_called_once()
+
+    def test_stop_action_in_qq_mode_does_not_notify_weixin(self) -> None:
+        with (
+            patch("core.app_service.stop_all", return_value=["QQ Bridge stopped", "OneBot stopped", "Hub stopped"]) as mocked_stop,
+            patch("core.app_service.broadcast_weixin_notice_by_kind") as mocked_notify,
+            patch("core.app_service.get_runtime_snapshot") as mocked_snapshot,
+        ):
+            mocked_snapshot.return_value = MagicMock(
+                hub_pid=101,
+                bridge_pid=None,
+                onebot_runtime_pid=303,
+                qq_bridge_pid=404,
+                bridge_running=False,
+            )
+            result = run_named_action("stop")
+
+        self.assertTrue(result.ok)
+        self.assertEqual("QQ Bridge stopped | OneBot stopped | Hub stopped", result.message)
+        mocked_stop.assert_called_once()
+        mocked_notify.assert_not_called()
 
     def test_start_action_keeps_post_action_notice(self) -> None:
         events: list[str] = []
@@ -91,6 +112,18 @@ class AppServiceTests(unittest.TestCase):
         self.assertEqual(["start", "notify"], events)
         mocked_notify.assert_called_once()
 
+    def test_start_weixin_action_uses_weixin_notice(self) -> None:
+        with (
+            patch("core.app_service.start_all", return_value=["QQ stopped", "Hub started", "Bridge started"]) as mocked_start,
+            patch("core.app_service.broadcast_weixin_notice_by_kind", return_value=NoticeResult(sent_count=1, recipient_count=1)) as mocked_notify,
+        ):
+            result = run_named_action("start-weixin")
+
+        self.assertTrue(result.ok)
+        self.assertIn("已通知 1 个微信会话", result.message)
+        mocked_start.assert_called_once()
+        mocked_notify.assert_called_once()
+
     def test_qq_bridge_action_does_not_notify_weixin(self) -> None:
         with (
             patch("core.app_service.restart_qq_bridge", return_value=["QQ Bridge stopped", "QQ Bridge started"]) as mocked_restart,
@@ -113,4 +146,19 @@ class AppServiceTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual("OneBot restarted", result.message)
         mocked_restart.assert_called_once()
+        mocked_notify.assert_not_called()
+
+    def test_submit_qq_web_task_does_not_notify_weixin(self) -> None:
+        response = SimpleNamespace(ok=True, payload={"task": {"id": "task-qq-web-001"}}, error="")
+        with (
+            patch("core.app_service.create_request", return_value="req-qq-web") as mocked_create,
+            patch("core.app_service.wait_for_response", return_value=response),
+            patch("core.app_service.broadcast_weixin_notice_by_kind") as mocked_notify,
+        ):
+            result = submit_hub_task("main", "hello", source="qq-web")
+
+        self.assertTrue(result.ok)
+        self.assertEqual("任务已入队：task-qq-web-001", result.message)
+        payload = mocked_create.call_args.args[1]
+        self.assertEqual("qq-web", payload["source"])
         mocked_notify.assert_not_called()

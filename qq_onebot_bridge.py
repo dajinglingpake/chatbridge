@@ -15,6 +15,8 @@ from typing import Any
 from agent_hub import HubConfig
 from bridge_config import APP_DIR, BridgeConfig, normalize_backend
 from core.bridge_command_catalog import QQ_HELP_MESSAGE_KEYS
+from core.bridge_command_router import BridgeCommandRouter
+from core.bridge_conversation_runtime import BridgeConversationRuntime
 from core.bridge_control_runtime import BridgeControlRuntime
 from core.bridge_message_control import (
     normalize_context_left_percent,
@@ -22,19 +24,28 @@ from core.bridge_message_control import (
 from core.bridge_pending_tasks import BridgePendingReplyTask, JsonBackedTaskStore
 from core.bridge_runtime import (
     BridgeMessageRuntime,
-    BridgePromptDecision,
     BridgeSubmittedTask,
     IncomingBridgeMessage,
     PendingMediaContextStore,
-    build_prompt_with_media,
 )
 from core.app_service import schedule_named_action
 from core.bridge_media_control_runtime import BridgeMediaControlRuntime
 from core.bridge_native_menu_runtime import BridgeNativeMenuRuntime
 from core.bridge_notify_control_runtime import BridgeNotifyControlRuntime
+from core.bridge_prompt_runtime import BridgePromptRuntime
 from core.bridge_service_control_runtime import BridgeServiceControlRuntime, QQ_RESTART_SCOPES
 from core.bridge_session_control_runtime import BridgeSessionControlRuntime
+from core.bridge_session_utils import (
+    allocate_session_name,
+    create_session_meta,
+    resolve_fallback_session_target,
+    sanitize_project_name,
+    sanitize_session_name,
+    split_named_path_args,
+)
 from core.bridge_task_delivery import PollingTaskDeliveryController, TaskUpdateDeliveryController, format_bridge_progress_reply, format_bridge_task_reply
+from core.bridge_task_query_runtime import BridgeTaskQueryRuntime
+from core.bridge_task_submit_runtime import BridgeTaskSubmitContext, BridgeTaskSubmitRuntime
 from core.codex_model_catalog import load_codex_model_catalog
 from core.json_store import load_json, save_json
 from core.runtime_paths import RUNTIME_DIR, SERVICE_ACTION_STATE_PATH, SESSION_DIR, STATE_DIR, WORKSPACE_DIR
@@ -143,14 +154,21 @@ class QQOneBotBridge:
             now_seconds=now_seconds,
         )
         self.pending_media_context = self.pending_media_store.contexts
+        self.task_query_runtime = BridgeTaskQueryRuntime(
+            ipc_request=lambda action, payload, timeout_seconds: self._ipc_request(action, payload, timeout_seconds=timeout_seconds),
+            default_backend=lambda: self.config.default_backend,
+        )
         self.control_runtime = BridgeControlRuntime(
             help_message_keys=QQ_HELP_MESSAGE_KEYS,
             translate=lambda key, **kwargs: self._t(key, **kwargs),
             default_backend=lambda: self.config.default_backend,
             agent_id=lambda: self.agent_id,
             session_name=self._session_name,
-            get_task=self._get_task,
-            find_latest_sender_task=lambda sender_key, allowed_statuses: self._find_latest_sender_task(sender_key, allowed_statuses=allowed_statuses),
+            get_task=self.task_query_runtime.get_task,
+            find_latest_sender_task=lambda sender_key, allowed_statuses: self.task_query_runtime.find_latest_sender_task(
+                sender_key,
+                allowed_statuses=allowed_statuses,
+            ),
             ipc_request=lambda action, payload, timeout_seconds: self._ipc_request(action, payload, timeout_seconds=timeout_seconds),
             retry_source="qq",
             unsupported_message=None,
@@ -164,7 +182,7 @@ class QQOneBotBridge:
             schedule_action=lambda action: schedule_named_action(action, delay_seconds=1.0).message,
             render_usage=lambda: self._t("bridge.restart.qq.usage"),
             state_path=SERVICE_ACTION_STATE_PATH,
-            default_restart_scope="qq-bridge",
+            default_restart_scope="all",
             restart_scopes=QQ_RESTART_SCOPES,
             translate=lambda key, **kwargs: self._t(key, **kwargs),
         )
@@ -172,6 +190,20 @@ class QQOneBotBridge:
             config=self.config,
             translate=lambda key, **kwargs: self._t(key, **kwargs),
             send_test_notice=lambda: self._t("bridge.notify.qq.test_unsupported"),
+        )
+        self.command_router = BridgeCommandRouter(
+            (
+                self.control_runtime,
+                self.session_control_runtime,
+                self.service_control_runtime,
+                self.notify_control_runtime,
+            )
+        )
+        self.conversation_runtime = BridgeConversationRuntime(
+            ensure_conversation=self._ensure_conversation,
+            default_backend=lambda: self.config.default_backend,
+            now=self._now_iso,
+            normalize_backend=self._normalize_backend,
         )
         self.media_control_runtime = BridgeMediaControlRuntime(
             translate=lambda key, **kwargs: self._t(key, **kwargs),
@@ -185,10 +217,26 @@ class QQOneBotBridge:
             resolve_session_model=self._resolve_session_model,
             resolve_session_permission_mode=self._resolve_session_permission_mode,
         )
+        self.prompt_runtime = BridgePromptRuntime(
+            native_menu=self.native_menu_runtime,
+            media_control=self.media_control_runtime,
+            handle_control=self.command_router.handle,
+            send_reply=self._send_reply,
+            save_conversations=self._save_conversations,
+            unsupported_agent_slash_reply=lambda _command: "QQ 桥暂不支持这个桥接命令。发送 /help 查看当前支持的命令。",
+            unsupported_bridge_command_reply=lambda _command: "QQ 桥暂不支持这个桥接命令。发送 /help 查看当前支持的命令。",
+            reject_unknown_bridge_slash=True,
+            reject_unknown_passthrough_slash=False,
+            submit_raw_passthrough=True,
+        )
+        self.task_submit_runtime = BridgeTaskSubmitRuntime(
+            ipc_request=lambda action, payload, timeout_seconds: self._ipc_request(action, payload, timeout_seconds=timeout_seconds),
+            resolve_context=self._resolve_task_submit_context,
+        )
         self.message_runtime = BridgeMessageRuntime(
             pending_media=self.pending_media_store,
-            resolve_session=lambda message: message.session_name,
-            prepare_prompt=self._prepare_runtime_prompt,
+            resolve_session=self.conversation_runtime.resolve_session,
+            prepare_prompt=self.prompt_runtime.prepare_for_session,
             submit_task=self._submit_runtime_task,
             remember_pending_task=self._remember_submitted_runtime_task,
             send_reply=self._send_reply,
@@ -237,68 +285,17 @@ class QQOneBotBridge:
         threading.Thread(target=run_target, daemon=True, name=f"qq-bridge-{name}").start()
 
     def _submit_task(self, sender_key: str, prompt: str) -> dict[str, Any]:
-        request_id = create_request(
-            "submit_task",
-            {
-                "agent_id": self.agent_id,
-                "prompt": prompt,
-                "source": "qq",
-                "sender_id": sender_key,
-                "session_name": self._session_name(sender_key),
-                "backend": self.config.default_backend,
-            },
+        message = IncomingBridgeMessage(
+            sender_id=sender_key,
+            text="",
+            reply_target={},
+            source="qq",
+            session_name=self._session_name(sender_key),
+            attachments=[],
+            attachment_errors=[],
         )
-        response = wait_for_response(request_id, timeout_seconds=60)
-        if not response.ok:
-            raise RuntimeError(str(response.error or "submit_task failed"))
-        task = response.payload.get("task")
-        return task if isinstance(task, dict) else {}
-
-    def _prepare_runtime_prompt(self, message: IncomingBridgeMessage, _session_name: str) -> BridgePromptDecision:
-        binding = self._ensure_conversation(message.sender_id)
-        session_name, session_meta = binding.get_current_session(
-            default_backend=self.config.default_backend,
-            now=self._now_iso(),
-            normalize_backend=self._normalize_backend,
-        )
-        passthrough_prompt = self.native_menu_runtime.passthrough_prompt(message.text)
-        if self.native_menu_runtime.has_active_menu(session_meta) and (passthrough_prompt is None or not self.native_menu_runtime.is_special_command(passthrough_prompt)):
-            native_result = self.native_menu_runtime.handle_reply(session_name, session_meta, message.text)
-            if native_result.handled:
-                self._save_conversations()
-                if native_result.reply:
-                    self._send_reply(message.reply_target, native_result.reply)
-                return BridgePromptDecision(handled=True)
-        if passthrough_prompt is None:
-            media_result = self.media_control_runtime.handle(message.reply_target, message.text)
-            if media_result.handled:
-                if media_result.reply:
-                    self._send_reply(message.reply_target, media_result.reply)
-                return BridgePromptDecision(handled=True)
-        reply, handled = self._handle_control_command(message.sender_id, message.text)
-        if handled:
-            if reply:
-                self._send_reply(message.reply_target, reply)
-            return BridgePromptDecision(handled=True)
-        if passthrough_prompt is not None:
-            native_start = self.native_menu_runtime.start(session_name, session_meta, passthrough_prompt)
-            if native_start.handled:
-                self._save_conversations()
-                if native_start.reply:
-                    self._send_reply(message.reply_target, native_start.reply)
-                return BridgePromptDecision(handled=True)
-        cleaned_text = str(message.text or "").strip()
-        if cleaned_text.startswith("/") and not cleaned_text.startswith("//"):
-            self._send_reply(message.reply_target, "QQ 桥暂不支持这个桥接命令。发送 /help 查看当前支持的命令。")
-            return BridgePromptDecision(handled=True)
-        return BridgePromptDecision(prompt=message.text.strip())
-
-    def _handle_control_command(self, sender_key: str, text: str) -> tuple[str, bool]:
-        for runtime in (self.control_runtime, self.session_control_runtime, self.service_control_runtime, self.notify_control_runtime):
-            result = runtime.handle(sender_key, text)
-            if result.handled:
-                return result.reply, True
-        return "", False
+        submitted = self.task_submit_runtime.submit(message, self.conversation_runtime.resolve_session(message), prompt)
+        return submitted.payload
 
     def _submit_runtime_task(
         self,
@@ -310,27 +307,23 @@ class QQOneBotBridge:
         task = self._submit_task(message.sender_id, prompt)
         return BridgeSubmittedTask(task_id=str(task.get("id") or "").strip(), payload=task)
 
-    def _find_latest_sender_task(self, sender_key: str, *, allowed_statuses: set[str] | None = None) -> HubTask | None:
-        response = self._ipc_request("state", {}, timeout_seconds=5)
-        if not response.ok:
-            return None
-        tasks: list[HubTask] = []
-        for raw_task in response.payload.get("tasks") or []:
-            task = HubTask.from_dict(raw_task, default_backend=self.config.default_backend)
-            if task is None or task.sender_id != sender_key:
-                continue
-            if allowed_statuses is not None and task.status not in allowed_statuses:
-                continue
-            tasks.append(task)
-        if not tasks:
-            return None
-        return sorted(tasks, key=lambda item: item.finished_at or item.started_at or item.created_at, reverse=True)[0]
-
-    def _get_task(self, task_id: str) -> HubTask | None:
-        response = self._ipc_request("get_task", {"task_id": task_id}, timeout_seconds=5)
-        if not response.ok:
-            return None
-        return HubTask.from_dict(response.payload.get("task"), default_backend=self.config.default_backend)
+    def _resolve_task_submit_context(self, message: IncomingBridgeMessage, session: Any) -> BridgeTaskSubmitContext:
+        if isinstance(session, dict):
+            session_name = str(session.get("session_name") or message.session_name or self._session_name(message.sender_id))
+            session_meta = session.get("session_meta")
+        else:
+            session_name = str(session or message.session_name or self._session_name(message.sender_id))
+            session_meta = None
+        backend = str(getattr(session_meta, "backend", "") or self.config.default_backend)
+        return BridgeTaskSubmitContext(
+            agent_id=self.agent_id,
+            session_name=session_name,
+            backend=backend,
+            workdir=str(getattr(session_meta, "workdir", "") or ""),
+            model=str(getattr(session_meta, "model", "") or ""),
+            reasoning_effort=str(getattr(session_meta, "reasoning_effort", "") or ""),
+            permission_mode=str(getattr(session_meta, "permission_mode", "") or ""),
+        )
 
     def _ipc_request(self, action: str, payload: dict[str, Any], *, timeout_seconds: float) -> Any:
         return wait_for_response(create_request(action, payload), timeout_seconds=timeout_seconds)
@@ -650,11 +643,12 @@ class QQOneBotBridge:
         reasoning_effort: str = "",
         permission_mode: str = "",
     ) -> BridgeSessionMeta:
-        now = self._now_iso()
-        return BridgeSessionMeta(
-            backend=normalize_backend(str(backend or self.config.default_backend)),
-            created_at=now,
-            updated_at=now,
+        return create_session_meta(
+            BridgeSessionMeta,
+            backend=backend,
+            default_backend=self.config.default_backend,
+            now=self._now_iso(),
+            normalize_backend=normalize_backend,
             workdir=workdir.strip(),
             model=model.strip(),
             reasoning_effort=reasoning_effort.strip(),
@@ -662,44 +656,25 @@ class QQOneBotBridge:
         )
 
     def _allocate_session_name(self, binding: BridgeConversationBinding, requested: str) -> str:
-        base = self._sanitize_session_name(requested, fallback="session")
-        if base not in binding.sessions:
-            return base
-        index = 2
-        while f"{base}-{index}" in binding.sessions:
-            index += 1
-        return f"{base}-{index}"
+        return allocate_session_name(binding, requested)
 
     @staticmethod
     def _sanitize_session_name(requested: str, *, fallback: str) -> str:
-        return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in requested).strip("-_") or fallback
+        return sanitize_session_name(requested, fallback=fallback)
 
     @staticmethod
     def _sanitize_project_name(requested: str) -> str:
-        return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in requested).strip("-_")
+        return sanitize_project_name(requested)
 
     @staticmethod
     def _split_named_path_args(raw: str) -> tuple[str, str]:
-        parts = str(raw or "").strip().split(maxsplit=1)
-        if len(parts) < 2:
-            return (parts[0], "") if parts else ("", "")
-        return parts[0].strip(), parts[1].strip()
+        return split_named_path_args(raw)
 
     def _load_sender_tasks(self, sender_key: str) -> list[HubTask]:
-        response = self._ipc_request("state", {}, timeout_seconds=5)
-        if not response.ok:
-            return []
-        tasks: list[HubTask] = []
-        for raw_task in response.payload.get("tasks") or []:
-            task = HubTask.from_dict(raw_task, default_backend=self.config.default_backend)
-            if task is not None and task.sender_id == sender_key:
-                tasks.append(task)
-        return sorted(tasks, key=lambda item: item.finished_at or item.started_at or item.created_at, reverse=True)
+        return self.task_query_runtime.load_sender_tasks(sender_key)
 
     def _resolve_fallback_session_target(self, binding: BridgeConversationBinding) -> str:
-        if binding.last_regular_session and binding.last_regular_session in binding.sessions:
-            return binding.last_regular_session
-        return next(iter(binding.sessions.keys()), "")
+        return resolve_fallback_session_target(binding)
 
     def _render_context(self, session_name: str, session_meta: BridgeSessionMeta) -> str:
         return "\n".join(
@@ -915,18 +890,6 @@ class QQOneBotBridge:
             session_file.write_text("", encoding="utf-8")
         return f"Cleared current agent session: {current_session}"
 
-    def _load_pending_media_context(self) -> dict[str, list[dict[str, str]]]:
-        return self.pending_media_store.contexts
-
-    def _save_pending_media_context(self) -> None:
-        self.pending_media_store.save()
-
-    def _remember_pending_media_context(self, sender_key: str, attachments: list[dict[str, str]]) -> None:
-        self.pending_media_store.remember(sender_key, attachments)
-
-    def _consume_pending_media_context(self, sender_key: str) -> list[dict[str, str]]:
-        return self.pending_media_store.consume(sender_key)
-
     def _save_pending_tasks(self) -> None:
         self.pending_task_store.save(self.pending_tasks)
 
@@ -984,10 +947,6 @@ class QQOneBotBridge:
         if len(parts) == 4 and parts[0] == "qq" and parts[1] == "group" and parts[2] and parts[3]:
             return {"message_type": "group", "group_id": parts[2], "user_id": parts[3]}
         return {}
-
-    @staticmethod
-    def _build_prompt_with_media(prompt: str, attachments: list[dict[str, str]], errors: list[str]) -> str:
-        return build_prompt_with_media(prompt, attachments, errors)
 
     def make_handler(self) -> type[BaseHTTPRequestHandler]:
         bridge = self

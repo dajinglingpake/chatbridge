@@ -8,12 +8,14 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from runtime_stack import (
+    _filter_child_process_matches,
     _managed_subprocess_env,
     _onebot_runtime_env,
     _taskkill,
     discover_external_agent_processes,
     restart_all,
     restart_qq_bridge,
+    restart_qq_stack,
     start_all,
     start_managed,
     start_qq_stack,
@@ -55,17 +57,29 @@ class RuntimeStackTests(unittest.TestCase):
         self.addCleanup(self._tempdir.cleanup)
         self.root = Path(self._tempdir.name)
 
-    def test_start_managed_cleans_duplicate_processes_and_keeps_primary(self) -> None:
+    def test_start_managed_restarts_cleanly_when_duplicate_processes_exist(self) -> None:
         primary = SimpleNamespace(pid=101)
         duplicate = SimpleNamespace(pid=202)
+        restarted = SimpleNamespace(pid=303)
         pid_file = self.root / "agent.pid"
         with patch("runtime_stack._find_processes_by_script", return_value=[primary, duplicate]):
             with patch("runtime_stack._taskkill") as mocked_kill:
-                with patch("runtime_stack._write_pid_file") as mocked_write_pid:
-                    message = start_managed("Hub", self.root / "agent_hub.py", pid_file, self.root / "out.log", self.root / "err.log")
-        mocked_kill.assert_called_once_with(202)
-        mocked_write_pid.assert_called_once_with(pid_file, 101)
-        self.assertIn("cleaned duplicate PIDs 202", message)
+                with patch("runtime_stack._wait_for_script_processes_to_exit", return_value=[]):
+                    with patch("runtime_stack.subprocess.Popen", return_value=restarted):
+                        with patch("runtime_stack._write_pid_file") as mocked_write_pid:
+                            message = start_managed("Hub", self.root / "agent_hub.py", pid_file, self.root / "out.log", self.root / "err.log")
+
+        self.assertEqual([(101,), (202,)], [call.args for call in mocked_kill.call_args_list])
+        mocked_write_pid.assert_called_once_with(pid_file, 303)
+        self.assertIn("restarted after cleaning duplicate PIDs 101, 202", message)
+
+    def test_filter_child_process_matches_keeps_only_roots(self) -> None:
+        parent = FakeProcess(101, "python.exe", ppid=1)
+        child = FakeProcess(202, "python.exe", ppid=101)
+
+        filtered = _filter_child_process_matches([parent, child])
+
+        self.assertEqual([101], [proc.pid for proc in filtered])
 
     def test_start_managed_passes_proxy_env_to_child_process(self) -> None:
         pid_file = self.root / "agent.pid"
@@ -111,16 +125,19 @@ class RuntimeStackTests(unittest.TestCase):
     def test_restart_all_restarts_only_weixin_stack(self) -> None:
         with (
             patch("runtime_stack.stop_managed", side_effect=["Bridge stopped", "Hub stopped"]) as mocked_stop,
-            patch("runtime_stack.start_all", return_value=["Hub started", "Bridge started"]) as mocked_start_all,
-            patch("runtime_stack.stop_onebot_runtime") as mocked_stop_onebot,
+            patch("runtime_stack.start_managed", side_effect=["Hub started", "Bridge started"]) as mocked_start,
+            patch("runtime_stack.stop_qq_bridge", return_value="QQ Bridge stopped") as mocked_stop_qq_bridge,
+            patch("runtime_stack.stop_onebot_runtime", return_value="OneBot stopped") as mocked_stop_onebot,
+            patch("runtime_stack.time.sleep"),
             patch("runtime_stack._managed_subprocess_env", return_value={"A": "B"}),
         ):
             messages = restart_all()
 
-        self.assertEqual(["Bridge stopped", "Hub stopped", "Hub started", "Bridge started"], messages)
+        self.assertEqual(["QQ Bridge stopped", "OneBot stopped", "Bridge stopped", "Hub stopped", "Hub started", "Bridge started"], messages)
         self.assertEqual(["Bridge", "Hub"], [call.args[0] for call in mocked_stop.call_args_list])
-        mocked_start_all.assert_called_once_with(env={"A": "B"})
-        mocked_stop_onebot.assert_not_called()
+        self.assertEqual(["Hub", "Bridge"], [call.args[0] for call in mocked_start.call_args_list])
+        mocked_stop_qq_bridge.assert_called_once_with()
+        mocked_stop_onebot.assert_called_once_with()
 
     def test_restart_qq_bridge_preserves_onebot_runtime(self) -> None:
         with (
@@ -136,6 +153,29 @@ class RuntimeStackTests(unittest.TestCase):
         self.assertEqual(["Bridge stopped", "QQ Bridge stopped", "QQ Bridge started"], messages)
         mocked_stop_bridge.assert_called_once_with()
         mocked_stop_qq_bridge.assert_called_once_with()
+        mocked_start_qq_bridge.assert_called_once_with(env={"A": "B"})
+        mocked_stop_onebot.assert_not_called()
+        mocked_start_onebot.assert_not_called()
+
+    def test_restart_qq_stack_restarts_hub_and_qq_bridge_preserving_onebot_runtime(self) -> None:
+        with (
+            patch("runtime_stack.stop_bridge", return_value="Bridge stopped") as mocked_stop_bridge,
+            patch("runtime_stack.stop_qq_bridge", return_value="QQ Bridge stopped") as mocked_stop_qq_bridge,
+            patch("runtime_stack.stop_managed", return_value="Hub stopped") as mocked_stop_hub,
+            patch("runtime_stack.start_managed", return_value="Hub started") as mocked_start_hub,
+            patch("runtime_stack.start_qq_bridge", return_value="QQ Bridge started") as mocked_start_qq_bridge,
+            patch("runtime_stack.stop_onebot_runtime") as mocked_stop_onebot,
+            patch("runtime_stack.start_onebot_runtime") as mocked_start_onebot,
+            patch("runtime_stack.time.sleep"),
+            patch("runtime_stack._managed_subprocess_env", return_value={"A": "B"}),
+        ):
+            messages = restart_qq_stack()
+
+        self.assertEqual(["Bridge stopped", "QQ Bridge stopped", "Hub stopped", "Hub started", "QQ Bridge started"], messages)
+        mocked_stop_bridge.assert_called_once_with()
+        mocked_stop_qq_bridge.assert_called_once_with()
+        self.assertEqual(["Hub"], [call.args[0] for call in mocked_stop_hub.call_args_list])
+        self.assertEqual(["Hub"], [call.args[0] for call in mocked_start_hub.call_args_list])
         mocked_start_qq_bridge.assert_called_once_with(env={"A": "B"})
         mocked_stop_onebot.assert_not_called()
         mocked_start_onebot.assert_not_called()
@@ -192,8 +232,9 @@ class RuntimeStackTests(unittest.TestCase):
         pid_file = self.root / "bridge.pid"
         with patch("runtime_stack._find_processes_by_script", return_value=[first, second]):
             with patch("runtime_stack._taskkill") as mocked_kill:
-                with patch("runtime_stack._clear_pid_file") as mocked_clear:
-                    message = stop_managed("Bridge", self.root / "weixin_hub_bridge.py", pid_file)
+                with patch("runtime_stack._wait_for_script_processes_to_exit", return_value=[]):
+                    with patch("runtime_stack._clear_pid_file") as mocked_clear:
+                        message = stop_managed("Bridge", self.root / "weixin_hub_bridge.py", pid_file)
         self.assertEqual([(101,), (202,)], [call.args for call in mocked_kill.call_args_list])
         mocked_clear.assert_called_once_with(pid_file)
         self.assertIn("PIDs 101, 202", message)

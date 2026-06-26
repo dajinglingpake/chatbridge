@@ -8,7 +8,7 @@ from typing import Callable, TypeVar
 from bridge_config import BridgeConfig
 from core.accounts import build_account_options
 from core.actions import RepairCommand, build_repair_command_models
-from core.app_state import build_badge, build_summary_text, decide_primary_action
+from core.app_state import build_badge, build_summary_text, decide_primary_action, infer_bridge_mode
 from core.dashboard import DashboardState, load_dashboard_state
 from core.sessions import SessionRow, build_session_detail, build_session_rows
 from core.state_models import CheckSnapshot, HubStateSnapshot, HubTask, RuntimeSnapshot
@@ -82,6 +82,7 @@ class HomeViewModel:
     primary_hint: str
     qq_login_text: str
     qq_login_ok: bool
+    runtime_bridge_mode: str
 
 
 @dataclass
@@ -264,6 +265,7 @@ def build_home_view_model(
             account=qq_account,
         ),
         qq_login_ok=snapshot.qq_logged_in,
+        runtime_bridge_mode=infer_bridge_mode(snapshot),
     )
 
 

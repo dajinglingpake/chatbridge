@@ -4,7 +4,7 @@ from pathlib import Path
 
 from starlette.requests import Request
 
-from core.app_service import delete_agent, reset_weixin_conversation, run_named_action, run_repair_command, save_agent, set_weixin_notice_enabled, submit_hub_task, switch_active_account, switch_bridge_agent, switch_weixin_session_backend, terminate_external_agent
+from core.app_service import delete_agent, reset_weixin_conversation, run_named_action, run_repair_command, save_agent, schedule_named_action, set_weixin_notice_enabled, submit_hub_task, switch_active_account, switch_bridge_agent, switch_weixin_session_backend, terminate_external_agent
 from core.navigation import PRIMARY_PAGES
 from core.shell_schema import APP_SHELL
 from core.dashboard import refresh_dashboard_cache
@@ -16,6 +16,13 @@ from ui.sections import render_diagnostics_section, render_home_section, render_
 
 
 APP_DIR = Path(__file__).resolve().parent.parent
+ASYNC_SERVICE_ACTIONS = {
+    "restart",
+    "restart-bridge",
+    "restart-onebot-runtime",
+    "restart-qq-bridge",
+    "restart-qq-stack",
+}
 
 
 def _load_nicegui():
@@ -305,6 +312,7 @@ def create_ui() -> None:
         "checks_in_progress": False,
         "active_page": "home",
         "bridge_mode": "weixin",
+        "bridge_mode_selected": False,
         "language": localizer_ref["value"].language,
         "qr_login_open": False,
     }
@@ -336,6 +344,8 @@ def create_ui() -> None:
         state["agent_page"] = model.agent_page
         state["checks_page"] = model.checks_page
         state["checks_in_progress"] = model.checks_in_progress
+        if not state["bridge_mode_selected"] and model.home.runtime_bridge_mode in {"weixin", "qq"}:
+            state["bridge_mode"] = model.home.runtime_bridge_mode
         return model
 
     def jump_to(anchor: str) -> None:
@@ -365,6 +375,7 @@ def create_ui() -> None:
         if cleaned not in {"weixin", "qq"}:
             return
         state["bridge_mode"] = cleaned
+        state["bridge_mode_selected"] = True
         content_view.refresh()
 
     def apply_request_language(request) -> None:
@@ -450,7 +461,7 @@ def create_ui() -> None:
         content_view.refresh()
 
     def _run_action(action: str) -> None:
-        result = run_named_action(action)
+        result = schedule_named_action(action, delay_seconds=1.0) if action in ASYNC_SERVICE_ACTIONS else run_named_action(action)
         _notify(result.message)
 
     def _switch_account(account_id: str) -> None:
@@ -466,7 +477,8 @@ def create_ui() -> None:
         _notify(result.message)
 
     def _submit_task(agent_id: str, prompt: str, session_name: str, backend: str) -> None:
-        result = submit_hub_task(agent_id=agent_id, prompt=prompt, session_name=session_name, backend=backend)
+        source = "qq-web" if state["bridge_mode"] == "qq" else "web"
+        result = submit_hub_task(agent_id=agent_id, prompt=prompt, session_name=session_name, backend=backend, source=source)
         _notify(result.message)
 
     def _run_repair_command(command: str, label: str) -> None:
@@ -648,7 +660,11 @@ def create_ui() -> None:
     def index_page(request: Request) -> None:
         apply_request_language(request)
         requested_mode = str(request.query_params.get("mode") or "").strip()
-        state["bridge_mode"] = requested_mode if requested_mode in {"weixin", "qq"} else "weixin"
+        if requested_mode in {"weixin", "qq"}:
+            state["bridge_mode"] = requested_mode
+            state["bridge_mode_selected"] = True
+        else:
+            state["bridge_mode_selected"] = False
         shell_view()
         content_view()
 

@@ -113,6 +113,13 @@ def _qq_mode_running(snapshot: RuntimeSnapshot) -> bool:
     return snapshot.hub_running and snapshot.onebot_runtime_running and snapshot.qq_bridge_running
 
 
+def infer_bridge_mode(snapshot: RuntimeSnapshot) -> str:
+    if _qq_mode_running(snapshot) and not snapshot.bridge_running:
+        return "qq"
+    if _weixin_mode_running(snapshot) and not snapshot.qq_bridge_running:
+        return "weixin"
+    return ""
+
 def build_badge(snapshot: RuntimeSnapshot, translator: Callable[..., str] | None = None) -> BadgeState:
     if _weixin_mode_running(snapshot) or _qq_mode_running(snapshot):
         return BadgeState(
@@ -289,7 +296,8 @@ def build_issues(
                 detail=_t(translator, "ui.issue.login.detail"),
             )
         )
-    if snapshot.hub_running != snapshot.bridge_running:
+    any_bridge_process = snapshot.hub_running or snapshot.bridge_running or snapshot.onebot_runtime_running or snapshot.qq_bridge_running
+    if any_bridge_process and not (_weixin_mode_running(snapshot) or _qq_mode_running(snapshot)):
         issues.append(
             IssueItem(
                 kind="processes",

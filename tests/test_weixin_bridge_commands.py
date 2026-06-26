@@ -132,6 +132,9 @@ class FakeBridge(WeixinBridge):
     def _save_conversations(self) -> None:
         return None
 
+    def _ensure_typing_worker_started(self) -> None:
+        return None
+
 
 class FeedbackBridge(FakeBridge):
     def __init__(self, config: BridgeConfig, task_states: list[dict[str, object]]) -> None:

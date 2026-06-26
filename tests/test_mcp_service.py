@@ -53,17 +53,59 @@ class McpServiceTests(unittest.TestCase):
             "core.mcp_service.schedule_named_action",
             return_value=ServiceResult(ok=True, message="已安排在 1.00 秒后执行服务操作：restart"),
         ) as mocked_schedule:
-            result = restart_services("all")
+            with patch(
+                "core.mcp_service.get_runtime_snapshot",
+                return_value=SimpleNamespace(bridge_running=True, qq_bridge_running=False, onebot_runtime_running=False),
+            ):
+                result = restart_services("all")
         self.assertTrue(result.ok)
         mocked_schedule.assert_called_once_with("restart", delay_seconds=1.0)
         self.assertEqual("restart", result.data["action"])
 
-    def test_restart_services_schedules_qq_bridge_restart(self) -> None:
+    def test_restart_services_all_uses_current_qq_mode(self) -> None:
+        with patch(
+            "core.mcp_service.schedule_named_action",
+            return_value=ServiceResult(ok=True, message="已安排在 1.00 秒后执行服务操作：restart-qq-stack"),
+        ) as mocked_schedule:
+            with patch(
+                "core.mcp_service.get_runtime_snapshot",
+                return_value=SimpleNamespace(bridge_running=False, qq_bridge_running=True, onebot_runtime_running=True),
+            ):
+                result = restart_services("all")
+        self.assertTrue(result.ok)
+        mocked_schedule.assert_called_once_with("restart-qq-stack", delay_seconds=1.0)
+        self.assertEqual("restart-qq-stack", result.data["action"])
+
+    def test_restart_services_current_uses_current_qq_mode(self) -> None:
+        with patch(
+            "core.mcp_service.schedule_named_action",
+            return_value=ServiceResult(ok=True, message="已安排在 1.00 秒后执行服务操作：restart-qq-stack"),
+        ) as mocked_schedule:
+            with patch(
+                "core.mcp_service.get_runtime_snapshot",
+                return_value=SimpleNamespace(bridge_running=False, qq_bridge_running=True, onebot_runtime_running=True),
+            ):
+                result = restart_services("current")
+        self.assertTrue(result.ok)
+        mocked_schedule.assert_called_once_with("restart-qq-stack", delay_seconds=1.0)
+        self.assertEqual("restart-qq-stack", result.data["action"])
+
+    def test_restart_services_schedules_qq_stack_restart(self) -> None:
+        with patch(
+            "core.mcp_service.schedule_named_action",
+            return_value=ServiceResult(ok=True, message="已安排在 1.00 秒后执行服务操作：restart-qq-stack"),
+        ) as mocked_schedule:
+            result = restart_services("qq")
+        self.assertTrue(result.ok)
+        mocked_schedule.assert_called_once_with("restart-qq-stack", delay_seconds=1.0)
+        self.assertEqual("restart-qq-stack", result.data["action"])
+
+    def test_restart_services_schedules_explicit_qq_bridge_restart(self) -> None:
         with patch(
             "core.mcp_service.schedule_named_action",
             return_value=ServiceResult(ok=True, message="已安排在 1.00 秒后执行服务操作：restart-qq-bridge"),
         ) as mocked_schedule:
-            result = restart_services("qq")
+            result = restart_services("qq-bridge")
         self.assertTrue(result.ok)
         mocked_schedule.assert_called_once_with("restart-qq-bridge", delay_seconds=1.0)
         self.assertEqual("restart-qq-bridge", result.data["action"])
