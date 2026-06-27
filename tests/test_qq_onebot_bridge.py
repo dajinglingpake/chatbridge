@@ -94,6 +94,8 @@ class QQOneBotBridgeTests(unittest.TestCase):
 
         self.assertEqual([], bridge.submitted)
         self.assertIn("qq:private:10001", bridge.pending_media_context)
+        self.assertEqual("send_private_msg", bridge.api_calls[-1][0])
+        self.assertIn("已收到 1 个附件", bridge.api_calls[-1][1]["message"])
 
         bridge.handle_event(
             {
@@ -111,6 +113,28 @@ class QQOneBotBridgeTests(unittest.TestCase):
         self.assertIn("图片: image.png", prompt)
         self.assertIn("qq-private-10001-image.png", prompt)
         self.assertNotIn("qq:private:10001", bridge.pending_media_context)
+
+    def test_private_text_with_image_submits_prompt_with_attachment(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.handle_event(
+            {
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": 10001,
+                "message": [
+                    {"type": "text", "data": {"text": "看下这张图"}},
+                    {"type": "image", "data": {"url": "http://media.local/image", "file": "image.png"}},
+                ],
+            }
+        )
+
+        self.assertNotIn("qq:private:10001", bridge.pending_media_context)
+        self.assertEqual(1, len(bridge.submitted))
+        sender_key, prompt = bridge.submitted[0]
+        self.assertEqual("qq:private:10001", sender_key)
+        self.assertTrue(prompt.startswith("看下这张图"))
+        self.assertIn("图片: image.png", prompt)
+        self.assertIn("qq-private-10001-image.png", prompt)
 
     def test_group_text_with_file_submits_prompt_with_attachment(self) -> None:
         bridge = FakeQQBridge(self.temp_path)
@@ -164,6 +188,57 @@ class QQOneBotBridgeTests(unittest.TestCase):
         self.assertEqual("qq:private:10001", sender_key)
         self.assertIn("文件: report.pdf", prompt)
         self.assertIn("report-data", Path(prompt.split("本地路径: ", 1)[1].splitlines()[0]).read_bytes().decode("utf-8"))
+
+    def test_local_path_url_media_message_copies_file_without_urlopen(self) -> None:
+        source_file = self.temp_path / "onebot-cache-report.txt"
+        source_file.write_text("report-data", encoding="utf-8")
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.handle_event(
+            {
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": 10001,
+                "message": [
+                    {"type": "file", "data": {"url": str(source_file), "file": "report.txt"}},
+                    {"type": "text", "data": {"text": "总结这个文件"}},
+                ],
+            }
+        )
+
+        sender_key, prompt = bridge.submitted[0]
+        self.assertEqual("qq:private:10001", sender_key)
+        self.assertIn("文件: report.txt", prompt)
+        self.assertIn("report-data", Path(prompt.split("本地路径: ", 1)[1].splitlines()[0]).read_text(encoding="utf-8"))
+
+    def test_inaccessible_local_path_url_uses_file_id_without_urlopen(self) -> None:
+        source_file = self.temp_path / "onebot-cache-report.txt"
+        source_file.write_text("report-data", encoding="utf-8")
+        bridge = FakeQQBridge(self.temp_path)
+
+        def onebot_api(action: str, payload: dict[str, object]) -> dict[str, object]:
+            bridge.api_calls.append((action, payload))
+            if action == "get_file":
+                return {"status": "ok", "data": {"file": str(source_file)}}
+            return {"status": "ok"}
+
+        bridge._onebot_api = onebot_api  # type: ignore[method-assign]
+        bridge.handle_event(
+            {
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": 10001,
+                "message": [
+                    {"type": "file", "data": {"url": "F:\\QQCache\\missing.txt", "file_id": "file-001", "file": "report.txt"}},
+                    {"type": "text", "data": {"text": "总结这个文件"}},
+                ],
+            }
+        )
+
+        self.assertEqual("get_file", bridge.api_calls[0][0])
+        sender_key, prompt = bridge.submitted[0]
+        self.assertEqual("qq:private:10001", sender_key)
+        self.assertIn("文件: report.txt", prompt)
+        self.assertIn("report-data", Path(prompt.split("本地路径: ", 1)[1].splitlines()[0]).read_text(encoding="utf-8"))
 
     def test_group_message_without_at_self_is_ignored(self) -> None:
         bridge = FakeQQBridge(self.temp_path)

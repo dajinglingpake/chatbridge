@@ -125,16 +125,29 @@ def build_prompt_with_media(
         parts.append(cleaned_prompt)
     if attachments:
         lines = ["用户发送了以下附件，已保存到本地："]
+        has_image = False
         for attachment in attachments:
-            label = "图片" if attachment.get("kind") == "image" else "文件"
+            is_image = attachment.get("kind") == "image"
+            has_image = has_image or is_image
+            label = "图片" if is_image else "文件"
             lines.append(f"- {label}: {attachment.get('name') or '-'}")
             lines.append(f"  本地路径: {attachment.get('path') or '-'}")
-        if not cleaned_prompt:
+        if has_image:
+            lines.append("如果附件包含图片，必须先查看本地图片路径中的图片内容，再回答用户。")
+        if cleaned_prompt:
+            lines.append("请结合用户文字和这些附件处理，不要忽略附件内容。")
+        else:
             lines.append("请根据这些附件继续处理。")
         parts.append("\n".join(lines))
     if errors:
         parts.append("以下附件接收失败：\n" + "\n".join(errors))
     return "\n\n".join(part for part in parts if part).strip()
+
+def build_media_context_reply(attachments: list[Attachment]) -> str:
+    count = len(attachments)
+    if count <= 0:
+        return ""
+    return f"已收到 {count} 个附件，继续发送文字说明后我会一起处理。"
 
 class BridgeMessageRuntime:
     def __init__(
@@ -191,6 +204,9 @@ class BridgeMessageRuntime:
         if not text:
             if message.attachments:
                 self.pending_media.remember(message.sender_id, message.attachments)
+                reply = build_media_context_reply(message.attachments)
+                if reply:
+                    self.send_reply(message.reply_target, reply)
                 self.on_media_context(message)
                 return None
             if message.attachment_errors:

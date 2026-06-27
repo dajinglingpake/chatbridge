@@ -638,15 +638,24 @@ class QQOneBotBridge:
     def _save_onebot_media_payload(self, sender_key: str, data: dict[str, Any], *, filename: str) -> Path:
         url = str(data.get("url") or "").strip()
         if url:
-            return self._download_media_url(sender_key, url, filename=filename)
+            local_url_path = self._resolve_onebot_url_media_path(url)
+            if local_url_path is not None:
+                return self._copy_onebot_media_file(sender_key, local_url_path, filename=filename)
+            if not self._is_onebot_local_path_url(url):
+                return self._download_media_url(sender_key, url, filename=filename)
         local_path = self._resolve_onebot_local_media_path(data)
         if local_path is not None:
             return self._copy_onebot_media_file(sender_key, local_path, filename=filename)
-        file_id = str(data.get("file_id") or data.get("file") or "").strip()
+        file_id = str(data.get("file_id") or "").strip()
         if file_id:
             resolved = self._resolve_onebot_file_id(file_id)
             if resolved.get("url"):
-                return self._download_media_url(sender_key, str(resolved["url"]), filename=filename)
+                resolved_url = str(resolved["url"])
+                resolved_url_path = self._resolve_onebot_url_media_path(resolved_url)
+                if resolved_url_path is not None:
+                    return self._copy_onebot_media_file(sender_key, resolved_url_path, filename=filename)
+                if not self._is_onebot_local_path_url(resolved_url):
+                    return self._download_media_url(sender_key, resolved_url, filename=filename)
             resolved_path = self._resolve_onebot_local_media_path(resolved)
             if resolved_path is not None:
                 return self._copy_onebot_media_file(sender_key, resolved_path, filename=filename)
@@ -656,6 +665,30 @@ class QQOneBotBridge:
         response = self._onebot_api("get_file", {"file_id": file_id})
         data = response.get("data") if isinstance(response.get("data"), dict) else response
         return dict(data) if isinstance(data, dict) else {}
+
+    @staticmethod
+    def _resolve_onebot_url_media_path(raw_url: str) -> Path | None:
+        raw = str(raw_url or "").strip()
+        if not raw:
+            return None
+        parsed = urllib.parse.urlparse(raw)
+        if parsed.scheme == "file":
+            candidate = Path(urllib.request.url2pathname(parsed.path)).expanduser()
+        elif not parsed.scheme or (len(parsed.scheme) == 1 and raw[1:3] in {":\\", ":/"}):
+            candidate = Path(raw).expanduser()
+        else:
+            return None
+        if candidate.exists() and candidate.is_file():
+            return candidate
+        return None
+
+    @staticmethod
+    def _is_onebot_local_path_url(raw_url: str) -> bool:
+        raw = str(raw_url or "").strip()
+        if not raw:
+            return False
+        parsed = urllib.parse.urlparse(raw)
+        return parsed.scheme == "file" or (len(parsed.scheme) == 1 and raw[1:3] in {":\\", ":/"})
 
     @staticmethod
     def _resolve_onebot_local_media_path(data: dict[str, Any]) -> Path | None:
