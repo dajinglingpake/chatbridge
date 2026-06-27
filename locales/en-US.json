@@ -204,6 +204,8 @@
   "bridge.task.retry.none": "There is no retryable task for this sender.",
   "bridge.task.retry.ok": "Requeued task\\nOriginal: {original}\\nNew task: {task_id}\\nSession: {session}\\nBackend: {backend}",
   "bridge.task.retry.failed": "Failed to retry task: {task_id}\\nReason: {error}",
+  "bridge.task.restart_resume.notice": "Hub restarted and interrupted the previous task. The original task is being resumed automatically.\\nOriginal task: {task_id}\\nResume attempt: {attempt}/{max_attempts}",
+  "bridge.task.restart_resume.prompt": "System note: the previous Agent task was interrupted by a Hub restart, and this is an automatic resume.\\nContinue completing the previous user request instead of only explaining the restart. If part of the work may already have run, inspect the current project state first and avoid repeating side-effectful steps.\\n\\nPrevious user request:\\n{prompt}",
   "bridge.task.succeeded": "Task completed\\nTask ID: {task_id}\\nSession: {session}\\nSession ID: {session_id}\\nBackend: {backend}\\nModel: {model}\\nProject: {workdir}\\n\\nResult:\\n{result}",
   "bridge.task.canceled": "{backend} task was canceled\\nTask ID: {task_id}\\nSession: {session}\\nSession ID: {session_id}\\nReason: {error}\\n\\n{hint}",
   "bridge.task.failed": "{backend} task failed\\nTask ID: {task_id}\\nSession: {session}\\nSession ID: {session_id}\\nReason: {error}\\n\\n{hint}",

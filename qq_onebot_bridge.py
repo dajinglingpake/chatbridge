@@ -34,6 +34,8 @@ from core.bridge_media_control_runtime import BridgeMediaControlRuntime
 from core.bridge_native_menu_runtime import BridgeNativeMenuRuntime
 from core.bridge_notify_control_runtime import BridgeNotifyControlRuntime
 from core.bridge_prompt_runtime import BridgePromptRuntime
+from core.bridge_project_files import SENDMEDIA_IMAGE_EXTENSIONS, render_project_file_preview, resolve_shareable_project_file
+from core.bridge_restart_resume import build_restart_resume_plan
 from core.bridge_service_control_runtime import BridgeServiceControlRuntime, QQ_RESTART_SCOPES
 from core.bridge_session_control_runtime import BridgeSessionControlRuntime
 from core.bridge_session_utils import (
@@ -127,6 +129,24 @@ def _media_segments(message: object) -> list[dict[str, Any]]:
         if isinstance(segment, dict) and str(segment.get("type") or "").strip().lower() in {"image", "file", "record", "video"}
     ]
 
+
+def _onebot_response_ok(response: dict[str, Any]) -> bool:
+    status = str(response.get("status") or "").strip().lower()
+    if status == "ok":
+        return True
+    if "retcode" not in response:
+        return False
+    try:
+        return int(response.get("retcode")) == 0 and status != "failed"
+    except (TypeError, ValueError):
+        return False
+
+def _onebot_error_message(response: dict[str, Any]) -> str:
+    for key in ("message", "wording", "msg"):
+        value = str(response.get(key) or "").strip()
+        if value:
+            return value
+    return f"OneBot action failed: status={response.get('status')} retcode={response.get('retcode')}"
 
 def _message_mentions_user(message: object, user_id: str) -> bool:
     if not user_id or not isinstance(message, list):
@@ -453,6 +473,8 @@ class QQOneBotBridge:
             f"task terminal task_id={task.id} status={task.status} "
             f"output_preview={task.output[:80]!r} error_preview={task.error[:80]!r}"
         )
+        if self._resume_task_after_hub_restart(event, pending, task):
+            return
         plan = build_terminal_task_delivery_plan(
             task,
             last_progress_text=pending.last_progress_text,
@@ -469,6 +491,29 @@ class QQOneBotBridge:
         )
         if plan.reply:
             self._send_reply(event, plan.reply)
+
+    def _resume_task_after_hub_restart(self, event: dict[str, Any], pending: BridgePendingReplyTask, task: HubTask) -> bool:
+        plan = build_restart_resume_plan(task, pending, translate=self._t)
+        if not plan.should_resume:
+            return False
+        if plan.notice:
+            self._send_reply(event, plan.notice)
+        submitted_task = self._submit_task(pending.sender_key, plan.prompt)
+        submitted_task_id = str(submitted_task.get("id") or "").strip()
+        if not submitted_task_id:
+            raise RuntimeError("restart resume submit_task returned invalid task id")
+        self.pending_tasks[submitted_task_id] = BridgePendingReplyTask(
+            task_id=submitted_task_id,
+            sender_key=pending.sender_key,
+            reply_target=dict(pending.reply_target),
+            created_at=now_seconds(),
+            interrupt_base_prompt=str(pending.interrupt_base_prompt or task.prompt or ""),
+            interrupt_messages=list(pending.interrupt_messages),
+            restart_resume_count=plan.next_attempt,
+        )
+        self._save_pending_tasks()
+        _log(f"restart resume submitted old_task_id={task.id} new_task_id={submitted_task_id} sender={pending.sender_key}")
+        return True
 
     def _send_typing_keepalive(self, event: dict[str, Any], last_sent_at: float) -> float:
         now_value = time.time()
@@ -489,7 +534,7 @@ class QQOneBotBridge:
             return False
         try:
             response = self._onebot_api("set_input_status", {"user_id": user_id, "event_type": 1 if enabled else 0})
-            ok = str(response.get("status") or "").lower() == "ok" or int(response.get("retcode") or 0) == 0
+            ok = _onebot_response_ok(response)
             _log(f"typing user_id={user_id} enabled={enabled} status={response.get('status')} retcode={response.get('retcode')}")
             if not ok:
                 self._typing_status_available = False
@@ -585,13 +630,53 @@ class QQOneBotBridge:
     def _save_media_segment(self, sender_key: str, segment: dict[str, Any], *, index: int) -> dict[str, str]:
         kind = str(segment.get("type") or "file").strip().lower() or "file"
         data = segment.get("data") if isinstance(segment.get("data"), dict) else {}
-        url = str(data.get("url") or "").strip()
-        if not url:
-            raise ValueError("missing OneBot media url")
         raw_name = str(data.get("file") or data.get("filename") or data.get("name") or f"{kind}-{index}")
         filename = _safe_path_part(Path(raw_name.replace("\\", "/")).name)
-        saved_path = self._download_media_url(sender_key, url, filename=filename)
+        saved_path = self._save_onebot_media_payload(sender_key, data, filename=filename)
         return {"kind": "image" if kind == "image" else "file", "name": filename, "path": str(saved_path)}
+
+    def _save_onebot_media_payload(self, sender_key: str, data: dict[str, Any], *, filename: str) -> Path:
+        url = str(data.get("url") or "").strip()
+        if url:
+            return self._download_media_url(sender_key, url, filename=filename)
+        local_path = self._resolve_onebot_local_media_path(data)
+        if local_path is not None:
+            return self._copy_onebot_media_file(sender_key, local_path, filename=filename)
+        file_id = str(data.get("file_id") or data.get("file") or "").strip()
+        if file_id:
+            resolved = self._resolve_onebot_file_id(file_id)
+            if resolved.get("url"):
+                return self._download_media_url(sender_key, str(resolved["url"]), filename=filename)
+            resolved_path = self._resolve_onebot_local_media_path(resolved)
+            if resolved_path is not None:
+                return self._copy_onebot_media_file(sender_key, resolved_path, filename=filename)
+        raise ValueError("missing OneBot media url or local file")
+
+    def _resolve_onebot_file_id(self, file_id: str) -> dict[str, Any]:
+        response = self._onebot_api("get_file", {"file_id": file_id})
+        data = response.get("data") if isinstance(response.get("data"), dict) else response
+        return dict(data) if isinstance(data, dict) else {}
+
+    @staticmethod
+    def _resolve_onebot_local_media_path(data: dict[str, Any]) -> Path | None:
+        for key in ("path", "file_path", "file"):
+            raw = str(data.get(key) or "").strip()
+            if not raw:
+                continue
+            candidate = Path(raw).expanduser()
+            if candidate.exists() and candidate.is_file():
+                return candidate
+        return None
+
+    def _copy_onebot_media_file(self, sender_key: str, source_path: Path, *, filename: str) -> Path:
+        data = source_path.read_bytes()
+        if len(data) > MEDIA_RECEIVE_MAX_BYTES:
+            raise ValueError(f"file is too large: {len(data)} bytes")
+        target_dir = ONEBOT_UPLOAD_DIR / _safe_path_part(sender_key)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / f"{now_seconds()}-{secrets.token_hex(4)}-{filename}"
+        target.write_bytes(data)
+        return target
 
     def _download_media_url(self, sender_key: str, url: str, *, filename: str) -> Path:
         with urllib.request.urlopen(url, timeout=30) as response:  # noqa: S310 - URL is supplied by the local OneBot service
@@ -793,27 +878,28 @@ class QQOneBotBridge:
         return f"Session history exported: {path}", True
 
     def _render_project_file_preview(self, raw_path: str) -> str:
-        candidate = Path(raw_path).expanduser()
-        if not candidate.is_absolute():
-            candidate = APP_DIR / candidate
-        if not candidate.exists() or not candidate.is_file():
-            return f"File not found: {raw_path}"
-        return candidate.read_text(encoding="utf-8", errors="replace")[:3000] or "(empty)"
+        return render_project_file_preview(APP_DIR, raw_path, translate=self._t)
 
     def _resolve_shareable_project_file(self, raw_path: str) -> Path:
-        candidate = Path(raw_path).expanduser()
-        if not candidate.is_absolute():
-            candidate = APP_DIR / candidate
-        resolved = candidate.resolve()
-        if not resolved.exists() or not resolved.is_file():
-            raise FileNotFoundError(raw_path)
-        allowed_roots = [APP_DIR.resolve(), RUNTIME_DIR.resolve()]
-        if not any(resolved == root or root in resolved.parents for root in allowed_roots):
-            raise ValueError(f"file is outside allowed roots: {raw_path}")
-        return resolved
+        return resolve_shareable_project_file(APP_DIR, raw_path)
 
-    def _send_media_to_reply_target(self, reply_target: dict[str, Any], file_path: Path) -> None:
+    def _send_media_to_reply_target(self, reply_target: dict[str, Any], file_path: Path) -> dict[str, Any]:
         message_type = str(reply_target.get("message_type") or "").strip().lower()
+        if file_path.suffix.lower() in SENDMEDIA_IMAGE_EXTENSIONS:
+            action = "send_group_msg" if message_type == "group" else "send_private_msg"
+            payload: dict[str, Any] = {
+                "message": [{"type": "image", "data": {"file": str(file_path)}}],
+            }
+            if message_type == "group":
+                payload["group_id"] = reply_target.get("group_id")
+            else:
+                payload["user_id"] = reply_target.get("user_id")
+            response = self._onebot_api(action, payload)
+            target_key = "group_id" if message_type == "group" else "user_id"
+            _log(f"sent image {target_key}={payload.get(target_key)} status={response.get('status')} retcode={response.get('retcode')} file={file_path.name}")
+            if not _onebot_response_ok(response):
+                raise RuntimeError(_onebot_error_message(response))
+            return response
         if message_type == "group":
             payload = {
                 "group_id": reply_target.get("group_id"),
@@ -822,7 +908,9 @@ class QQOneBotBridge:
             }
             response = self._onebot_api("upload_group_file", payload)
             _log(f"sent file group_id={reply_target.get('group_id')} status={response.get('status')} retcode={response.get('retcode')} file={file_path.name}")
-            return
+            if not _onebot_response_ok(response):
+                raise RuntimeError(_onebot_error_message(response))
+            return response
         payload = {
             "user_id": reply_target.get("user_id"),
             "file": str(file_path),
@@ -830,6 +918,9 @@ class QQOneBotBridge:
         }
         response = self._onebot_api("upload_private_file", payload)
         _log(f"sent file user_id={reply_target.get('user_id')} status={response.get('status')} retcode={response.get('retcode')} file={file_path.name}")
+        if not _onebot_response_ok(response):
+            raise RuntimeError(_onebot_error_message(response))
+        return response
 
     def _render_recent_events(self, sender_key: str, *, limit: int) -> str:
         del sender_key, limit

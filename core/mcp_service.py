@@ -154,7 +154,7 @@ def get_tool_guide() -> ToolActionResult:
         "内置工具直接作用于当前发送方的当前会话。",
         "只读查询: get_sender_snapshot | list_agents | get_task | get_command_catalog。",
         "目标发送方操作: execute_sender_command(target_sender_id, command)。",
-        "服务重启: restart_services(scope='current'|'all'|'weixin'|'bridge'|'qq'|'qq-bridge'|'onebot')，current/all 会按当前运行模式重启对应平台，异步安排重启，避免工具调用过程中把当前进程杀掉。",
+        "服务重启: restart_services(scope='current'|'all'|'weixin'|'bridge'|'qq'|'qq-bridge'|'onebot')，current/all 会按当前运行模式重启对应平台，Hub 重启中断的任务会由桥接层自动续跑。",
         "媒体发送: send_bridge_media(target_sender_id, path)，发送项目内允许的图片或文件。",
         "新 Agent 会话: start_agent_session(agent_id, session_name, prompt, ...)。",
         "Agent 委派: delegate_task(agent_id, prompt, ...)。这不会隐式切换当前发送方的会话。",
@@ -666,7 +666,7 @@ def _send_qq_media(cleaned_sender_id: str, cleaned_path: str) -> ToolActionResul
         original_file_path = bridge._resolve_shareable_project_file(cleaned_path)
         file_path = _prepare_media_delivery_copy(original_file_path)
         reply_target = _qq_reply_target_from_sender_id(cleaned_sender_id)
-        bridge._send_media_to_reply_target(reply_target, file_path)
+        response = bridge._send_media_to_reply_target(reply_target, file_path)
     except Exception as exc:  # noqa: BLE001
         return ToolActionResult(ok=False, summary=f"发送媒体失败：{exc}")
     return ToolActionResult(
@@ -677,7 +677,7 @@ def _send_qq_media(cleaned_sender_id: str, cleaned_path: str) -> ToolActionResul
             "path": str(file_path),
             "source_path": str(original_file_path),
             "file_name": file_path.name,
-            "response": {},
+            "response": response,
         },
     )
 

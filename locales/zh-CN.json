@@ -204,6 +204,8 @@
   "bridge.task.retry.none": "当前发送方没有可重试的任务。",
   "bridge.task.retry.ok": "已重新入队任务\\n原任务: {original}\\n新任务: {task_id}\\n会话: {session}\\n后端: {backend}",
   "bridge.task.retry.failed": "重试任务失败: {task_id}\\n原因: {error}",
+  "bridge.task.restart_resume.notice": "Hub 已重启，上一轮任务被中断。正在自动续跑原任务。\\n原任务: {task_id}\\n续跑次数: {attempt}/{max_attempts}",
+  "bridge.task.restart_resume.prompt": "系统提示：上一轮 Agent 任务在 Hub 重启时被中断，现在正在自动续跑。\\n请继续完成上一轮用户问题，不要只解释重启；如果之前可能已经执行过部分操作，请先检查当前项目状态，避免重复执行有副作用的步骤。\\n\\n上一轮用户问题：\\n{prompt}",
   "bridge.task.succeeded": "任务执行完成\\n任务 ID: {task_id}\\n会话: {session}\\n会话 ID: {session_id}\\n后端: {backend}\\n模型: {model}\\n工程目录: {workdir}\\n\\n结果:\\n{result}",
   "bridge.task.canceled": "{backend} 任务已取消\\n任务 ID: {task_id}\\n会话: {session}\\n会话 ID: {session_id}\\n原因: {error}\\n\\n{hint}",
   "bridge.task.failed": "{backend} 任务失败\\n任务 ID: {task_id}\\n会话: {session}\\n会话 ID: {session_id}\\n原因: {error}\\n\\n{hint}",

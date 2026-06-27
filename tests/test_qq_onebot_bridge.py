@@ -134,6 +134,37 @@ class QQOneBotBridgeTests(unittest.TestCase):
         self.assertTrue(prompt.startswith("总结这个文件"))
         self.assertIn("文件: report.pdf", prompt)
 
+    def test_file_id_media_message_uses_onebot_get_file(self) -> None:
+        source_file = self.temp_path / "onebot-cache-report.pdf"
+        source_file.write_bytes(b"report-data")
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.ipc_responses = {}
+
+        def onebot_api(action: str, payload: dict[str, object]) -> dict[str, object]:
+            bridge.api_calls.append((action, payload))
+            if action == "get_file":
+                return {"status": "ok", "data": {"file": str(source_file)}}
+            return {"status": "ok"}
+
+        bridge._onebot_api = onebot_api  # type: ignore[method-assign]
+        bridge.handle_event(
+            {
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": 10001,
+                "message": [
+                    {"type": "file", "data": {"file_id": "file-001", "file": "report.pdf"}},
+                    {"type": "text", "data": {"text": "总结这个文件"}},
+                ],
+            }
+        )
+
+        self.assertEqual("get_file", bridge.api_calls[0][0])
+        sender_key, prompt = bridge.submitted[0]
+        self.assertEqual("qq:private:10001", sender_key)
+        self.assertIn("文件: report.pdf", prompt)
+        self.assertIn("report-data", Path(prompt.split("本地路径: ", 1)[1].splitlines()[0]).read_bytes().decode("utf-8"))
+
     def test_group_message_without_at_self_is_ignored(self) -> None:
         bridge = FakeQQBridge(self.temp_path)
         bridge.handle_event(
@@ -210,6 +241,23 @@ class QQOneBotBridgeTests(unittest.TestCase):
         self.assertEqual("scheduled qq stack", bridge.api_calls[-1][1]["message"])
         mocked_schedule.assert_called_once_with("restart-qq-stack", delay_seconds=1.0)
 
+    def test_restart_qq_command_schedules_qq_stack_restart(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        with patch("qq_onebot_bridge.schedule_named_action", return_value=SimpleNamespace(message="scheduled qq stack")) as mocked_schedule:
+            bridge.handle_event(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "user_id": 10001,
+                    "message": "/restart qq",
+                }
+            )
+
+        self.assertEqual([], bridge.submitted)
+        self.assertEqual("send_private_msg", bridge.api_calls[-1][0])
+        self.assertEqual("scheduled qq stack", bridge.api_calls[-1][1]["message"])
+        mocked_schedule.assert_called_once_with("restart-qq-stack", delay_seconds=1.0)
+
     def test_restart_bridge_command_schedules_qq_bridge_restart(self) -> None:
         bridge = FakeQQBridge(self.temp_path)
         with patch("qq_onebot_bridge.schedule_named_action", return_value=SimpleNamespace(message="scheduled qq bridge")) as mocked_schedule:
@@ -246,6 +294,25 @@ class QQOneBotBridgeTests(unittest.TestCase):
 
     def test_sendfile_command_uploads_private_file_without_agent_submission(self) -> None:
         bridge = FakeQQBridge(self.temp_path)
+        target_file = self.temp_path / "report.pdf"
+        target_file.write_bytes(b"pdf-data")
+        with patch.object(bridge, "_resolve_shareable_project_file", return_value=target_file):
+            bridge.handle_event(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "user_id": 10001,
+                    "message": "/sendfile docs/report.pdf",
+                }
+            )
+
+        self.assertEqual([], bridge.submitted)
+        self.assertEqual("upload_private_file", bridge.api_calls[-1][0])
+        self.assertEqual(10001, bridge.api_calls[-1][1]["user_id"])
+        self.assertEqual(str(target_file), bridge.api_calls[-1][1]["file"])
+
+    def test_sendfile_command_sends_private_image_as_image_message(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
         target_file = self.temp_path / "diagram.png"
         target_file.write_bytes(b"png-data")
         with patch.object(bridge, "_resolve_shareable_project_file", return_value=target_file):
@@ -259,9 +326,50 @@ class QQOneBotBridgeTests(unittest.TestCase):
             )
 
         self.assertEqual([], bridge.submitted)
-        self.assertEqual("upload_private_file", bridge.api_calls[-1][0])
+        self.assertEqual("send_private_msg", bridge.api_calls[-1][0])
         self.assertEqual(10001, bridge.api_calls[-1][1]["user_id"])
-        self.assertEqual(str(target_file), bridge.api_calls[-1][1]["file"])
+        self.assertEqual([{"type": "image", "data": {"file": str(target_file)}}], bridge.api_calls[-1][1]["message"])
+
+    def test_sendfile_command_reports_failed_image_send(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        target_file = self.temp_path / "diagram.png"
+        target_file.write_bytes(b"png-data")
+
+        def fake_onebot_api(action: str, payload: dict[str, object]) -> dict[str, object]:
+            bridge.api_calls.append((action, payload))
+            if payload.get("message") == [{"type": "image", "data": {"file": str(target_file)}}]:
+                return {"status": "failed", "retcode": 200, "message": "rich media transfer failed"}
+            return {"status": "ok", "retcode": 0}
+
+        bridge._onebot_api = fake_onebot_api  # type: ignore[method-assign]
+        with patch.object(bridge, "_resolve_shareable_project_file", return_value=target_file):
+            bridge.handle_event(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "user_id": 10001,
+                    "message": "/sendfile docs/diagram.png",
+                }
+            )
+
+        self.assertEqual([], bridge.submitted)
+        self.assertEqual("send_private_msg", bridge.api_calls[-1][0])
+        self.assertIn("rich media transfer failed", bridge.api_calls[-1][1]["message"])
+
+    def test_showfile_command_denies_sensitive_paths_like_weixin(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.handle_event(
+            {
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": 10001,
+                "message": "/showfile accounts/wechat-bot.json",
+            }
+        )
+
+        self.assertEqual([], bridge.submitted)
+        self.assertEqual("send_private_msg", bridge.api_calls[-1][0])
+        self.assertIn("拒绝预览文件", bridge.api_calls[-1][1]["message"])
 
     def test_double_slash_status_queries_codex_status_without_agent_submission(self) -> None:
         bridge = FakeQQBridge(self.temp_path)
@@ -425,6 +533,44 @@ class QQOneBotBridgeTests(unittest.TestCase):
         self.assertNotIn("task-qq-001", bridge.pending_tasks)
         sent_messages = [payload["message"] for action, payload in bridge.api_calls if action == "send_private_msg"]
         self.assertIn("恢复后完成", sent_messages[-1])
+
+    def test_unknown_after_restart_task_is_resubmitted(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.pending_tasks = {
+            "task-qq-001": BridgePendingReplyTask(
+                task_id="task-qq-001",
+                sender_key="qq:private:10001",
+                reply_target={"message_type": "private", "user_id": 10001},
+                created_at=123,
+                interrupt_base_prompt="继续完成重构",
+            )
+        }
+        task = HubTask.from_dict(
+            {
+                "id": "task-qq-001",
+                "agent_id": "qq",
+                "agent_name": "QQ 会话",
+                "backend": "codex",
+                "source": "qq",
+                "sender_id": "qq:private:10001",
+                "prompt": "继续完成重构",
+                "status": "unknown_after_restart",
+                "created_at": "2026-06-26T01:00:00",
+                "finished_at": "2026-06-26T01:00:05",
+                "error": "Hub restarted while this task was running.",
+                "session_name": "qq-private-10001",
+            },
+            default_backend="codex",
+        )
+
+        with patch.object(bridge, "_submit_task", return_value={"id": "task-qq-resumed"}):
+            bridge._handle_pushed_task_update({"task": task.to_dict()})
+
+        self.assertNotIn("task-qq-001", bridge.pending_tasks)
+        self.assertIn("task-qq-resumed", bridge.pending_tasks)
+        self.assertEqual(1, bridge.pending_tasks["task-qq-resumed"].restart_resume_count)
+        sent_messages = [payload["message"] for action, payload in bridge.api_calls if action == "send_private_msg"]
+        self.assertIn("Hub 已重启", sent_messages[-1])
 
     def test_pushed_task_update_streams_progress_and_final_reply(self) -> None:
         bridge = FakeQQBridge(self.temp_path)

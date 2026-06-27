@@ -49,6 +49,7 @@ class BridgePendingReplyTask:
     last_progress_text: str = ""
     interrupt_base_prompt: str = ""
     interrupt_messages: list[str] = field(default_factory=list)
+    restart_resume_count: int = 0
 
     @classmethod
     def from_dict(cls, raw: object, *, ttl_seconds: int | None = None, now_seconds: int | None = None) -> "BridgePendingReplyTask | None":
@@ -77,6 +78,7 @@ class BridgePendingReplyTask:
             interrupt_messages=[str(item) for item in raw.get("interrupt_messages", []) if str(item or "").strip()]
             if isinstance(raw.get("interrupt_messages"), list)
             else [],
+            restart_resume_count=int(raw.get("restart_resume_count") or 0),
         )
 
     def to_dict(self) -> dict[str, Any]:

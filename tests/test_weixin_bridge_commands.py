@@ -1327,7 +1327,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         self.assertEqual(3, bridge._task_update_index)
         self.assertEqual(3, bridge._pending_reconcile_cursor)
 
-    def test_pending_reconcile_removes_unknown_after_restart_task(self) -> None:
+    def test_pending_reconcile_resubmits_unknown_after_restart_task(self) -> None:
         bridge = FeedbackBridge(
             BridgeConfig.load(),
             [
@@ -1352,13 +1352,25 @@ class WeixinBridgeCommandTests(unittest.TestCase):
             session_name="default",
             backend="codex",
             context_token="ctx-live",
+            interrupt_base_prompt="hello",
         )
 
+        def fake_ipc_request(action: str, payload: dict[str, object], timeout_seconds: float) -> IpcResponseEnvelope:
+            if action == "submit_task":
+                bridge.submit_payloads.append(dict(payload))
+                return IpcResponseEnvelope(ok=True, payload={"task": {"id": "task-feedback-resumed"}})
+            return FeedbackBridge._ipc_request(bridge, action, payload, timeout_seconds)
+
+        bridge._ipc_request = fake_ipc_request  # type: ignore[method-assign]
         bridge._reconcile_pending_tasks("https://example.com", "token")
 
         self.assertNotIn("task-feedback-001", bridge.pending_tasks)
+        self.assertIn("task-feedback-resumed", bridge.pending_tasks)
+        self.assertEqual(1, bridge.pending_tasks["task-feedback-resumed"].restart_resume_count)
         self.assertEqual(1, len(bridge.sent_texts))
-        self.assertIn("Hub restarted while this task was running.", bridge.sent_texts[0])
+        self.assertIn("Hub restarted", bridge.sent_texts[0])
+        self.assertEqual(1, len(bridge.submit_payloads))
+        self.assertIn("Previous user request", bridge.submit_payloads[0]["prompt"])
 
     def test_handle_message_sends_completion_notice_for_duplicate_final_result_after_progress(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

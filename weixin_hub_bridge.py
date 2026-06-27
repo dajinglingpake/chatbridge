@@ -44,6 +44,8 @@ from core.bridge_media_control_runtime import BridgeMediaControlRuntime
 from core.bridge_native_menu_runtime import BridgeNativeMenuRuntime, PERMISSION_MODE_PRESETS
 from core.bridge_notify_control_runtime import BridgeNotifyControlRuntime
 from core.bridge_prompt_runtime import BridgePromptRuntime
+from core.bridge_project_files import SENDMEDIA_IMAGE_EXTENSIONS, render_project_file_preview, resolve_shareable_project_file
+from core.bridge_restart_resume import build_restart_resume_plan
 from core.bridge_service_control_runtime import BridgeServiceControlRuntime, WEIXIN_RESTART_SCOPES
 from core.bridge_session_control_runtime import BridgeSessionControlRuntime
 from core.bridge_session_utils import (
@@ -138,28 +140,6 @@ MEDIA_UPLOAD_TYPE_FILE = 3
 MESSAGE_ITEM_TYPE_IMAGE = 2
 MESSAGE_ITEM_TYPE_FILE = 4
 INCOMING_MEDIA_ITEM_TYPES = frozenset({MESSAGE_ITEM_TYPE_IMAGE, MESSAGE_ITEM_TYPE_FILE})
-SHOWFILE_PREVIEW_LIMIT = 3200
-SENDMEDIA_IMAGE_EXTENSIONS = frozenset({".bmp", ".gif", ".jpeg", ".jpg", ".png", ".webp"})
-SHOWFILE_ALLOWED_EXTENSIONS = frozenset(
-    {
-        ".bat",
-        ".cmd",
-        ".css",
-        ".html",
-        ".js",
-        ".json",
-        ".md",
-        ".ps1",
-        ".py",
-        ".sh",
-        ".toml",
-        ".ts",
-        ".tsx",
-        ".txt",
-        ".yaml",
-        ".yml",
-    }
-)
 _PERMANENT_DELIVERY_ERROR_MARKERS = (
     "errcode=-14",
     "session timeout",
@@ -194,9 +174,6 @@ def _is_stale_notice_delivery(message: dict[str, object], queue_delay_ms: int | 
         and queue_delay_ms > NOTICE_MAX_QUEUE_AGE_SECONDS * 1000
         and _is_notice_delivery_message(message)
     )
-
-SHOWFILE_BLOCKED_PATH_PARTS = frozenset({".git", ".runtime", ".venv", "__pycache__", "accounts", "sessions"})
-
 
 def _encrypt_aes_128_ecb(data: bytes, key: bytes) -> bytes:
     padder = padding.PKCS7(128).padder()
@@ -1144,6 +1121,8 @@ class WeixinBridge:
         terminal_started = time.perf_counter()
         context_token = self._resolve_context_token_for_sender(tracked)
         session_name = task.session_name or tracked.session_name or "default"
+        if self._resume_task_after_hub_restart(base_url, token, tracked, task, context_token=context_token, session_name=session_name):
+            return
         plan = build_terminal_task_delivery_plan(
             task,
             last_progress_text=tracked.last_progress_text,
@@ -1194,6 +1173,60 @@ class WeixinBridge:
             status=task.status,
             deduped=str(plan.deduped).lower(),
         )
+
+    def _resume_task_after_hub_restart(
+        self,
+        base_url: str,
+        token: str,
+        tracked: WeixinPendingTaskState,
+        task: HubTask,
+        *,
+        context_token: str,
+        session_name: str,
+    ) -> bool:
+        plan = build_restart_resume_plan(task, tracked, translate=self._t)
+        if not plan.should_resume:
+            return False
+        if plan.notice:
+            self._send_text(base_url, token, tracked.sender_id, context_token, plan.notice)
+        binding = self._ensure_conversation(tracked.sender_id)
+        session_meta = binding.sessions.get(session_name) or self._new_session_meta()
+        binding.sessions.setdefault(session_name, session_meta)
+        message = IncomingBridgeMessage(
+            sender_id=tracked.sender_id,
+            text="",
+            reply_target={"sender_id": tracked.sender_id},
+            source=tracked.source or "wechat",
+            session_name=session_name,
+            attachments=[],
+            attachment_errors=[],
+            context_token=context_token,
+            metadata={
+                "interrupt_base_prompt": tracked.interrupt_base_prompt or task.prompt,
+                "interrupt_messages": list(tracked.interrupt_messages),
+            },
+        )
+        submitted = self.task_submit_runtime.submit(
+            message,
+            {"session_name": session_name, "session_meta": session_meta},
+            plan.prompt,
+        )
+        self.pending_tasks[submitted.task_id] = WeixinPendingTaskState(
+            task_id=submitted.task_id,
+            sender_id=tracked.sender_id,
+            session_name=session_name,
+            backend=tracked.backend or task.backend or self.config.default_backend,
+            source=tracked.source or task.source or "wechat",
+            model=tracked.model or task.model,
+            workdir=tracked.workdir or task.workdir,
+            context_token=context_token,
+            interrupt_base_prompt=tracked.interrupt_base_prompt or task.prompt,
+            interrupt_messages=list(tracked.interrupt_messages),
+            restart_resume_count=plan.next_attempt,
+        )
+        self._save_pending_tasks()
+        print(f"[bridge] restart resume submitted old_task_id={task.id} new_task_id={submitted.task_id} sender={tracked.sender_id}", flush=True)
+        return True
 
     def _stop_task_typing_best_effort(
         self,
@@ -2103,61 +2136,10 @@ class WeixinBridge:
         )
 
     def _resolve_shareable_project_file(self, raw_path: str) -> Path:
-        cleaned_path = raw_path.strip()
-        if not cleaned_path:
-            raise ValueError("path is required")
-        project_root = APP_DIR.resolve()
-        candidate = Path(cleaned_path).expanduser()
-        if not candidate.is_absolute():
-            candidate = project_root / candidate
-        resolved = candidate.resolve()
-        try:
-            relative_path = resolved.relative_to(project_root)
-        except ValueError as exc:
-            raise ValueError(f"path is outside project: {cleaned_path}") from exc
-        if self._is_blocked_share_path(relative_path):
-            raise ValueError(f"path is blocked: {relative_path}")
-        if not resolved.exists() or not resolved.is_file():
-            raise FileNotFoundError(str(relative_path))
-        return resolved
-
-    def _is_blocked_share_path(self, relative_path: Path) -> bool:
-        parts = relative_path.parts
-        if len(parts) >= 2 and parts[0] == ".runtime" and parts[1] == "exports":
-            return False
-        return any(part in SHOWFILE_BLOCKED_PATH_PARTS for part in parts)
+        return resolve_shareable_project_file(APP_DIR, raw_path)
 
     def _render_project_file_preview(self, raw_path: str) -> str:
-        cleaned_path = raw_path.strip()
-        if not cleaned_path:
-            return self._t("bridge.showfile.usage")
-        project_root = APP_DIR.resolve()
-        candidate = Path(cleaned_path).expanduser()
-        if not candidate.is_absolute():
-            candidate = project_root / candidate
-        try:
-            resolved = candidate.resolve()
-            relative_path = resolved.relative_to(project_root)
-        except ValueError:
-            return self._t("bridge.showfile.denied", path=cleaned_path)
-        if self._is_blocked_share_path(relative_path):
-            return self._t("bridge.showfile.denied", path=str(relative_path))
-        if not resolved.exists() or not resolved.is_file():
-            return self._t("bridge.showfile.not_found", path=str(relative_path))
-        suffix = resolved.suffix.lower()
-        if suffix not in SHOWFILE_ALLOWED_EXTENSIONS:
-            return self._t("bridge.showfile.unsupported", path=str(relative_path), suffix=suffix or "-")
-        content = resolved.read_text(encoding="utf-8", errors="replace")
-        truncated = len(content) > SHOWFILE_PREVIEW_LIMIT
-        preview = content[:SHOWFILE_PREVIEW_LIMIT].rstrip()
-        if truncated:
-            preview = f"{preview}\n\n...（内容过长，已截断）"
-        return self._t(
-            "bridge.showfile.content",
-            path=str(relative_path),
-            size=resolved.stat().st_size,
-            content=preview or "(empty)",
-        )
+        return render_project_file_preview(APP_DIR, raw_path, translate=self._t)
 
     def _task_summary_excerpt(self, task: HubTask) -> str:
         source = (task.output or task.error or task.prompt or "").strip()
