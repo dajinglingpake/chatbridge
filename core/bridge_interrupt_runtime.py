@@ -173,39 +173,8 @@ class BridgeInterruptRuntime:
         return str(raw or message.session_name or "").strip()
 
 def render_interrupt_prompt(base_prompt: str, messages: list[str], *, translate: Callable[..., str] | None = None) -> str:
-    cleaned_base = str(base_prompt or "").strip()
     cleaned_messages = [str(item or "").strip() for item in messages if str(item or "").strip()]
-    lines = ["<current_user_followups>"]
-    lines.extend(f"- [{index}] {message}" for index, message in enumerate(reversed(cleaned_messages), start=1))
-    lines.extend([
-        "</current_user_followups>",
-        "",
-        "<previous_user_request_context>",
-        cleaned_base or "-",
-        "</previous_user_request_context>",
-        "",
-        _translate(translate, "bridge.interrupt.prompt.instruction", "请以用户补充作为当前主要目标，参考上一轮问题重新处理。"),
-        _translate(translate, "bridge.interrupt.prompt.latest_priority", "用户补充是最新指令，优先级高于上一轮问题。"),
-        _translate(translate, "bridge.interrupt.prompt.newer_first", "补充内容已按时间倒序排列；越靠前越新、优先级越高。"),
-        _translate(
-            translate,
-            "bridge.interrupt.prompt.no_noop",
-            "任何补充都必须视为用户有意输入；不要自行判断补充没有改变目标或可以忽略。",
-        ),
-        _translate(
-            translate,
-            "bridge.interrupt.prompt.changed_goal",
-            "如果补充改变了方向、提出新的检查/修复要求，必须以补充后的目标为准；不要只完成上一轮问题。",
-        ),
-        _translate(
-            translate,
-            "bridge.interrupt.prompt.ambiguous_followup",
-            "如果补充含义不明确，必须先回应或澄清补充内容；不要静默继续上一轮任务。",
-        ),
-        _translate(translate, "bridge.interrupt.prompt.cover_all", "最终回答必须覆盖所有补充内容。"),
-        _translate(translate, "bridge.interrupt.prompt.no_interruption_explanation", "不要解释你被打断，直接给出结果。"),
-    ])
-    return "\n".join(lines).strip()
+    return "\n\n".join(cleaned_messages).strip()
 
 def _translate(translate: Callable[..., str] | None, key: str, fallback: str) -> str:
     if translate is None:
