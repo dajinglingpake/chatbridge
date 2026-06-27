@@ -570,6 +570,8 @@ class WeixinPendingTaskState:
     typing_ticket: str = ""
     typing_ticket_refreshed_at: int = 0
     typing_last_sent_at: int = 0
+    interrupt_base_prompt: str = ""
+    interrupt_messages: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, raw: object) -> "WeixinPendingTaskState | None":
@@ -594,6 +596,10 @@ class WeixinPendingTaskState:
             typing_ticket=str(raw.get("typing_ticket") or "").strip(),
             typing_ticket_refreshed_at=int(raw.get("typing_ticket_refreshed_at") or 0),
             typing_last_sent_at=int(raw.get("typing_last_sent_at") or 0),
+            interrupt_base_prompt=str(raw.get("interrupt_base_prompt") or ""),
+            interrupt_messages=[str(item) for item in raw.get("interrupt_messages", []) if str(item or "").strip()]
+            if isinstance(raw.get("interrupt_messages"), list)
+            else [],
         )
 
     def to_dict(self) -> JsonObject:

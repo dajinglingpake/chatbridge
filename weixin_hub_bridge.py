@@ -28,6 +28,7 @@ from core.bridge_command_catalog import HELP_MESSAGE_KEYS, normalize_command_tex
 from core.bridge_command_router import BridgeCommandRouter
 from core.bridge_conversation_runtime import BridgeConversationRuntime
 from core.bridge_control_runtime import BridgeControlRuntime
+from core.bridge_interrupt_runtime import BridgeInterruptRuntime
 from core.bridge_message_control import normalize_context_left_percent, normalize_message_for_dedupe
 from core.bridge_pending_tasks import JsonBackedTaskStore
 from core.bridge_runtime import (
@@ -247,6 +248,7 @@ class WeixinBridge:
             to_dict=lambda tracked: tracked.to_dict(),
         )
         self.pending_tasks = self._load_pending_tasks()
+        self._interrupted_task_ids: set[str] = set()
         self.pending_media_store = PendingMediaContextStore(
             PENDING_MEDIA_CONTEXT_PATH,
             ttl_seconds=MEDIA_CONTEXT_TTL_SECONDS,
@@ -356,6 +358,14 @@ class WeixinBridge:
             resolve_context=self._resolve_task_submit_context,
             on_complete=self._task_submit_completed,
         )
+        self.interrupt_runtime = BridgeInterruptRuntime(
+            find_active_task=self._find_active_pending_task,
+            cancel_task=self._cancel_task_best_effort,
+            submit_delayed=lambda message, session, prompt, passthrough: self.message_runtime.submit_prepared(message, session, prompt, passthrough),
+            send_reply=self._send_runtime_reply,
+            save_pending_tasks=self._save_pending_tasks,
+        )
+        self.message_runtime.interrupt_runtime = self.interrupt_runtime
         self._recent_message_keys: list[str] = []
         self._recent_message_fingerprints: dict[str, float] = {}
         self._send_worker_started = False
@@ -834,6 +844,7 @@ class WeixinBridge:
     def _remember_runtime_pending_task(self, message: IncomingBridgeMessage, session: dict[str, Any], submitted: BridgeSubmittedTask) -> None:
         session_name = str(session["session_name"] or "")
         session_meta = session["session_meta"]
+        interrupt_messages = message.metadata.get("interrupt_messages")
         accepted_backend = session_meta.backend
         accepted_model = self._display_model(self._effective_session_model(session_meta))
         accepted_workdir = self._resolve_session_workdir(session_meta)
@@ -856,6 +867,8 @@ class WeixinBridge:
             model=accepted_model,
             workdir=accepted_workdir,
             context_token=message.context_token,
+            interrupt_base_prompt=str(message.metadata.get("interrupt_base_prompt") or submitted.payload.get("prompt") or ""),
+            interrupt_messages=[str(item) for item in interrupt_messages if str(item or "").strip()] if isinstance(interrupt_messages, list) else [],
         )
         self.pending_tasks[tracked_task.task_id] = tracked_task
         self._save_pending_tasks()
@@ -987,6 +1000,10 @@ class WeixinBridge:
         if task is None:
             return
         tracked = self.pending_tasks.get(task.id)
+        if tracked is None and task.id in self._interrupted_task_ids:
+            if task.status in {"canceled", "failed", "succeeded", "unknown_after_restart"}:
+                self._interrupted_task_ids.discard(task.id)
+            return
         if tracked is None and task.source and not task.source.strip().lower().startswith("wechat"):
             return
         if tracked is None:
@@ -2918,6 +2935,21 @@ class WeixinBridge:
     def _save_pending_tasks(self) -> None:
         with self._pending_tasks_save_lock:
             self.pending_task_store.save(self.pending_tasks)
+
+    def _find_active_pending_task(self, sender_id: str) -> WeixinPendingTaskState | None:
+        for pending in self.pending_tasks.values():
+            if pending.sender_id == sender_id:
+                return pending
+        return None
+
+    def _cancel_task_best_effort(self, task_id: str) -> None:
+        self._interrupted_task_ids.add(task_id)
+        try:
+            self._ipc_request("cancel_task", {"task_id": task_id}, timeout_seconds=5)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[bridge] interrupt cancel failed task_id={task_id}: {exc}", flush=True)
+        if self.pending_tasks.pop(task_id, None) is not None:
+            self._save_pending_tasks()
 
     def _load_conversations(self) -> dict[str, Any]:
         source_path = self.conversation_path

@@ -18,6 +18,7 @@ from core.bridge_command_catalog import QQ_HELP_MESSAGE_KEYS
 from core.bridge_command_router import BridgeCommandRouter
 from core.bridge_conversation_runtime import BridgeConversationRuntime
 from core.bridge_control_runtime import BridgeControlRuntime
+from core.bridge_interrupt_runtime import BridgeInterruptRuntime
 from core.bridge_message_control import (
     normalize_context_left_percent,
 )
@@ -233,6 +234,13 @@ class QQOneBotBridge:
             ipc_request=lambda action, payload, timeout_seconds: self._ipc_request(action, payload, timeout_seconds=timeout_seconds),
             resolve_context=self._resolve_task_submit_context,
         )
+        self.interrupt_runtime = BridgeInterruptRuntime(
+            find_active_task=self._find_active_pending_task,
+            cancel_task=self._cancel_task_best_effort,
+            submit_delayed=lambda message, session, prompt, passthrough: self.message_runtime.submit_prepared(message, session, prompt, passthrough),
+            send_reply=self._send_reply,
+            save_pending_tasks=self._save_pending_tasks,
+        )
         self.message_runtime = BridgeMessageRuntime(
             pending_media=self.pending_media_store,
             resolve_session=self.conversation_runtime.resolve_session,
@@ -240,6 +248,7 @@ class QQOneBotBridge:
             submit_task=self._submit_runtime_task,
             remember_pending_task=self._remember_submitted_runtime_task,
             send_reply=self._send_reply,
+            interrupt_runtime=self.interrupt_runtime,
             on_after_submit=self._start_submitted_task_delivery,
             log=_log,
         )
@@ -249,6 +258,7 @@ class QQOneBotBridge:
             to_dict=lambda task: task.to_dict(),
         )
         self.pending_tasks = self.pending_task_store.load()
+        self._interrupted_task_ids: set[str] = set()
         self._typing_sent_at_by_task: dict[str, float] = {}
 
     def handle_event(self, event: dict[str, Any]) -> None:
@@ -378,6 +388,10 @@ class QQOneBotBridge:
             return
         pending = self.pending_tasks.get(task.id)
         if pending is None:
+            if task.id in self._interrupted_task_ids:
+                if task.status in {"canceled", "failed", "succeeded", "unknown_after_restart"}:
+                    self._interrupted_task_ids.discard(task.id)
+                return
             reply_target = self._reply_target_from_sender_key(task.sender_id)
             if not reply_target:
                 return
@@ -903,11 +917,14 @@ class QQOneBotBridge:
         self._save_pending_tasks()
 
     def _remember_submitted_runtime_task(self, message: IncomingBridgeMessage, _session_name: str, submitted: BridgeSubmittedTask) -> None:
+        interrupt_messages = message.metadata.get("interrupt_messages")
         self.pending_tasks[submitted.task_id] = BridgePendingReplyTask(
             task_id=submitted.task_id,
             sender_key=message.sender_id,
             reply_target=dict(message.reply_target),
             created_at=now_seconds(),
+            interrupt_base_prompt=str(message.metadata.get("interrupt_base_prompt") or submitted.payload.get("prompt") or ""),
+            interrupt_messages=[str(item) for item in interrupt_messages if str(item or "").strip()] if isinstance(interrupt_messages, list) else [],
         )
         self._save_pending_tasks()
 
@@ -925,6 +942,20 @@ class QQOneBotBridge:
     def _forget_pending_task(self, task_id: str) -> None:
         if self.pending_tasks.pop(task_id, None) is not None:
             self._save_pending_tasks()
+
+    def _find_active_pending_task(self, sender_key: str) -> BridgePendingReplyTask | None:
+        for pending in self.pending_tasks.values():
+            if pending.sender_key == sender_key:
+                return pending
+        return None
+
+    def _cancel_task_best_effort(self, task_id: str) -> None:
+        self._interrupted_task_ids.add(task_id)
+        try:
+            self._ipc_request("cancel_task", {"task_id": task_id}, timeout_seconds=5)
+        except Exception as exc:  # noqa: BLE001
+            _log_error(f"interrupt cancel failed task_id={task_id}: {exc}")
+        self._forget_pending_task(task_id)
 
     def recover_pending_tasks(self) -> None:
         self._start_thread("reconcile_pending_tasks", self._reconcile_pending_tasks)

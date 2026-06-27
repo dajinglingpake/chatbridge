@@ -154,6 +154,7 @@ class BridgeMessageRuntime:
         on_empty_prompt: Callable[[IncomingBridgeMessage, Any], None] | None = None,
         on_before_submit: Callable[[IncomingBridgeMessage, Any, str, bool], None] | None = None,
         on_after_submit: Callable[[IncomingBridgeMessage, Any, BridgeSubmittedTask], None] | None = None,
+        interrupt_runtime: Any | None = None,
         log: Callable[[str], None] | None = None,
     ) -> None:
         self.pending_media = pending_media
@@ -170,6 +171,7 @@ class BridgeMessageRuntime:
         self.on_empty_prompt = on_empty_prompt or (lambda _message, _session: None)
         self.on_before_submit = on_before_submit or (lambda _message, _session, _prompt, _passthrough: None)
         self.on_after_submit = on_after_submit or (lambda _message, _session, _submitted: None)
+        self.interrupt_runtime = interrupt_runtime
         self.log = log or (lambda _message: None)
 
     def handle_message(self, message: IncomingBridgeMessage) -> BridgeSubmittedTask | None:
@@ -208,8 +210,14 @@ class BridgeMessageRuntime:
         if not prompt:
             self.on_empty_prompt(message, session)
             return None
-        self.on_before_submit(message, session, prompt, decision.passthrough)
-        submitted = self.submit_task(message, session, prompt, decision.passthrough)
+        if self.interrupt_runtime is not None and self.interrupt_runtime.intercept(message, session, prompt, passthrough=decision.passthrough):
+            self.log(f"interrupted active task sender={message.sender_id}")
+            return None
+        return self.submit_prepared(message, session, prompt, decision.passthrough)
+
+    def submit_prepared(self, message: IncomingBridgeMessage, session: Any, prompt: str, passthrough: bool = False) -> BridgeSubmittedTask | None:
+        self.on_before_submit(message, session, prompt, passthrough)
+        submitted = self.submit_task(message, session, prompt, passthrough)
         if not submitted.task_id:
             self.send_reply(message.reply_target, "任务提交失败：Hub 没有返回 task id")
             return None

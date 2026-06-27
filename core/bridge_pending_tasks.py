@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Generic, TypeVar
 
@@ -47,6 +47,8 @@ class BridgePendingReplyTask:
     created_at: int
     last_progress_seq: int = 0
     last_progress_text: str = ""
+    interrupt_base_prompt: str = ""
+    interrupt_messages: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, raw: object, *, ttl_seconds: int | None = None, now_seconds: int | None = None) -> "BridgePendingReplyTask | None":
@@ -71,6 +73,10 @@ class BridgePendingReplyTask:
             created_at=created_at or current,
             last_progress_seq=int(raw.get("last_progress_seq") or 0),
             last_progress_text=str(raw.get("last_progress_text") or ""),
+            interrupt_base_prompt=str(raw.get("interrupt_base_prompt") or ""),
+            interrupt_messages=[str(item) for item in raw.get("interrupt_messages", []) if str(item or "").strip()]
+            if isinstance(raw.get("interrupt_messages"), list)
+            else [],
         )
 
     def to_dict(self) -> dict[str, Any]:
