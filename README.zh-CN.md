@@ -18,7 +18,7 @@ ChatBridge 最初是一个桌面控制应用，现在也支持在无图形界面
 - **应用层**：`WeixinBridge` 负责微信消息、Slash 命令和文本回复入队；`AgentHub` 负责任务队列、会话、Agent 调度与 `ctx%` 聚合；`App Service` 负责 Hub / Bridge 生命周期。
 - **后端适配层**：`agent_backends/` 统一封装 Codex、Claude、OpenCode 的 CLI 调用差异。
 - **状态层**：除了项目内的配置、账号、任务状态、事件日志、会话文件、导出文件和工作目录，`ctx%` 还会读取 Codex 原生本地状态库 `~/.codex/state_*.sqlite` 和对应的 `rollout-*.jsonl`。
-- **消息与媒体层**：文本回复和通知统一进入 `Text Outbox`，由 Bridge 后台发送线程串行发往微信；MCP 工具 `send_weixin_media(target_sender_id, path)` 是出站媒体主入口，微信侧 `/sendfile` 复用同一实现；入站 `image_item` / `file_item` 会下载到 `.runtime/uploads`，纯媒体消息会缓存为该发送方下一条文本 prompt 的上下文。
+- **消息与媒体层**：文本回复和通知统一进入 `Text Outbox`，由 Bridge 后台发送线程串行发往目标渠道；MCP 工具 `send_bridge_media(target_sender_id, path)` 是出站媒体主入口，微信和 QQ 的 `/sendfile` 复用同一项目文件策略；入站图片/文件会下载或复制到 `.runtime/uploads`，纯媒体消息会缓存为该发送方下一条文本 prompt 的上下文，文字和媒体同条消息会一起提交给 Agent。
 
 ## 仓库状态
 
@@ -152,7 +152,7 @@ $env:QQ_ONEBOT_LISTEN_PORT="5701"
 python qq_onebot_bridge.py
 ```
 
-点击 Web 管理界面的“扫码登录 QQ”会自动准备并启动本机 QQ OneBot 运行时：ChatBridge 会下载官方 NapCat Shell 到 `.runtime/onebot-runtime/napcat-shell/`，自动写入 OneBot HTTP API 与反向 HTTP 上报配置，并在弹窗里展示登录二维码。如果 NapCat 安装失败，会回退下载 Lagrange.OneBot self-contained 运行时。纯 QQ 图片/文件消息会缓存为该发送方下一条文本消息的上下文。
+点击 Web 管理界面的“扫码登录 QQ”会自动准备并启动本机 QQ OneBot 运行时：ChatBridge 会下载官方 NapCat Shell 到 `.runtime/onebot-runtime/napcat-shell/`，自动写入 OneBot HTTP API 与反向 HTTP 上报配置，并在弹窗里展示登录二维码。如果 NapCat 安装失败，会回退下载 Lagrange.OneBot self-contained 运行时。纯 QQ 图片/文件消息会先回执并缓存为该发送方下一条文本消息的上下文；同一条 QQ 消息里同时带文字和图片/文件时，会把文字和已保存的本地附件路径一起提交给 Agent。QQ 文件接收支持 OneBot HTTP URL、`file://`、`F:\...` 这类本地路径，以及运行时提供时的 `file_id` / `get_file` 回退。
 
 如果你不想使用自动组件，也可以通过 `CHATBRIDGE_ONEBOT_RUNTIME_COMMAND` 指向你自行安装的 LLOneBot、Lagrange.OneBot 或 NapCat 启动器；此时仍需保证 OneBot HTTP API 为 `http://127.0.0.1:3000`，反向 HTTP 上报为 `http://127.0.0.1:5701/`。使用前请自行确认运行时许可证和本地法律合规要求。
 

@@ -18,7 +18,7 @@ Technically, the system has five layers:
 - **Application layer**: `WeixinBridge` handles WeChat messages, slash commands, and queued text replies; `AgentHub` handles task queues, sessions, agent dispatch, and `ctx%` aggregation; `App Service` handles Hub / Bridge lifecycle.
 - **Backend adapter layer**: `agent_backends/` normalizes Codex, Claude, and OpenCode CLI differences.
 - **State layer**: in addition to project-local config, accounts, task state, event logs, session files, exports, and work directories, `ctx%` reads Codex native local state from `~/.codex/state_*.sqlite` and the matching `rollout-*.jsonl`.
-- **Messaging and media layer**: text replies and notices flow through a shared `Text Outbox`, then the Bridge sender worker serializes delivery to WeChat; MCP tool `send_weixin_media(target_sender_id, path)` is the primary outbound media entrypoint, WeChat `/sendfile` reuses the same implementation, and incoming `image_item` / `file_item` messages are downloaded to `.runtime/uploads`; media-only messages are cached as context for the sender's next text prompt.
+- **Messaging and media layer**: text replies and notices flow through a shared `Text Outbox`, then the Bridge sender worker serializes delivery to WeChat; MCP tool `send_bridge_media(target_sender_id, path)` is the primary outbound media entrypoint, WeChat and QQ `/sendfile` reuse the same project-file policy, and incoming images/files are downloaded or copied to `.runtime/uploads`; media-only messages are cached as context for the sender's next text prompt, while text plus media in the same message is submitted to the agent together.
 
 ## Repository Status
 
@@ -136,7 +136,7 @@ $env:QQ_ONEBOT_LISTEN_PORT="5701"
 python qq_onebot_bridge.py
 ```
 
-Click "Scan to log in to QQ" in the web console to automatically prepare and start a local QQ OneBot runtime. ChatBridge downloads the official NapCat Shell runtime into `.runtime/onebot-runtime/napcat-shell/`, writes the OneBot HTTP API and reverse HTTP event configuration, and opens the login QR code in the dialog. If NapCat cannot be installed, it falls back to a self-contained Lagrange.OneBot runtime. Media-only QQ messages are cached as context for the sender's next text message.
+Click "Scan to log in to QQ" in the web console to automatically prepare and start a local QQ OneBot runtime. ChatBridge downloads the official NapCat Shell runtime into `.runtime/onebot-runtime/napcat-shell/`, writes the OneBot HTTP API and reverse HTTP event configuration, and opens the login QR code in the dialog. If NapCat cannot be installed, it falls back to a self-contained Lagrange.OneBot runtime. Media-only QQ messages are acknowledged and cached as context for the sender's next text message. QQ messages that contain both text and an image or file are submitted to the agent with the saved local attachment path. QQ file receive supports OneBot HTTP URLs, `file://` URLs, local paths such as `F:\...`, and `file_id` / `get_file` fallback when provided by the runtime.
 
 If you prefer your own runtime, set `CHATBRIDGE_ONEBOT_RUNTIME_COMMAND` to a local LLOneBot, Lagrange.OneBot, or NapCat launcher. In that mode, keep the OneBot HTTP API at `http://127.0.0.1:3000` and reverse HTTP events at `http://127.0.0.1:5701/`. Review the runtime's license and local legal requirements before use.
 

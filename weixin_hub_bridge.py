@@ -260,6 +260,7 @@ class WeixinBridge:
             on_empty_prompt=self._runtime_empty_prompt,
             on_before_submit=self._runtime_before_submit,
             on_after_submit=self._runtime_after_submit,
+            translate=lambda key, **kwargs: self._t(key, **kwargs),
             log=lambda message: print(f"[bridge] {message}", flush=True),
         )
         self.control_runtime = BridgeControlRuntime(

@@ -2213,8 +2213,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
 
         prompt = bridge.submit_payloads[-1]["prompt"]
         self.assertTrue(prompt.startswith("你能看到这张图吗"))
-        self.assertIn("用户发送了以下附件", prompt)
-        self.assertIn("图片: image-1.jpg", prompt)
+        self.assertIn("image-1.jpg", prompt)
         self.assertIn(str(saved_image), prompt)
         self.assertNotIn("sender-test", bridge.pending_media_context)
 
@@ -2257,7 +2256,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
 
         prompt = bridge.submit_payloads[-1]["prompt"]
         self.assertTrue(prompt.startswith("请总结这个文件"))
-        self.assertIn("文件: report.pdf", prompt)
+        self.assertIn("report.pdf", prompt)
         self.assertIn(str(saved_file), prompt)
 
     def test_handle_message_ignores_expired_pending_media_context(self) -> None:

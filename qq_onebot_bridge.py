@@ -278,6 +278,7 @@ class QQOneBotBridge:
             send_reply=self._send_reply,
             interrupt_runtime=self.interrupt_runtime,
             on_after_submit=self._start_submitted_task_delivery,
+            translate=lambda key, **kwargs: self._t(key, **kwargs),
             log=_log,
         )
         self.pending_task_store = JsonBackedTaskStore(

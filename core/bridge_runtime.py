@@ -118,36 +118,51 @@ def build_prompt_with_media(
     prompt: str,
     attachments: list[Attachment],
     errors: list[str],
+    translate: Callable[..., str] | None = None,
 ) -> str:
     parts: list[str] = []
     cleaned_prompt = str(prompt or "").strip()
     if cleaned_prompt:
         parts.append(cleaned_prompt)
     if attachments:
-        lines = ["用户发送了以下附件，已保存到本地："]
+        lines = [_translate(translate, "bridge.media.prompt.header", "用户发送了以下附件，已保存到本地：")]
         has_image = False
         for attachment in attachments:
             is_image = attachment.get("kind") == "image"
             has_image = has_image or is_image
-            label = "图片" if is_image else "文件"
-            lines.append(f"- {label}: {attachment.get('name') or '-'}")
-            lines.append(f"  本地路径: {attachment.get('path') or '-'}")
+            label = _translate(translate, "bridge.media.kind.image", "图片") if is_image else _translate(translate, "bridge.media.kind.file", "文件")
+            lines.append(_translate(translate, "bridge.media.prompt.item", "- {label}: {name}", label=label, name=attachment.get("name") or "-"))
+            lines.append(_translate(translate, "bridge.media.prompt.path", "  本地路径: {path}", path=attachment.get("path") or "-"))
         if has_image:
-            lines.append("如果附件包含图片，必须先查看本地图片路径中的图片内容，再回答用户。")
+            lines.append(
+                _translate(
+                    translate,
+                    "bridge.media.prompt.image_instruction",
+                    "如果附件包含图片，必须先查看本地图片路径中的图片内容，再回答用户。",
+                )
+            )
         if cleaned_prompt:
-            lines.append("请结合用户文字和这些附件处理，不要忽略附件内容。")
+            lines.append(_translate(translate, "bridge.media.prompt.with_text", "请结合用户文字和这些附件处理，不要忽略附件内容。"))
         else:
-            lines.append("请根据这些附件继续处理。")
+            lines.append(_translate(translate, "bridge.media.prompt.media_only", "请根据这些附件继续处理。"))
         parts.append("\n".join(lines))
     if errors:
-        parts.append("以下附件接收失败：\n" + "\n".join(errors))
+        parts.append(_translate(translate, "bridge.media.prompt.errors", "以下附件接收失败：\n{errors}", errors="\n".join(errors)))
     return "\n\n".join(part for part in parts if part).strip()
 
-def build_media_context_reply(attachments: list[Attachment]) -> str:
+def build_media_context_reply(attachments: list[Attachment], translate: Callable[..., str] | None = None) -> str:
     count = len(attachments)
     if count <= 0:
         return ""
-    return f"已收到 {count} 个附件，继续发送文字说明后我会一起处理。"
+    return _translate(translate, "bridge.media.context.reply", "已收到 {count} 个附件，继续发送文字说明后我会一起处理。", count=count)
+
+def _translate(translate: Callable[..., str] | None, key: str, fallback: str, **kwargs: object) -> str:
+    if translate is None:
+        return fallback.format(**kwargs)
+    value = str(translate(key, **kwargs) or "")
+    if value == key:
+        return fallback.format(**kwargs)
+    return value
 
 class BridgeMessageRuntime:
     def __init__(
@@ -168,6 +183,7 @@ class BridgeMessageRuntime:
         on_before_submit: Callable[[IncomingBridgeMessage, Any, str, bool], None] | None = None,
         on_after_submit: Callable[[IncomingBridgeMessage, Any, BridgeSubmittedTask], None] | None = None,
         interrupt_runtime: Any | None = None,
+        translate: Callable[..., str] | None = None,
         log: Callable[[str], None] | None = None,
     ) -> None:
         self.pending_media = pending_media
@@ -185,6 +201,7 @@ class BridgeMessageRuntime:
         self.on_before_submit = on_before_submit or (lambda _message, _session, _prompt, _passthrough: None)
         self.on_after_submit = on_after_submit or (lambda _message, _session, _submitted: None)
         self.interrupt_runtime = interrupt_runtime
+        self.translate = translate
         self.log = log or (lambda _message: None)
 
     def handle_message(self, message: IncomingBridgeMessage) -> BridgeSubmittedTask | None:
@@ -204,13 +221,16 @@ class BridgeMessageRuntime:
         if not text:
             if message.attachments:
                 self.pending_media.remember(message.sender_id, message.attachments)
-                reply = build_media_context_reply(message.attachments)
+                reply = build_media_context_reply(message.attachments, self.translate)
                 if reply:
                     self.send_reply(message.reply_target, reply)
                 self.on_media_context(message)
                 return None
             if message.attachment_errors:
-                self.send_reply(message.reply_target, "附件接收失败：\n" + "\n".join(message.attachment_errors))
+                self.send_reply(
+                    message.reply_target,
+                    _translate(self.translate, "bridge.media.error.reply", "附件接收失败：\n{errors}", errors="\n".join(message.attachment_errors)),
+                )
                 self.on_media_error(message)
             return None
 
@@ -222,6 +242,7 @@ class BridgeMessageRuntime:
             decision.prompt,
             [*self.pending_media.consume(message.sender_id), *message.attachments],
             message.attachment_errors,
+            self.translate,
         )
         if not prompt:
             self.on_empty_prompt(message, session)
