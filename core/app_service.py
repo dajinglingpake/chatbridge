@@ -40,7 +40,7 @@ from core.json_store import load_json, save_json
 from core.platform_compat import creationflags
 from core.runtime_paths import APP_SERVICE_ERR_LOG, APP_SERVICE_OUT_LOG, LOG_DIR, SERVICE_ACTION_LOG_PATH, SERVICE_ACTION_STATE_PATH, STATE_DIR
 from core.state_models import HubAgentSnapshot, HubTask, JsonObject, WeixinConversationBinding
-from core.weixin_notifier import broadcast_weixin_notice_by_kind
+from core.bridge_notifier import broadcast_bridge_notice_by_kind
 
 
 ActionRunner = Callable[[], list[str]]
@@ -130,7 +130,7 @@ def run_named_action(action: str) -> ServiceResult:
         return ServiceResult(ok=True, message=result_message)
     if action not in WEIXIN_NOTICE_ACTIONS:
         return ServiceResult(ok=True, message=result_message)
-    notice = broadcast_weixin_notice_by_kind("service", f"服务操作: {action}", result_message)
+    notice = broadcast_bridge_notice_by_kind("service", f"服务操作: {action}", result_message, channel="wechat")
     return ServiceResult(ok=True, message=f"{result_message} | {notice.summary}")
 
 
@@ -145,7 +145,7 @@ def _broadcast_pre_stop_notice(action: str):
         f"QQ OneBot Runtime PID: {snapshot.onebot_runtime_pid or '-'}\n"
         f"QQ Bridge PID: {snapshot.qq_bridge_pid or '-'}"
     )
-    notice = broadcast_weixin_notice_by_kind("service", f"服务操作: {action}", detail)
+    notice = broadcast_bridge_notice_by_kind("service", f"服务操作: {action}", detail, channel="wechat")
     if notice.recipient_count > 0 and notice.error != "disabled":
         time.sleep(STOP_NOTICE_DRAIN_SECONDS)
     return notice
@@ -310,12 +310,12 @@ def submit_hub_task(
         message = f"任务已入队：{task_id or request_id}"
         if source.strip().lower().startswith("qq"):
             return ServiceResult(ok=True, message=message)
-        notice = broadcast_weixin_notice_by_kind("task", "提交任务", message)
+        notice = broadcast_bridge_notice_by_kind("task", "提交任务", message, channel="wechat")
         return ServiceResult(ok=True, message=f"{message} | {notice.summary}")
     message = f"提交失败：{response.error or 'unknown error'}"
     if source.strip().lower().startswith("qq"):
         return ServiceResult(ok=False, message=message)
-    notice = broadcast_weixin_notice_by_kind("task", "提交任务", message)
+    notice = broadcast_bridge_notice_by_kind("task", "提交任务", message, channel="wechat")
     return ServiceResult(ok=False, message=f"{message} | {notice.summary}")
 
 
@@ -345,11 +345,11 @@ def run_repair_command(command: str, label: str = "") -> ServiceResult:
     if code == 0:
         suffix = f" | {output}" if output else ""
         message = f"{title} 执行完成{suffix}"
-        notice = broadcast_weixin_notice_by_kind("config", title, message)
+        notice = broadcast_bridge_notice_by_kind("config", title, message, channel="wechat")
         return ServiceResult(ok=True, message=f"{message} | {notice.summary}")
     suffix = f" | {output}" if output else ""
     message = f"{title} 执行失败，退出码 {code}{suffix}"
-    notice = broadcast_weixin_notice_by_kind("config", title, message)
+    notice = broadcast_bridge_notice_by_kind("config", title, message, channel="wechat")
     return ServiceResult(ok=False, message=f"{message} | {notice.summary}")
 
 
@@ -398,7 +398,7 @@ def save_agent(
         agent_snapshot = _parse_hub_agent(response.payload.get("agent"))
         agent_name = agent_snapshot.name if agent_snapshot is not None else cleaned_id
         message = f"已保存 Agent：{agent_name}"
-        notice = broadcast_weixin_notice_by_kind("config", "保存 Agent", message)
+        notice = broadcast_bridge_notice_by_kind("config", "保存 Agent", message, channel="wechat")
         return AgentServiceResult(ok=True, message=f"{message} | {notice.summary}", agent=agent_snapshot)
     return AgentServiceResult(ok=False, message=f"保存失败：{response.error or 'unknown error'}")
 
@@ -414,7 +414,7 @@ def delete_agent(agent_id: str) -> ServiceResult:
         return ServiceResult(ok=False, message="删除失败：Hub 响应超时")
     if response.ok:
         message = f"已删除 Agent：{cleaned_id}"
-        notice = broadcast_weixin_notice_by_kind("config", "删除 Agent", message)
+        notice = broadcast_bridge_notice_by_kind("config", "删除 Agent", message, channel="wechat")
         return ServiceResult(ok=True, message=f"{message} | {notice.summary}")
     return ServiceResult(ok=False, message=f"删除失败：{response.error or 'unknown error'}")
 
@@ -443,10 +443,10 @@ def switch_bridge_agent(agent_id: str, restart_if_running: bool = True) -> Servi
     if restart_if_running and snapshot.bridge_running:
         messages = restart_bridge()
         message = f"已切换微信桥默认 Agent：{cleaned_id} | {' | '.join(messages)}"
-        notice = broadcast_weixin_notice_by_kind("config", "切换微信桥默认 Agent", message, config=config)
+        notice = broadcast_bridge_notice_by_kind("config", "切换微信桥默认 Agent", message, channel="wechat", config=config)
         return ServiceResult(ok=True, message=f"{message} | {notice.summary}")
     message = f"已切换微信桥默认 Agent：{cleaned_id}"
-    notice = broadcast_weixin_notice_by_kind("config", "切换微信桥默认 Agent", message, config=config)
+    notice = broadcast_bridge_notice_by_kind("config", "切换微信桥默认 Agent", message, channel="wechat", config=config)
     return ServiceResult(ok=True, message=f"{message} | {notice.summary}")
 
 
@@ -469,7 +469,7 @@ def set_weixin_notice_enabled(service_enabled: bool, config_enabled: bool, task_
 def terminate_external_agent(pid: int) -> ServiceResult:
     message = stop_external_agent_process(int(pid))
     ok = message.startswith("已结束")
-    notice = broadcast_weixin_notice_by_kind("service", "结束外部 Agent 进程", message)
+    notice = broadcast_bridge_notice_by_kind("service", "结束外部 Agent 进程", message, channel="wechat")
     return ServiceResult(ok=ok, message=f"{message} | {notice.summary}")
 
 
@@ -501,7 +501,7 @@ def switch_weixin_session_backend(sender_id: str, backend: str) -> ServiceResult
     if snapshot.bridge_running:
         restart_messages = restart_bridge()
         message = f"{message} | {' | '.join(restart_messages)}"
-    notice = broadcast_weixin_notice_by_kind("config", "切换微信会话后端", message)
+    notice = broadcast_bridge_notice_by_kind("config", "切换微信会话后端", message, channel="wechat")
     return ServiceResult(ok=True, message=f"{message} | {notice.summary}")
 
 
@@ -524,7 +524,7 @@ def reset_weixin_conversation(sender_id: str) -> ServiceResult:
     if snapshot.bridge_running:
         restart_messages = restart_bridge()
         message = f"{message} | {' | '.join(restart_messages)}"
-    notice = broadcast_weixin_notice_by_kind("config", "重置微信会话", message)
+    notice = broadcast_bridge_notice_by_kind("config", "重置微信会话", message, channel="wechat")
     return ServiceResult(ok=True, message=f"{message} | {notice.summary}")
 
 

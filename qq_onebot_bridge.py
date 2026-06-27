@@ -44,13 +44,20 @@ from core.bridge_session_utils import (
     sanitize_session_name,
     split_named_path_args,
 )
-from core.bridge_task_delivery import PollingTaskDeliveryController, TaskUpdateDeliveryController, format_bridge_progress_reply, format_bridge_task_reply
+from core.bridge_task_delivery import (
+    PollingTaskDeliveryController,
+    TaskUpdateDeliveryController,
+    build_terminal_task_delivery_plan,
+    format_bridge_progress_reply,
+)
 from core.bridge_task_query_runtime import BridgeTaskQueryRuntime
 from core.bridge_task_submit_runtime import BridgeTaskSubmitContext, BridgeTaskSubmitRuntime
+from core.bridge_typing_runtime import should_send_typing_keepalive
 from core.codex_model_catalog import load_codex_model_catalog
 from core.json_store import load_json, save_json
 from core.runtime_paths import RUNTIME_DIR, SERVICE_ACTION_STATE_PATH, SESSION_DIR, STATE_DIR, WORKSPACE_DIR
 from core.state_models import HubTask, BridgeConversationBinding, BridgeSessionMeta
+from core.bridge_followup_hint import build_task_followup_hint
 from localization import Localizer
 from local_ipc import bridge_request_dir, cleanup_processed_requests, create_request, mark_bridge_processed, read_request, wait_for_response
 
@@ -224,8 +231,8 @@ class QQOneBotBridge:
             handle_control=self.command_router.handle,
             send_reply=self._send_reply,
             save_conversations=self._save_conversations,
-            unsupported_agent_slash_reply=lambda _command: "QQ 桥暂不支持这个桥接命令。发送 /help 查看当前支持的命令。",
-            unsupported_bridge_command_reply=lambda _command: "QQ 桥暂不支持这个桥接命令。发送 /help 查看当前支持的命令。",
+            unsupported_agent_slash_reply=lambda command: self._t("bridge.passthrough.unsupported", command=command),
+            unsupported_bridge_command_reply=lambda command: self._t("bridge.passthrough.unsupported", command=command),
             reject_unknown_bridge_slash=True,
             reject_unknown_passthrough_slash=False,
             submit_raw_passthrough=True,
@@ -446,17 +453,26 @@ class QQOneBotBridge:
             f"task terminal task_id={task.id} status={task.status} "
             f"output_preview={task.output[:80]!r} error_preview={task.error[:80]!r}"
         )
-        final_reply = format_bridge_task_reply(
+        plan = build_terminal_task_delivery_plan(
             task,
             last_progress_text=pending.last_progress_text,
             context_left_percent=self._resolve_task_context_left_percent(task),
+            translate=self._t,
+            session_name=task.session_name or self._session_name(pending.sender_key),
+            session_id=task.session_id or "-",
+            backend=task.backend or self.config.default_backend,
+            hint=build_task_followup_hint(
+                task_id=task.id,
+                session_name=task.session_name or self._session_name(pending.sender_key),
+                allow_retry=True,
+            ),
         )
-        if final_reply:
-            self._send_reply(event, final_reply)
+        if plan.reply:
+            self._send_reply(event, plan.reply)
 
     def _send_typing_keepalive(self, event: dict[str, Any], last_sent_at: float) -> float:
         now_value = time.time()
-        if last_sent_at and now_value - last_sent_at < QQ_TYPING_KEEPALIVE_SECONDS:
+        if not should_send_typing_keepalive(last_sent_at, now_seconds=now_value, keepalive_seconds=QQ_TYPING_KEEPALIVE_SECONDS):
             return last_sent_at
         if self._send_typing_best_effort(event, enabled=True):
             return now_value
@@ -605,7 +621,7 @@ class QQOneBotBridge:
 
     @staticmethod
     def _now_iso() -> str:
-        from core.weixin_message_format import now_iso
+        from core.bridge_message_format import now_iso
 
         return now_iso()
 

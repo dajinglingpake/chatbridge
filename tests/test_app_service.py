@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from core.app_service import ServiceResult, run_named_action, schedule_named_action, submit_hub_task
-from core.weixin_notifier import NoticeResult
+from core.bridge_notifier import NoticeResult
 
 
 class AppServiceTests(unittest.TestCase):
@@ -48,7 +48,7 @@ class AppServiceTests(unittest.TestCase):
             events.append("stop")
             return ["Bridge stopped", "Hub stopped"]
 
-        def notify(kind: str, title: str, detail: str):
+        def notify(kind: str, title: str, detail: str, **_kwargs):
             events.append("notify")
             self.assertEqual("service", kind)
             self.assertEqual("服务操作: stop", title)
@@ -57,7 +57,7 @@ class AppServiceTests(unittest.TestCase):
 
         with (
             patch("core.app_service.stop_all", side_effect=stop_all),
-            patch("core.app_service.broadcast_weixin_notice_by_kind", side_effect=notify) as mocked_notify,
+            patch("core.app_service.broadcast_bridge_notice_by_kind", side_effect=notify) as mocked_notify,
             patch("core.app_service.get_runtime_snapshot") as mocked_snapshot,
             patch("core.app_service.time.sleep") as mocked_sleep,
         ):
@@ -72,7 +72,7 @@ class AppServiceTests(unittest.TestCase):
     def test_stop_action_in_qq_mode_does_not_notify_weixin(self) -> None:
         with (
             patch("core.app_service.stop_all", return_value=["QQ Bridge stopped", "OneBot stopped", "Hub stopped"]) as mocked_stop,
-            patch("core.app_service.broadcast_weixin_notice_by_kind") as mocked_notify,
+            patch("core.app_service.broadcast_bridge_notice_by_kind") as mocked_notify,
             patch("core.app_service.get_runtime_snapshot") as mocked_snapshot,
         ):
             mocked_snapshot.return_value = MagicMock(
@@ -96,7 +96,7 @@ class AppServiceTests(unittest.TestCase):
             events.append("start")
             return ["Hub started", "Bridge started"]
 
-        def notify(kind: str, title: str, detail: str):
+        def notify(kind: str, title: str, detail: str, **_kwargs):
             events.append("notify")
             self.assertEqual("服务操作: start", title)
             self.assertEqual("Hub started | Bridge started", detail)
@@ -104,7 +104,7 @@ class AppServiceTests(unittest.TestCase):
 
         with (
             patch("core.app_service.start_all", side_effect=start_all),
-            patch("core.app_service.broadcast_weixin_notice_by_kind", side_effect=notify) as mocked_notify,
+            patch("core.app_service.broadcast_bridge_notice_by_kind", side_effect=notify) as mocked_notify,
         ):
             result = run_named_action("start")
 
@@ -115,7 +115,7 @@ class AppServiceTests(unittest.TestCase):
     def test_start_weixin_action_uses_weixin_notice(self) -> None:
         with (
             patch("core.app_service.start_all", return_value=["QQ stopped", "Hub started", "Bridge started"]) as mocked_start,
-            patch("core.app_service.broadcast_weixin_notice_by_kind", return_value=NoticeResult(sent_count=1, recipient_count=1)) as mocked_notify,
+            patch("core.app_service.broadcast_bridge_notice_by_kind", return_value=NoticeResult(sent_count=1, recipient_count=1, platform_label="微信")) as mocked_notify,
         ):
             result = run_named_action("start-weixin")
 
@@ -127,7 +127,7 @@ class AppServiceTests(unittest.TestCase):
     def test_qq_bridge_action_does_not_notify_weixin(self) -> None:
         with (
             patch("core.app_service.restart_qq_bridge", return_value=["QQ Bridge stopped", "QQ Bridge started"]) as mocked_restart,
-            patch("core.app_service.broadcast_weixin_notice_by_kind") as mocked_notify,
+            patch("core.app_service.broadcast_bridge_notice_by_kind") as mocked_notify,
         ):
             result = run_named_action("restart-qq-bridge")
 
@@ -139,7 +139,7 @@ class AppServiceTests(unittest.TestCase):
     def test_restart_onebot_runtime_is_allowed_without_weixin_notice(self) -> None:
         with (
             patch("core.app_service.restart_onebot_runtime", return_value=["OneBot restarted"]) as mocked_restart,
-            patch("core.app_service.broadcast_weixin_notice_by_kind") as mocked_notify,
+            patch("core.app_service.broadcast_bridge_notice_by_kind") as mocked_notify,
         ):
             result = run_named_action("restart-onebot-runtime")
 
@@ -153,7 +153,7 @@ class AppServiceTests(unittest.TestCase):
         with (
             patch("core.app_service.create_request", return_value="req-qq-web") as mocked_create,
             patch("core.app_service.wait_for_response", return_value=response),
-            patch("core.app_service.broadcast_weixin_notice_by_kind") as mocked_notify,
+            patch("core.app_service.broadcast_bridge_notice_by_kind") as mocked_notify,
         ):
             result = submit_hub_task("main", "hello", source="qq-web")
 

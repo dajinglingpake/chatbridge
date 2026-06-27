@@ -13,7 +13,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from bridge_config import BridgeConfig
 from core.state_models import IpcResponseEnvelope
-from core.weixin_notifier import build_task_followup_hint
+from core.bridge_followup_hint import build_task_followup_hint
 from weixin_hub_bridge import WeixinBridge
 
 

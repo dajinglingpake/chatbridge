@@ -9,7 +9,7 @@ from unittest.mock import patch
 from bridge_config import BridgeConfig
 from core import app_service
 from core.state_models import RuntimeSnapshot
-from core.weixin_notifier import NoticeResult
+from core.bridge_notifier import NoticeResult
 
 
 def _runtime_snapshot(*, bridge_running: bool) -> RuntimeSnapshot:
@@ -59,7 +59,7 @@ class AppServiceConversationTests(unittest.TestCase):
                 patch.object(app_service, "BRIDGE_CONVERSATIONS_PATH", conversations_path),
                 patch.object(app_service.BridgeConfig, "load", return_value=_bridge_config(default_backend="codex")),
                 patch.object(app_service, "get_runtime_snapshot", return_value=_runtime_snapshot(bridge_running=False)),
-                patch.object(app_service, "broadcast_weixin_notice_by_kind", return_value=_notice_result()),
+            patch.object(app_service, "broadcast_bridge_notice_by_kind", return_value=_notice_result()),
             ):
                 result = app_service.switch_weixin_session_backend("sender-a", "claude")
 
@@ -96,7 +96,7 @@ class AppServiceConversationTests(unittest.TestCase):
                 patch.object(app_service, "BRIDGE_CONVERSATIONS_PATH", conversations_path),
                 patch.object(app_service.BridgeConfig, "load", return_value=_bridge_config(default_backend="codex")),
                 patch.object(app_service, "get_runtime_snapshot", return_value=_runtime_snapshot(bridge_running=False)),
-                patch.object(app_service, "broadcast_weixin_notice_by_kind", return_value=_notice_result()),
+            patch.object(app_service, "broadcast_bridge_notice_by_kind", return_value=_notice_result()),
             ):
                 result = app_service.reset_weixin_conversation("sender-a")
 

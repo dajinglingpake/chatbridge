@@ -1,18 +1,29 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from core.bridge_message_control import extract_progress_delta, normalize_message_for_dedupe
 from core.state_models import HubTask
-from core.weixin_message_format import format_duration_since, prefix_weixin_output
+from core.bridge_message_format import format_duration_since, prefix_bridge_output
 
 
 TERMINAL_TASK_STATUSES = frozenset({"succeeded", "failed", "canceled", "unknown_after_restart"})
 
+@dataclass(frozen=True)
+class TerminalTaskDeliveryPlan:
+    reply: str
+    event: str
+    result_preview: str = ""
+    error_preview: str = ""
+    deduped: bool = False
+    handled: bool = False
+    failed: bool = False
+
 
 def format_bridge_progress_reply(task: HubTask, *, progress_text: str | None = None, context_left_percent: int | None = None) -> str:
-    return prefix_weixin_output(
+    return prefix_bridge_output(
         "running",
         format_duration_since(task.started_at or task.created_at),
         str(progress_text if progress_text is not None else task.progress_text).strip(),
@@ -21,18 +32,103 @@ def format_bridge_progress_reply(task: HubTask, *, progress_text: str | None = N
     )
 
 
-def format_bridge_task_reply(task: HubTask, *, last_progress_text: str = "", context_left_percent: int | None = None) -> str:
+def format_bridge_task_reply(
+    task: HubTask,
+    *,
+    last_progress_text: str = "",
+    context_left_percent: int | None = None,
+    translate: Callable[..., str] | None = None,
+    session_name: str = "",
+    session_id: str = "",
+    backend: str = "",
+    hint: str = "",
+) -> str:
     if task.status == "succeeded":
         output = task.output.strip() or "(empty)"
         body = "" if last_progress_text and normalize_message_for_dedupe(output) == normalize_message_for_dedupe(last_progress_text) else output
-        return prefix_weixin_output(
+        return prefix_bridge_output(
             "done",
             format_duration_since(task.started_at or task.created_at, ended_at=task.finished_at),
             body,
             at=task.finished_at,
             context_left_percent=context_left_percent,
         )
-    return f"任务 {task.status or 'failed'}：{(task.error or 'unknown error').strip()}"
+    status = str(task.status or "failed").strip() or "failed"
+    error = (task.error or "task failed").strip()
+    if status == "canceled":
+        return _translate(
+            translate,
+            "bridge.task.canceled",
+            "{backend} 任务已取消\n任务 ID: {task_id}\n会话: {session}\n会话 ID: {session_id}\n原因: {error}\n\n{hint}",
+            task_id=task.id,
+            session=session_name or task.session_name or "default",
+            session_id=session_id or task.session_id or "-",
+            backend=backend or task.backend or "unknown",
+            error=error or "task canceled",
+            hint=hint,
+        )
+    return _translate(
+        translate,
+        "bridge.task.failed",
+        "{backend} 任务失败\n任务 ID: {task_id}\n会话: {session}\n会话 ID: {session_id}\n原因: {error}\n\n{hint}",
+        task_id=task.id,
+        session=session_name or task.session_name or "default",
+        session_id=session_id or task.session_id or "-",
+        backend=backend or task.backend or "unknown",
+        error=error,
+        hint=hint,
+    )
+
+def build_terminal_task_delivery_plan(
+    task: HubTask,
+    *,
+    last_progress_text: str = "",
+    context_left_percent: int | None = None,
+    translate: Callable[..., str] | None = None,
+    session_name: str = "",
+    session_id: str = "",
+    backend: str = "",
+    hint: str = "",
+) -> TerminalTaskDeliveryPlan:
+    reply = format_bridge_task_reply(
+        task,
+        last_progress_text=last_progress_text,
+        context_left_percent=context_left_percent,
+        translate=translate,
+        session_name=session_name,
+        session_id=session_id,
+        backend=backend,
+        hint=hint,
+    )
+    output = (task.output or "").strip()
+    deduped = bool(output and last_progress_text and normalize_message_for_dedupe(output) == normalize_message_for_dedupe(last_progress_text))
+    status = str(task.status or "").strip()
+    if status == "succeeded":
+        return TerminalTaskDeliveryPlan(
+            reply=reply,
+            event="succeeded",
+            result_preview=output[:240],
+            deduped=deduped,
+            handled=True,
+        )
+    if status == "canceled":
+        return TerminalTaskDeliveryPlan(
+            reply=reply,
+            event="canceled",
+            error_preview=(task.error or "").strip()[:240],
+        )
+    return TerminalTaskDeliveryPlan(
+        reply=reply,
+        event="failed",
+        error_preview=(task.error or "").strip()[:240],
+        failed=True,
+    )
+
+def _translate(translate: Callable[..., str] | None, key: str, fallback: str, **kwargs: object) -> str:
+    if translate is None:
+        return fallback.format(**kwargs)
+    value = str(translate(key, **kwargs) or "")
+    return fallback.format(**kwargs) if value == key or not value.strip() else value
 
 
 class PollingTaskDeliveryController:

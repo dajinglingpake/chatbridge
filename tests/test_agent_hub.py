@@ -378,7 +378,7 @@ class AgentHubCancellationTests(unittest.TestCase):
         with (
             patch("agent_hub.STATE_PATH", self.temp_path / "state" / "agent_hub_state.json"),
             patch("agent_hub.discover_external_agent_processes", return_value=[]),
-            patch("agent_hub.broadcast_weixin_notice_by_kind") as mocked_broadcast,
+            patch("agent_hub.broadcast_bridge_notice_by_kind") as mocked_broadcast,
         ):
             hub = MultiCodexHub(config)
             hub._notify_task_result(task, succeeded=True)
@@ -414,7 +414,7 @@ class AgentHubCancellationTests(unittest.TestCase):
         with (
             patch("agent_hub.STATE_PATH", self.temp_path / "state" / "agent_hub_state.json"),
             patch("agent_hub.discover_external_agent_processes", return_value=[]),
-            patch("agent_hub.broadcast_weixin_notice_by_kind") as mocked_broadcast,
+            patch("agent_hub.broadcast_bridge_notice_by_kind") as mocked_broadcast,
         ):
             hub = MultiCodexHub(config)
             hub._notify_task_result(task, succeeded=True)

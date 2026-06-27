@@ -783,7 +783,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
 
     def test_notify_service_started_broadcasts_service_notice(self) -> None:
         bridge = FeedbackBridge(BridgeConfig.load(), [])
-        with patch("weixin_hub_bridge.broadcast_weixin_notice_by_kind") as mocked_broadcast:
+        with patch("weixin_hub_bridge.broadcast_bridge_notice_by_kind") as mocked_broadcast:
             mocked_broadcast.return_value = SimpleNamespace(summary="已通知 1 个微信会话", error="")
             bridge._notify_service_started()
         mocked_broadcast.assert_called_once()
@@ -793,7 +793,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
 
     def test_notify_service_started_logs_summary(self) -> None:
         bridge = FeedbackBridge(BridgeConfig.load(), [])
-        with patch("weixin_hub_bridge.broadcast_weixin_notice_by_kind") as mocked_broadcast:
+        with patch("weixin_hub_bridge.broadcast_bridge_notice_by_kind") as mocked_broadcast:
             mocked_broadcast.return_value = SimpleNamespace(summary="已通知 1 个微信会话", error="")
             with patch("builtins.print") as mocked_print:
                 bridge._notify_service_started()
@@ -814,7 +814,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
             encoding="utf-8",
         )
         with (
-            patch("weixin_hub_bridge.broadcast_weixin_notice_by_kind") as mocked_broadcast,
+                patch("weixin_hub_bridge.broadcast_bridge_notice_by_kind") as mocked_broadcast,
             patch("builtins.print") as mocked_print,
         ):
             bridge._notify_service_started()
@@ -825,7 +825,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         )
 
     def test_notify_test_command_returns_delivery_summary(self) -> None:
-        with patch("weixin_hub_bridge.broadcast_weixin_notice_by_kind") as mocked_broadcast:
+        with patch("weixin_hub_bridge.broadcast_bridge_notice_by_kind") as mocked_broadcast:
             mocked_broadcast.return_value = SimpleNamespace(summary="已通知 1/4 个微信会话，剩余发送失败：missing context token", error="missing context token")
             reply, handled = self.bridge._handle_control_command("sender-test", "/notify test")
         self.assertTrue(handled)

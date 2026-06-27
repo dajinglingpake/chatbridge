@@ -28,8 +28,11 @@ from core.bridge_command_catalog import HELP_MESSAGE_KEYS, normalize_command_tex
 from core.bridge_command_router import BridgeCommandRouter
 from core.bridge_conversation_runtime import BridgeConversationRuntime
 from core.bridge_control_runtime import BridgeControlRuntime
+from core.bridge_event_log import append_bridge_event, append_bridge_message_audit, load_recent_bridge_events
+from core.bridge_followup_hint import build_task_followup_hint
 from core.bridge_interrupt_runtime import BridgeInterruptRuntime
-from core.bridge_message_control import normalize_context_left_percent, normalize_message_for_dedupe
+from core.bridge_message_control import normalize_context_left_percent
+from core.bridge_message_filters import BridgeDuplicateMessageFilter, has_ignored_prefix
 from core.bridge_pending_tasks import JsonBackedTaskStore
 from core.bridge_runtime import (
     BridgeMessageRuntime,
@@ -51,9 +54,10 @@ from core.bridge_session_utils import (
     sanitize_session_name,
     split_named_path_args,
 )
-from core.bridge_task_delivery import TaskUpdateDeliveryController
+from core.bridge_task_delivery import TaskUpdateDeliveryController, build_terminal_task_delivery_plan, format_bridge_progress_reply
 from core.bridge_task_query_runtime import BridgeTaskQueryRuntime
 from core.bridge_task_submit_runtime import BridgeTaskSubmitContext, BridgeTaskSubmitRuntime
+from core.bridge_typing_runtime import should_refresh_typing_ticket, should_send_typing_keepalive
 from core.codex_model_catalog import display_model, display_reasoning_effort, load_codex_model_catalog
 from core.context_relations import build_context_relation_lines
 from core.http_json import request_json
@@ -67,7 +71,6 @@ from core.runtime_paths import (
     SERVICE_ACTION_STATE_PATH,
     BRIDGE_STATE_PATH,
     BRIDGE_CONVERSATIONS_PATH,
-    LOG_DIR,
     PROJECT_SPACES_PATH as BRIDGE_PROJECT_SPACES_PATH,
     RUNTIME_DIR,
     SESSION_DIR,
@@ -83,8 +86,8 @@ from core.state_models import (
 )
 from core.weixin_send_gate import sender_send_lock
 from core.weixin_text_outbox import MAX_RETRY_ATTEMPTS, enqueue_text_message, pop_text_messages, requeue_text_message
-from core.weixin_notifier import broadcast_weixin_notice_by_kind, build_task_followup_hint
-from core.weixin_message_format import format_duration_since, format_weixin_reply, now_iso, prefix_weixin_output
+from core.bridge_notifier import broadcast_bridge_notice_by_kind
+from core.bridge_message_format import format_bridge_reply, now_iso
 from local_ipc import bridge_request_dir, cleanup_processed_requests, mark_bridge_processed, create_request, read_request, wait_for_response
 from localization import Localizer
 
@@ -367,8 +370,7 @@ class WeixinBridge:
             translate=lambda key, **kwargs: self._t(key, **kwargs),
         )
         self.message_runtime.interrupt_runtime = self.interrupt_runtime
-        self._recent_message_keys: list[str] = []
-        self._recent_message_fingerprints: dict[str, float] = {}
+        self.duplicate_filter = BridgeDuplicateMessageFilter(now=time.monotonic)
         self._send_worker_started = False
         self._typing_worker_started = False
         self._pending_tasks_save_lock = threading.Lock()
@@ -588,7 +590,7 @@ class WeixinBridge:
             f"账号: {self.config.active_account_id or '-'}\n"
             f"默认 Agent: {self.config.backend_id or 'main'}"
         )
-        result = broadcast_weixin_notice_by_kind("service", "Bridge 启动", detail, config=self.config)
+        result = broadcast_bridge_notice_by_kind("service", "Bridge 启动", detail, channel="wechat", config=self.config)
         print(f"[bridge] startup notice: {result.summary}", flush=True)
         if result.error and result.error != "disabled":
             print(f"[bridge] startup notice error: {result.error}", flush=True)
@@ -742,8 +744,7 @@ class WeixinBridge:
         )
 
     def _runtime_should_ignore(self, message: IncomingBridgeMessage) -> bool:
-        text = str(message.text or "")
-        return any(text.startswith(prefix) for prefix in self.config.ignore_prefixes)
+        return has_ignored_prefix(message.text, self.config.ignore_prefixes)
 
     def _runtime_is_duplicate(self, message: IncomingBridgeMessage) -> bool:
         return self._is_duplicate_message(
@@ -907,12 +908,17 @@ class WeixinBridge:
         tracked: WeixinPendingTaskState,
     ) -> bool:
         now_seconds = int(time.time())
-        if tracked.typing_last_sent_at and now_seconds - tracked.typing_last_sent_at < TYPING_KEEPALIVE_SECONDS:
+        if not should_send_typing_keepalive(
+            tracked.typing_last_sent_at,
+            now_seconds=now_seconds,
+            keepalive_seconds=TYPING_KEEPALIVE_SECONDS,
+        ):
             return False
-        if (
-            not tracked.typing_ticket
-            or not tracked.typing_ticket_refreshed_at
-            or now_seconds - tracked.typing_ticket_refreshed_at >= TYPING_TICKET_TTL_SECONDS
+        if should_refresh_typing_ticket(
+            tracked.typing_ticket,
+            tracked.typing_ticket_refreshed_at,
+            now_seconds=now_seconds,
+            ttl_seconds=TYPING_TICKET_TTL_SECONDS,
         ):
             tracked.typing_ticket = self._get_typing_ticket(
                 base_url,
@@ -955,11 +961,9 @@ class WeixinBridge:
                 token,
                 tracked.sender_id,
                 context_token,
-                prefix_weixin_output(
-                    "running",
-                    format_duration_since(task.started_at or task.created_at),
-                    progress_reply_text,
-                    at=now_iso(),
+                format_bridge_progress_reply(
+                    task,
+                    progress_text=progress_reply_text,
                     context_left_percent=self._resolve_task_context_left_percent(task),
                 ),
             )
@@ -1139,141 +1143,57 @@ class WeixinBridge:
     ) -> None:
         terminal_started = time.perf_counter()
         context_token = self._resolve_context_token_for_sender(tracked)
-        if task.status == "succeeded":
-            output = task.output.strip()
-            if output and normalize_message_for_dedupe(output) == normalize_message_for_dedupe(tracked.last_progress_text):
-                self._send_text(
-                    base_url,
-                    token,
-                    tracked.sender_id,
-                    context_token,
-                    prefix_weixin_output(
-                        "done",
-                        format_duration_since(task.started_at or task.created_at, ended_at=task.finished_at),
-                        "",
-                        at=task.finished_at or now_iso(),
-                        context_left_percent=self._resolve_task_context_left_percent(task),
-                    ),
-                )
-                self._stop_task_typing_async(base_url, token, tracked, task.id)
-                self._append_event_log(
-                    event="succeeded",
-                    task_id=task.id,
-                    sender_id=tracked.sender_id,
-                    session_name=task.session_name or tracked.session_name or "default",
-                    session_id=task.session_id or "",
-                    backend=task.backend or tracked.backend or self.config.default_backend,
-                    model=self._display_model(task.model.strip() or tracked.model),
-                    workdir=task.workdir.strip() or tracked.workdir or "-",
-                    status=task.status,
-                    result_preview=output[:240],
-                    source=tracked.source,
-                )
-                self.state.record_handled()
-                self._log_perf("notify_terminal", terminal_started, task_id=task.id, status=task.status, deduped="true")
-                return
-            if output:
-                self._send_text(
-                    base_url,
-                    token,
-                    tracked.sender_id,
-                    context_token,
-                    prefix_weixin_output(
-                        "done",
-                        format_duration_since(task.started_at or task.created_at, ended_at=task.finished_at),
-                        output,
-                        at=task.finished_at or now_iso(),
-                        context_left_percent=self._resolve_task_context_left_percent(task),
-                    ),
-                )
-            self._stop_task_typing_async(base_url, token, tracked, task.id)
-            self._append_event_log(
-                event="succeeded",
+        session_name = task.session_name or tracked.session_name or "default"
+        plan = build_terminal_task_delivery_plan(
+            task,
+            last_progress_text=tracked.last_progress_text,
+            context_left_percent=self._resolve_task_context_left_percent(task),
+            translate=self._t,
+            session_name=session_name,
+            session_id=task.session_id or "-",
+            backend=task.backend or tracked.backend or self.config.default_backend,
+            hint=build_task_followup_hint(
                 task_id=task.id,
-                sender_id=tracked.sender_id,
-                session_name=task.session_name or tracked.session_name or "default",
-                session_id=task.session_id or "",
-                backend=task.backend or tracked.backend or self.config.default_backend,
-                model=self._display_model(task.model.strip() or tracked.model),
-                workdir=task.workdir.strip() or tracked.workdir or "-",
-                status=task.status,
-                result_preview=(task.output or "").strip()[:240],
-                source=tracked.source,
-            )
-            self.state.record_handled()
-            self._log_perf("notify_terminal", terminal_started, task_id=task.id, status=task.status)
-            return
-        if task.status == "canceled":
+                session_name=session_name,
+                allow_retry=True,
+            ),
+        )
+        if plan.reply:
             self._send_text(
                 base_url,
                 token,
                 tracked.sender_id,
                 context_token,
-                self._t(
-                    "bridge.task.canceled",
-                    task_id=task.id,
-                    session=task.session_name or tracked.session_name or "default",
-                    session_id=task.session_id or "-",
-                    backend=task.backend or tracked.backend or self.config.default_backend,
-                    error=str(task.error or "task canceled").strip(),
-                    hint=build_task_followup_hint(
-                        task_id=task.id,
-                        session_name=task.session_name or tracked.session_name or "default",
-                        allow_retry=True,
-                    ),
-                ),
+                plan.reply,
             )
-            self._stop_task_typing_async(base_url, token, tracked, task.id)
-            self._append_event_log(
-                event="canceled",
-                task_id=task.id,
-                sender_id=tracked.sender_id,
-                session_name=task.session_name or tracked.session_name or "default",
-                session_id=task.session_id or "",
-                backend=task.backend or tracked.backend or self.config.default_backend,
-                model=self._display_model(task.model.strip() or tracked.model),
-                workdir=task.workdir.strip() or tracked.workdir or "-",
-                status=task.status,
-                error=(task.error or "").strip()[:240],
-                source=tracked.source,
-            )
-            self._log_perf("notify_terminal", terminal_started, task_id=task.id, status=task.status)
-            return
-        self._send_text(
-            base_url,
-            token,
-            tracked.sender_id,
-            context_token,
-            self._t(
-                "bridge.task.failed",
-                task_id=task.id,
-                session=task.session_name or tracked.session_name or "default",
-                session_id=task.session_id or "-",
-                backend=task.backend or tracked.backend or self.config.default_backend,
-                error=str(task.error or "task failed").strip(),
-                hint=build_task_followup_hint(
-                    task_id=task.id,
-                    session_name=task.session_name or tracked.session_name or "default",
-                    allow_retry=True,
-                ),
-            ),
-        )
         self._stop_task_typing_async(base_url, token, tracked, task.id)
-        self._append_event_log(
-            event="failed",
+        event_payload = {
+            "task_id": task.id,
+            "sender_id": tracked.sender_id,
+            "session_name": session_name,
+            "session_id": task.session_id or "",
+            "backend": task.backend or tracked.backend or self.config.default_backend,
+            "model": self._display_model(task.model.strip() or tracked.model),
+            "workdir": task.workdir.strip() or tracked.workdir or "-",
+            "status": task.status,
+            "source": tracked.source,
+        }
+        if plan.result_preview:
+            event_payload["result_preview"] = plan.result_preview
+        if plan.error_preview:
+            event_payload["error"] = plan.error_preview
+        self._append_event_log(event=plan.event, **event_payload)
+        if plan.handled:
+            self.state.record_handled()
+        if plan.failed:
+            self.state.record_failed()
+        self._log_perf(
+            "notify_terminal",
+            terminal_started,
             task_id=task.id,
-            sender_id=tracked.sender_id,
-            session_name=task.session_name or tracked.session_name or "default",
-            session_id=task.session_id or "",
-            backend=task.backend or tracked.backend or self.config.default_backend,
-            model=self._display_model(task.model.strip() or tracked.model),
-            workdir=task.workdir.strip() or tracked.workdir or "-",
             status=task.status,
-            error=(task.error or "").strip()[:240],
-            source=tracked.source,
+            deduped=str(plan.deduped).lower(),
         )
-        self.state.record_failed()
-        self._log_perf("notify_terminal", terminal_started, task_id=task.id, status=task.status)
 
     def _stop_task_typing_best_effort(
         self,
@@ -1336,7 +1256,7 @@ class WeixinBridge:
         print(f"[bridge-perf] {label} duration_ms={elapsed_ms}{suffix}", flush=True)
 
     def _send_text(self, base_url: str, token: str, to_user_id: str, context_token: Any, text: str) -> None:
-        text = format_weixin_reply(text)
+        text = format_bridge_reply(text)
         self._start_send_worker()
         enqueue_text_message(
             to_user_id=str(to_user_id or ""),
@@ -1401,7 +1321,7 @@ class WeixinBridge:
         log_failure: bool = True,
     ) -> None:
         delivery_started = time.perf_counter()
-        text = format_weixin_reply(text)
+        text = format_bridge_reply(text)
         body = {
             "msg": {
                 "from_user_id": "",
@@ -1637,53 +1557,13 @@ class WeixinBridge:
         return str(fallback_context_token or "").strip()
 
     def _append_event_log(self, event: str, **payload: Any) -> None:
-        LOG_DIR.mkdir(parents=True, exist_ok=True)
-        entry = {
-            "at": now_iso(),
-            "event": event,
-            **payload,
-        }
-        with EVENT_LOG_PATH.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        append_bridge_event(EVENT_LOG_PATH, now=now_iso(), event=event, **payload)
 
     def _append_message_audit(self, *, sender_id: str, text: str, route: str, **payload: Any) -> None:
-        LOG_DIR.mkdir(parents=True, exist_ok=True)
-        preview = " ".join(str(text or "").split())[:240]
-        entry = {
-            "at": now_iso(),
-            "sender_id": sender_id,
-            "text": str(text or ""),
-            "text_preview": preview,
-            "route": route,
-            **payload,
-        }
-        with MESSAGE_AUDIT_LOG_PATH.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        append_bridge_message_audit(MESSAGE_AUDIT_LOG_PATH, now=now_iso(), sender_id=sender_id, text=text, route=route, **payload)
 
     def _load_recent_events(self, *, sender_id: str = "", limit: int = 5) -> list[dict[str, str]]:
-        if not EVENT_LOG_PATH.exists():
-            return []
-        cleaned_sender_id = sender_id.strip()
-        entries: list[dict[str, str]] = []
-        for line in reversed(EVENT_LOG_PATH.read_text(encoding="utf-8", errors="replace").splitlines()):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                raw = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(raw, dict):
-                continue
-            raw_sender_id = str(raw.get("sender_id") or "").strip()
-            if cleaned_sender_id and raw_sender_id != cleaned_sender_id:
-                continue
-            if self._is_hidden_legacy_event(raw):
-                continue
-            entries.append({str(key): str(value) for key, value in raw.items() if value is not None})
-            if len(entries) >= max(limit, 1):
-                break
-        return entries
+        return load_recent_bridge_events(EVENT_LOG_PATH, sender_id=sender_id, limit=limit, hidden=self._is_hidden_legacy_event)
 
     @staticmethod
     def _is_hidden_legacy_event(entry: dict[str, Any]) -> bool:
@@ -1860,31 +1740,17 @@ class WeixinBridge:
         return hashlib.sha1(encoded).hexdigest()
 
     def _is_duplicate_message(self, message_key: str, *, sender_id: str = "", text: str = "") -> bool:
-        now_value = time.monotonic()
-        cleaned_text = text.strip()
-        fingerprint = f"{sender_id.strip()}::{cleaned_text}" if cleaned_text.startswith("/") else ""
-        if message_key in self._recent_message_keys:
-            return True
-        recent_seen_at = self._recent_message_fingerprints.get(fingerprint)
-        if fingerprint.strip(":") and recent_seen_at is not None and now_value - recent_seen_at <= 2.0:
-            return True
-        self._recent_message_keys.append(message_key)
-        if len(self._recent_message_keys) > 200:
-            self._recent_message_keys = self._recent_message_keys[-200:]
-        self._recent_message_fingerprints[fingerprint] = now_value
-        expired = [key for key, seen_at in self._recent_message_fingerprints.items() if now_value - seen_at > 10.0]
-        for key in expired:
-            self._recent_message_fingerprints.pop(key, None)
-        return False
+        return self.duplicate_filter.is_duplicate(message_key, sender_id=sender_id, text=text)
 
     def _handle_control_command(self, sender_id: str, text: str) -> tuple[str, bool]:
         return self.command_router.handle(sender_id, text)
 
     def _send_notify_test_notice(self) -> str:
-        result = broadcast_weixin_notice_by_kind(
+        result = broadcast_bridge_notice_by_kind(
             "service",
             "通知测试",
             f"Bridge 通知链路测试\n账号: {self.config.active_account_id or '-'}\n默认 Agent: {self.config.backend_id or 'main'}",
+            channel="wechat",
             config=self.config,
         )
         print(f"[bridge] notify test: {result.summary}", flush=True)

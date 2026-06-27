@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,9 +12,10 @@ if str(ROOT_DIR) not in sys.path:
 
 from bridge_config import BridgeConfig
 from core.accounts import load_account_context_tokens, load_account_file_payload
+from core.bridge_event_log import load_recent_bridge_events
+from core.bridge_notifier import NoticeResult, broadcast_bridge_notice_by_kind
 from core.json_store import load_json
 from core.runtime_paths import BRIDGE_CONVERSATIONS_PATH, BRIDGE_EVENT_LOG_PATH, BRIDGE_STATE_PATH
-from core.weixin_notifier import NoticeResult, broadcast_weixin_notice_by_kind
 from runtime_stack import get_runtime_snapshot
 
 
@@ -44,27 +44,7 @@ def _count_conversations() -> int:
 
 
 def _load_recent_events(*, sender_id: str = "", limit: int = 5) -> list[dict[str, object]]:
-    if not BRIDGE_EVENT_LOG_PATH.exists():
-        return []
-    cleaned_sender_id = str(sender_id or "").strip()
-    lines = BRIDGE_EVENT_LOG_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
-    events: list[dict[str, object]] = []
-    for line in reversed(lines):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(payload, dict):
-            continue
-        if cleaned_sender_id and str(payload.get("sender_id") or "").strip() != cleaned_sender_id:
-            continue
-        events.append(payload)
-        if len(events) >= max(limit, 1):
-            break
-    return events
+    return [dict(item) for item in load_recent_bridge_events(BRIDGE_EVENT_LOG_PATH, sender_id=sender_id, limit=limit)]
 
 
 def _display_event_name(event: str) -> str:
@@ -165,10 +145,11 @@ def _print_manual_checklist(*, sender_id: str = "") -> None:
 
 
 def _send_notice() -> NoticeResult:
-    return broadcast_weixin_notice_by_kind(
+    return broadcast_bridge_notice_by_kind(
         "service",
         "真机联调验收",
         "这是一条来自 ChatBridge 的验收测试通知。",
+        channel="wechat",
     )
 
 

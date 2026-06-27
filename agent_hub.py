@@ -17,7 +17,8 @@ from agent_backends.shared import resolve_session_file
 from bridge_config import BridgeConfig
 from core.json_store import load_json, save_json
 from core.state_models import AgentRuntimeState, HubTask, IpcRequestEnvelope, IpcResponseEnvelope
-from core.weixin_notifier import broadcast_weixin_notice_by_kind, build_task_followup_hint
+from core.bridge_followup_hint import build_task_followup_hint
+from core.bridge_notifier import broadcast_bridge_notice_by_kind
 from local_ipc import REQUEST_DIR, cleanup_processed_requests, create_bridge_request, ensure_ipc_dirs, mark_processed, read_request, write_response
 from core.platform_compat import IS_WINDOWS, creationflags, resolve_command, terminate_process_tree
 from runtime_stack import discover_external_agent_processes
@@ -623,7 +624,7 @@ class MultiCodexHub:
                 f"输出摘要: {output[:600]}\n"
                 f"{build_task_followup_hint(task_id=task_id, session_name=session_name)}"
             )
-            broadcast_weixin_notice_by_kind("task", "任务执行完成", detail)
+            broadcast_bridge_notice_by_kind("task", "任务执行完成", detail, channel=task.source)
             return
         error_text = task.error.strip() or "unknown error"
         detail = (
@@ -635,7 +636,7 @@ class MultiCodexHub:
             f"错误: {error_text[:600]}\n"
             f"{build_task_followup_hint(task_id=task_id, session_name=session_name)}"
         )
-        broadcast_weixin_notice_by_kind("task", "任务执行失败", detail)
+        broadcast_bridge_notice_by_kind("task", "任务执行失败", detail, channel=task.source)
 
     def _notify_task_canceled(self, task: HubTask) -> None:
         if self._bridge_channel_for_task(task):
@@ -653,7 +654,7 @@ class MultiCodexHub:
             f"说明: {(task.error or 'Task canceled during execution.')[:600]}\n"
             f"{build_task_followup_hint(task_id=task_id, session_name=session_name, allow_retry=True)}"
         )
-        broadcast_weixin_notice_by_kind("task", "任务已取消", detail)
+        broadcast_bridge_notice_by_kind("task", "任务已取消", detail, channel=task.source)
 
     def _invoke_backend(self, agent: AgentConfig, task: HubTask) -> dict[str, str]:
         mcp_server = self._build_wechat_mcp_server(task)
