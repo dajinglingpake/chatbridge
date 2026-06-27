@@ -523,8 +523,6 @@
   "bridge.interrupt.prompt.newer_first": "Follow-up messages are listed in reverse chronological order; earlier items are newer and higher priority.",
   "bridge.interrupt.prompt.no_noop": "Treat every follow-up as intentional user input; do not decide that it does not change the goal or can be ignored.",
   "bridge.interrupt.prompt.no_interruption_explanation": "Do not explain that you were interrupted; answer directly.",
-  "bridge.interrupt.prompt.previous_question": "Previous user request (context only):",
-  "bridge.interrupt.prompt.supplements_title": "User interrupted while you were handling the previous request and added:",
   "ui.web.mode.qq_submit_hint": "After QQ mode starts, prefer sending messages from QQ. This form is still available for direct Hub test tasks.",
   "ui.web.mode.weixin": "WeChat mode",
   "ui.web.meta.status": "Status: {value}",

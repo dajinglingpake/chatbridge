@@ -35,26 +35,25 @@ class BridgeInterruptRuntimeTests(unittest.TestCase):
     def test_render_interrupt_prompt_stays_flat(self) -> None:
         prompt = render_interrupt_prompt("原始问题", ["补充一", "补充二"])
 
-        self.assertIn("上一轮用户问题（仅作为背景）：\n原始问题", prompt)
-        self.assertIn("1. 补充二", prompt)
-        self.assertIn("2. 补充一", prompt)
-        self.assertLess(prompt.index("用户在你处理上一轮问题时打断并补充："), prompt.index("上一轮用户问题（仅作为背景）："))
+        self.assertIn("<current_user_followups>\n- [1] 补充二\n- [2] 补充一\n</current_user_followups>", prompt)
+        self.assertIn("<previous_user_request_context>\n原始问题\n</previous_user_request_context>", prompt)
+        self.assertLess(prompt.index("<current_user_followups>"), prompt.index("<previous_user_request_context>"))
         self.assertIn("用户补充是最新指令", prompt)
         self.assertIn("越靠前越新、优先级越高", prompt)
         self.assertIn("不要自行判断补充没有改变目标", prompt)
         self.assertIn("必须先回应或澄清补充内容", prompt)
         self.assertIn("不要只完成上一轮问题", prompt)
         self.assertIn("最终回答必须覆盖所有补充内容", prompt)
-        self.assertEqual(1, prompt.count("用户在你处理上一轮问题时打断并补充："))
+        self.assertNotIn("用户在你处理上一轮问题时打断并补充：", prompt)
 
     def test_render_interrupt_prompt_uses_translation(self) -> None:
         localizer = Localizer("en-US")
 
         prompt = render_interrupt_prompt("Original request", ["Check i18n"], translate=localizer.translate)
 
-        self.assertIn("Previous user request (context only):\nOriginal request", prompt)
-        self.assertIn("1. Check i18n", prompt)
-        self.assertLess(prompt.index("User interrupted while you were handling the previous request and added:"), prompt.index("Previous user request (context only):"))
+        self.assertIn("<current_user_followups>\n- [1] Check i18n\n</current_user_followups>", prompt)
+        self.assertIn("<previous_user_request_context>\nOriginal request\n</previous_user_request_context>", prompt)
+        self.assertLess(prompt.index("<current_user_followups>"), prompt.index("<previous_user_request_context>"))
         self.assertIn("User follow-up messages are the latest instructions", prompt)
         self.assertIn("reverse chronological order", prompt)
         self.assertIn("Treat every follow-up as intentional user input", prompt)
@@ -62,6 +61,7 @@ class BridgeInterruptRuntimeTests(unittest.TestCase):
         self.assertIn("The final answer must cover every follow-up message.", prompt)
         self.assertNotIn("上一轮用户问题", prompt)
         self.assertNotIn("用户补充是最新指令", prompt)
+        self.assertNotIn("User interrupted while you were handling the previous request and added:", prompt)
 
     def test_interrupt_cancels_once_and_delays_flat_resubmit(self) -> None:
         initial_task = FakePendingTask("task-001", interrupt_base_prompt="原始问题")
@@ -112,9 +112,9 @@ class BridgeInterruptRuntimeTests(unittest.TestCase):
         self.assertEqual({"session_name": "session-b"}, session)
         self.assertTrue(passthrough)
         self.assertEqual({"interrupt_base_prompt": "原始问题", "interrupt_messages": ["补充一", "补充二"], "interrupted": True}, delayed_message.metadata)
-        self.assertIn("上一轮用户问题（仅作为背景）：\n原始问题", prompt)
-        self.assertIn("1. 补充二", prompt)
-        self.assertIn("2. 补充一", prompt)
+        self.assertIn("<previous_user_request_context>\n原始问题\n</previous_user_request_context>", prompt)
+        self.assertIn("- [1] 补充二", prompt)
+        self.assertIn("- [2] 补充一", prompt)
 
     def test_no_active_task_does_not_intercept(self) -> None:
         runtime = BridgeInterruptRuntime(

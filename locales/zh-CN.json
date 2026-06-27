@@ -523,8 +523,6 @@
   "bridge.interrupt.prompt.newer_first": "补充内容已按时间倒序排列；越靠前越新、优先级越高。",
   "bridge.interrupt.prompt.no_noop": "任何补充都必须视为用户有意输入；不要自行判断补充没有改变目标或可以忽略。",
   "bridge.interrupt.prompt.no_interruption_explanation": "不要解释你被打断，直接给出结果。",
-  "bridge.interrupt.prompt.previous_question": "上一轮用户问题（仅作为背景）：",
-  "bridge.interrupt.prompt.supplements_title": "用户在你处理上一轮问题时打断并补充：",
   "ui.web.mode.qq_submit_hint": "QQ 模式启动后，请优先从 QQ 会话发送消息；这里仍可用于直接向 Hub 提交测试任务。",
   "ui.web.mode.weixin": "微信模式",
   "ui.web.meta.status": "状态: {value}",

@@ -175,14 +175,14 @@ class BridgeInterruptRuntime:
 def render_interrupt_prompt(base_prompt: str, messages: list[str], *, translate: Callable[..., str] | None = None) -> str:
     cleaned_base = str(base_prompt or "").strip()
     cleaned_messages = [str(item or "").strip() for item in messages if str(item or "").strip()]
-    lines = [
-        _translate(translate, "bridge.interrupt.prompt.supplements_title", "用户在你处理上一轮问题时打断并补充："),
-    ]
-    lines.extend(f"{index}. {message}" for index, message in enumerate(reversed(cleaned_messages), start=1))
+    lines = ["<current_user_followups>"]
+    lines.extend(f"- [{index}] {message}" for index, message in enumerate(reversed(cleaned_messages), start=1))
     lines.extend([
+        "</current_user_followups>",
         "",
-        _translate(translate, "bridge.interrupt.prompt.previous_question", "上一轮用户问题（仅作为背景）："),
+        "<previous_user_request_context>",
         cleaned_base or "-",
+        "</previous_user_request_context>",
         "",
         _translate(translate, "bridge.interrupt.prompt.instruction", "请以用户补充作为当前主要目标，参考上一轮问题重新处理。"),
         _translate(translate, "bridge.interrupt.prompt.latest_priority", "用户补充是最新指令，优先级高于上一轮问题。"),
