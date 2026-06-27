@@ -30,14 +30,16 @@ class BridgeInterruptRuntime:
         submit_delayed: Callable[[IncomingBridgeMessage, Any, str, bool], None],
         send_reply: Callable[[dict[str, Any], str], None],
         save_pending_tasks: Callable[[], None],
+        translate: Callable[..., str] | None = None,
         delay_seconds: float = 5.0,
-        notice_text: str = "已打断当前任务，浮浮酱会等你继续补充 5 秒后按最新内容重新处理。",
+        notice_text: str = "",
     ) -> None:
         self.find_active_task = find_active_task
         self.cancel_task = cancel_task
         self.submit_delayed = submit_delayed
         self.send_reply = send_reply
         self.save_pending_tasks = save_pending_tasks
+        self.translate = translate
         self.delay_seconds = max(0.1, float(delay_seconds))
         self.notice_text = notice_text
         self._lock = threading.RLock()
@@ -84,8 +86,9 @@ class BridgeInterruptRuntime:
                     context_token=message.context_token,
                 )
                 self._chains[message.sender_id] = chain
-                if self.notice_text:
-                    self.send_reply(message.reply_target, self.notice_text)
+                notice_text = self._notice_text()
+                if notice_text:
+                    self.send_reply(message.reply_target, notice_text)
             else:
                 active_task = None
                 chain = existing_chain
@@ -116,7 +119,7 @@ class BridgeInterruptRuntime:
             chain = self._chains.pop(sender_id, None)
         if chain is None:
             return
-        prompt = render_interrupt_prompt(chain.base_prompt, chain.messages)
+        prompt = render_interrupt_prompt(chain.base_prompt, chain.messages, translate=self.translate)
         message = IncomingBridgeMessage(
             sender_id=chain.sender_id,
             text="\n".join(chain.messages),
@@ -142,6 +145,15 @@ class BridgeInterruptRuntime:
             setattr(active_task, "interrupt_messages", list(chain.messages))
         self.save_pending_tasks()
 
+    def _notice_text(self) -> str:
+        if self.notice_text:
+            return self.notice_text
+        return _translate(
+            self.translate,
+            "bridge.interrupt.notice",
+            "已打断当前任务，浮浮酱会等你继续补充 5 秒后按最新内容重新处理。",
+        )
+
     @staticmethod
     def _task_prompt(active_task: Any) -> str:
         raw = getattr(active_task, "prompt", "")
@@ -160,22 +172,34 @@ class BridgeInterruptRuntime:
             raw = getattr(session, "session_name", "")
         return str(raw or message.session_name or "").strip()
 
-def render_interrupt_prompt(base_prompt: str, messages: list[str]) -> str:
+def render_interrupt_prompt(base_prompt: str, messages: list[str], *, translate: Callable[..., str] | None = None) -> str:
     cleaned_base = str(base_prompt or "").strip()
     cleaned_messages = [str(item or "").strip() for item in messages if str(item or "").strip()]
     lines = [
-        "上一轮用户问题：",
+        _translate(translate, "bridge.interrupt.prompt.previous_question", "上一轮用户问题："),
         cleaned_base or "-",
         "",
-        "用户在你处理上一轮问题时打断并补充：",
+        _translate(translate, "bridge.interrupt.prompt.supplements_title", "用户在你处理上一轮问题时打断并补充："),
     ]
     lines.extend(f"{index}. {message}" for index, message in enumerate(cleaned_messages, start=1))
     lines.extend(
         [
             "",
-            "请基于上一轮问题和用户补充重新处理。",
-            "补充内容优先级高于上一轮问题；如果补充改变了方向，以补充后的目标为准。",
-            "不要解释你被打断，直接给出结果。",
+            _translate(translate, "bridge.interrupt.prompt.instruction", "请基于上一轮问题和所有用户补充重新处理。"),
+            _translate(translate, "bridge.interrupt.prompt.latest_priority", "用户补充是最新指令，优先级高于上一轮问题。"),
+            _translate(
+                translate,
+                "bridge.interrupt.prompt.changed_goal",
+                "如果补充改变了方向、提出新的检查/修复要求，必须以补充后的目标为准；不要只完成上一轮问题。",
+            ),
+            _translate(translate, "bridge.interrupt.prompt.cover_all", "最终回答必须覆盖所有补充内容。"),
+            _translate(translate, "bridge.interrupt.prompt.no_interruption_explanation", "不要解释你被打断，直接给出结果。"),
         ]
     )
     return "\n".join(lines).strip()
+
+def _translate(translate: Callable[..., str] | None, key: str, fallback: str) -> str:
+    if translate is None:
+        return fallback
+    value = str(translate(key) or "").strip()
+    return fallback if value == key or not value else value

@@ -240,6 +240,7 @@ class QQOneBotBridge:
             submit_delayed=lambda message, session, prompt, passthrough: self.message_runtime.submit_prepared(message, session, prompt, passthrough),
             send_reply=self._send_reply,
             save_pending_tasks=self._save_pending_tasks,
+            translate=lambda key, **kwargs: self._t(key, **kwargs),
         )
         self.message_runtime = BridgeMessageRuntime(
             pending_media=self.pending_media_store,

@@ -8,6 +8,7 @@ from typing import Any
 
 from core.bridge_interrupt_runtime import BridgeInterruptRuntime, render_interrupt_prompt
 from core.bridge_runtime import IncomingBridgeMessage
+from localization import Localizer
 
 
 @dataclass
@@ -37,7 +38,22 @@ class BridgeInterruptRuntimeTests(unittest.TestCase):
         self.assertIn("上一轮用户问题：\n原始问题", prompt)
         self.assertIn("1. 补充一", prompt)
         self.assertIn("2. 补充二", prompt)
+        self.assertIn("用户补充是最新指令", prompt)
+        self.assertIn("不要只完成上一轮问题", prompt)
+        self.assertIn("最终回答必须覆盖所有补充内容", prompt)
         self.assertEqual(1, prompt.count("用户在你处理上一轮问题时打断并补充："))
+
+    def test_render_interrupt_prompt_uses_translation(self) -> None:
+        localizer = Localizer("en-US")
+
+        prompt = render_interrupt_prompt("Original request", ["Check i18n"], translate=localizer.translate)
+
+        self.assertIn("Previous user request:\nOriginal request", prompt)
+        self.assertIn("1. Check i18n", prompt)
+        self.assertIn("User follow-up messages are the latest instructions", prompt)
+        self.assertIn("The final answer must cover every follow-up message.", prompt)
+        self.assertNotIn("上一轮用户问题", prompt)
+        self.assertNotIn("用户补充是最新指令", prompt)
 
     def test_interrupt_cancels_once_and_delays_flat_resubmit(self) -> None:
         initial_task = FakePendingTask("task-001", interrupt_base_prompt="原始问题")

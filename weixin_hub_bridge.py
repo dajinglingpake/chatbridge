@@ -364,6 +364,7 @@ class WeixinBridge:
             submit_delayed=lambda message, session, prompt, passthrough: self.message_runtime.submit_prepared(message, session, prompt, passthrough),
             send_reply=self._send_runtime_reply,
             save_pending_tasks=self._save_pending_tasks,
+            translate=lambda key, **kwargs: self._t(key, **kwargs),
         )
         self.message_runtime.interrupt_runtime = self.interrupt_runtime
         self._recent_message_keys: list[str] = []
