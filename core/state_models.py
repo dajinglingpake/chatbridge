@@ -133,6 +133,13 @@ def _optional_percent(value: object) -> int | None:
     return max(0, min(100, percent))
 
 
+def _bool_value(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    return text in {"1", "true", "yes", "on"}
+
+
 @dataclass
 class HubTask:
     id: str
@@ -157,6 +164,7 @@ class HubTask:
     bridge_conversations_path: str = ""
     bridge_event_log_path: str = ""
     context_token: str = ""
+    codex_search_enabled: bool = False
     progress_text: str = ""
     progress_at: str = ""
     progress_seq: int = 0
@@ -194,6 +202,7 @@ class HubTask:
             bridge_conversations_path=str(raw.get("bridge_conversations_path") or "").strip(),
             bridge_event_log_path=str(raw.get("bridge_event_log_path") or "").strip(),
             context_token=str(raw.get("context_token") or "").strip(),
+            codex_search_enabled=_bool_value(raw.get("codex_search_enabled")),
             progress_text=str(raw.get("progress_text") or ""),
             progress_at=str(raw.get("progress_at") or "").strip(),
             progress_seq=int(raw.get("progress_seq") or 0),

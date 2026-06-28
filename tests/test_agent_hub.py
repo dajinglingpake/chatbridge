@@ -68,10 +68,15 @@ class AgentHubCancellationTests(unittest.TestCase):
 
         self.assertIn("main", [agent.id for agent in config.agents])
         self.assertIn("qq", [agent.id for agent in config.agents])
+        self.assertIn("qq-group", [agent.id for agent in config.agents])
         qq_agent = next(agent for agent in config.agents if agent.id == "qq")
         self.assertEqual("QQ 会话", qq_agent.name)
+        qq_group_agent = next(agent for agent in config.agents if agent.id == "qq-group")
+        self.assertEqual("QQ 群聊只读会话", qq_group_agent.name)
+        self.assertIn("qq-group-workspace", qq_group_agent.workdir)
         saved = config_path.read_text(encoding="utf-8")
         self.assertIn('"id": "qq"', saved)
+        self.assertIn('"id": "qq-group"', saved)
 
     def _wait_until(self, predicate, timeout: float = 10.0) -> None:
         deadline = time.time() + timeout

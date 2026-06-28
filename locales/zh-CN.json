@@ -133,6 +133,8 @@
   "bridge.notify.usage": "用法: /notify <on|off|service-on|service-off|config-on|config-off|task-on|task-off|test>",
   "bridge.notify.test": "已触发测试通知\\n发送结果: {summary}",
   "bridge.notify.qq.test_unsupported": "QQ 桥当前没有平台广播通知链路。",
+  "bridge.qq.group.command_rejected": "群聊只支持普通问题和资料总结。本机状态、文件、命令和会话管理只允许私聊使用。",
+  "bridge.qq.group.restricted_prompt": "这条消息来自 QQ 群聊受限环境。不要查询、读取、透露或总结本机/电脑信息，包括文件、目录、日志、配置、环境变量、进程、仓库状态、服务状态和会话内容；不要执行命令、修改文件或调用本地控制功能。可以协助公开网络查询、资料总结、概念解释、文本改写等只读任务；如果本次消息明确附带图片或文件，只能读取这些附件路径作为用户输入，不要扩展读取其他本地路径。",
   "bridge.backend.current": "当前设置\\n当前会话: {session}\\n当前后端: {backend}",
   "bridge.backend.usage": "用法: /backend <backend>",
   "bridge.backend.switched": "已切换当前会话后端: {backend}\\n会话: {session}",

@@ -51,10 +51,11 @@ class ConfigResilienceTests(unittest.TestCase):
             ):
                 config = HubConfig.load()
 
-            self.assertEqual(["main", "qq"], [agent.id for agent in config.agents])
+            self.assertEqual(["main", "qq", "qq-group"], [agent.id for agent in config.agents])
             saved = json.loads(config_path.read_text(encoding="utf-8"))
             self.assertEqual("main", saved["agents"][0]["id"])
             self.assertEqual("qq", saved["agents"][1]["id"])
+            self.assertEqual("qq-group", saved["agents"][2]["id"])
 
     def test_resolve_ilink_base_url_uses_active_account(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -73,6 +74,48 @@ class ConfigResilienceTests(unittest.TestCase):
             )
 
             self.assertEqual("https://example-b.test", resolve_ilink_base_url(config))
+
+    def test_bridge_config_load_normalizes_qq_message_controls(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "config" / "weixin_bridge.json"
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "qq_private_enabled": "false",
+                        "qq_group_enabled": "true",
+                        "qq_group_require_mention": "off",
+                        "qq_allowed_private_user_ids": [10001, " 10002 "],
+                        "qq_blocked_user_ids": "10003",
+                        "qq_allowed_group_ids": [20001],
+                        "qq_blocked_group_ids": [" 20002 "],
+                        "qq_group_agent_id": " custom-qq-group ",
+                        "qq_group_permission_mode": "READ-ONLY",
+                        "qq_group_codex_search_enabled": "false",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state_path = root / "accounts" / "bridge-account-state.local.json"
+
+            with (
+                patch("bridge_config.CONFIG_PATH", config_path),
+                patch("bridge_config.ACCOUNT_STATE_PATH", state_path),
+                patch("bridge_config.WEIXIN_ACCOUNTS_DIR", root / "accounts"),
+            ):
+                config = BridgeConfig.load()
+
+        self.assertFalse(config.qq_private_enabled)
+        self.assertTrue(config.qq_group_enabled)
+        self.assertFalse(config.qq_group_require_mention)
+        self.assertEqual(["10001", "10002"], config.qq_allowed_private_user_ids)
+        self.assertEqual(["10003"], config.qq_blocked_private_user_ids)
+        self.assertEqual(["20001"], config.qq_allowed_group_ids)
+        self.assertEqual(["20002"], config.qq_blocked_group_ids)
+        self.assertEqual("custom-qq-group", config.qq_group_agent_id)
+        self.assertEqual("read-only", config.qq_group_permission_mode)
+        self.assertFalse(config.qq_group_codex_search_enabled)
 
     def test_resolve_ilink_base_url_falls_back_when_missing(self) -> None:
         config = BridgeConfig(

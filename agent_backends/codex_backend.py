@@ -321,12 +321,20 @@ class CodexBackend(AgentBackend):
 
     @staticmethod
     def _sandbox_mode(context: BackendContext) -> str:
-        return "workspace-write" if context.permission_mode == "default" else "danger-full-access"
+        permission_mode = context.permission_mode.strip().lower()
+        if permission_mode in {"default", "workspace-write"}:
+            return "workspace-write"
+        if permission_mode == "read-only":
+            return "read-only"
+        return "danger-full-access"
 
     @classmethod
     def _sandbox_policy(cls, context: BackendContext) -> dict[str, str]:
-        if cls._sandbox_mode(context) == "workspace-write":
+        sandbox_mode = cls._sandbox_mode(context)
+        if sandbox_mode == "workspace-write":
             return {"type": "workspaceWrite"}
+        if sandbox_mode == "read-only":
+            return {"type": "readOnly"}
         return {"type": "dangerFullAccess"}
 
     def _invoke_once(
@@ -351,10 +359,13 @@ class CodexBackend(AgentBackend):
             options.extend(["-m", agent.model])
         if context.reasoning_effort:
             options.extend(["-c", f'model_reasoning_effort="{context.reasoning_effort}"'])
-        if context.permission_mode == "default":
-            options.extend(["-a", "never", "-s", "workspace-write"])
+        sandbox_mode = self._sandbox_mode(context)
+        if sandbox_mode in {"workspace-write", "read-only"}:
+            options.extend(["-a", "never", "-s", sandbox_mode])
         else:
             options.append("--dangerously-bypass-approvals-and-sandbox")
+        if context.codex_search_enabled:
+            options.append("--search")
         if context.mcp_server is not None:
             options.extend(
                 [

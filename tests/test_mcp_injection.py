@@ -334,6 +334,64 @@ class McpServerCodexBackendTests(unittest.TestCase):
             self.assertEqual("ok", result["output"])
             self.assertEqual("thread-2", result["session_id"])
 
+    def test_codex_backend_applies_read_only_permission_and_search(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            workdir = temp_path / "workspace"
+            workdir.mkdir(parents=True, exist_ok=True)
+            session_dir = temp_path / "sessions"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            output_path = temp_path / "multi-codex-output-fixed.txt"
+
+            agent = SimpleNamespace(
+                id="qq-group",
+                name="QQ Group",
+                workdir=str(workdir),
+                session_file=str(session_dir / "qq-group.txt"),
+                backend="codex",
+                model="gpt-5.4",
+                prompt_prefix="",
+            )
+            context = BackendContext(
+                codex_command="codex",
+                claude_command="claude",
+                opencode_command="opencode",
+                session_dir=session_dir,
+                creationflags=0,
+                permission_mode="read-only",
+                codex_search_enabled=True,
+            )
+            backend = CodexBackend()
+
+            class FakeProcess:
+                def __init__(self) -> None:
+                    self.pid = 4321
+                    self.stdout = iter(['{"type":"thread.started","thread_id":"thread-readonly"}\n'])
+                    self.stderr = iter([])
+
+                def wait(self) -> int:
+                    return 0
+
+            def fake_popen(argv: list[str], **kwargs):
+                output_path.write_text("ok", encoding="utf-8")
+                self.assertIn('-a', argv)
+                self.assertIn('never', argv)
+                self.assertIn('-s', argv)
+                self.assertIn('read-only', argv)
+                self.assertIn('--search', argv)
+                self.assertNotIn('--dangerously-bypass-approvals-and-sandbox', argv)
+                return FakeProcess()
+
+            with (
+                patch("agent_backends.codex_backend.tempfile.gettempdir", return_value=str(temp_path)),
+                patch("agent_backends.codex_backend.uuid.uuid4", return_value=SimpleNamespace(hex="fixed")),
+                patch("agent_backends.codex_backend.subprocess.Popen", side_effect=fake_popen),
+            ):
+                result = backend.invoke(agent, "hello", "", context)
+
+            self.assertEqual("ok", result["output"])
+            self.assertEqual("thread-readonly", result["session_id"])
+
     def test_codex_backend_retries_transient_stream_disconnect_once(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)

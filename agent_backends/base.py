@@ -37,6 +37,7 @@ class BackendContext:
     mcp_server: McpServerConfig | None = None
     reasoning_effort: str = ""
     permission_mode: str = ""
+    codex_search_enabled: bool = False
     codex_slim_exec: bool = True
     codex_transport: str = "exec"
     hub_task_timeout_seconds: int = 600

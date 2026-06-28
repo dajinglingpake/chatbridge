@@ -49,6 +49,11 @@ PERF_LOG_MIN_SECONDS = 0.25
 IPC_IDLE_SLEEP_SECONDS = 0.05
 DEFAULT_MAIN_AGENT_ID = "main"
 DEFAULT_QQ_AGENT_ID = "qq"
+DEFAULT_QQ_GROUP_AGENT_ID = "qq-group"
+QQ_GROUP_PROMPT_PREFIX = (
+    "QQ 群聊只读安全环境。不要查询、读取、透露或总结本机/电脑信息；"
+    "不要执行命令、修改文件或调用本地控制功能。可以协助公开网络查询、资料总结、概念解释、文本改写等只读任务。"
+)
 
 
 def now_iso() -> str:
@@ -77,6 +82,18 @@ def normalize_backend(value: str) -> str:
     backend = (value or DEFAULT_BACKEND_KEY).strip().lower()
     return backend if backend in SUPPORTED_BACKENDS else DEFAULT_BACKEND_KEY
 
+
+def _bool_value(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 @dataclass
 class AgentConfig:
@@ -111,6 +128,14 @@ def _normalize_agent(raw: object) -> AgentConfig | None:
 def _default_agent(agent_id: str) -> AgentConfig:
     if agent_id == DEFAULT_QQ_AGENT_ID:
         return AgentConfig(DEFAULT_QQ_AGENT_ID, "QQ 会话", str(WORKSPACE_DIR), str(SESSION_DIR / "qq.txt"))
+    if agent_id == DEFAULT_QQ_GROUP_AGENT_ID:
+        return AgentConfig(
+            DEFAULT_QQ_GROUP_AGENT_ID,
+            "QQ 群聊只读会话",
+            str(RUNTIME_DIR / "qq-group-workspace"),
+            str(SESSION_DIR / "qq-group.txt"),
+            prompt_prefix=QQ_GROUP_PROMPT_PREFIX,
+        )
     return AgentConfig(DEFAULT_MAIN_AGENT_ID, "默认会话", str(WORKSPACE_DIR), str(SESSION_DIR / "main.txt"))
 
 
@@ -121,6 +146,9 @@ def _ensure_default_agents(agents: list[AgentConfig]) -> tuple[list[AgentConfig]
         changed = True
     if not any(agent.id == DEFAULT_QQ_AGENT_ID for agent in agents):
         agents.append(_default_agent(DEFAULT_QQ_AGENT_ID))
+        changed = True
+    if not any(agent.id == DEFAULT_QQ_GROUP_AGENT_ID for agent in agents):
+        agents.append(_default_agent(DEFAULT_QQ_GROUP_AGENT_ID))
         changed = True
     return agents, changed
 
@@ -143,6 +171,7 @@ class HubConfig:
                 agents=[
                     _default_agent(DEFAULT_MAIN_AGENT_ID),
                     _default_agent(DEFAULT_QQ_AGENT_ID),
+                    _default_agent(DEFAULT_QQ_GROUP_AGENT_ID),
                 ]
             )
             cfg.save()
@@ -154,6 +183,7 @@ class HubConfig:
                 agents=[
                     _default_agent(DEFAULT_MAIN_AGENT_ID),
                     _default_agent(DEFAULT_QQ_AGENT_ID),
+                    _default_agent(DEFAULT_QQ_GROUP_AGENT_ID),
                 ]
             )
             cfg.save()
@@ -342,16 +372,20 @@ class MultiCodexHub:
             session_name = task.session_name
             backend = task.backend
         return self.submit_task(
-            agent_id,
-            prompt,
-            task_source,
-            task_sender_id,
-            session_name,
-            backend,
-            task.workdir,
-            task.model,
-            task.bridge_conversations_path,
-            task.bridge_event_log_path,
+            agent_id=agent_id,
+            prompt=prompt,
+            source=task_source,
+            sender_id=task_sender_id,
+            session_name=session_name,
+            backend=backend,
+            workdir=task.workdir,
+            model=task.model,
+            reasoning_effort=task.reasoning_effort,
+            permission_mode=task.permission_mode,
+            bridge_conversations_path=task.bridge_conversations_path,
+            bridge_event_log_path=task.bridge_event_log_path,
+            context_token=task.context_token,
+            codex_search_enabled=task.codex_search_enabled,
         )
 
     def create_or_update_agent(self, payload: dict[str, Any]) -> AgentConfig:
@@ -427,6 +461,7 @@ class MultiCodexHub:
         bridge_conversations_path: str = "",
         bridge_event_log_path: str = "",
         context_token: str = "",
+        codex_search_enabled: bool = False,
     ) -> dict[str, Any]:
         started_at = time.perf_counter()
         prompt = (prompt or "").strip()
@@ -453,6 +488,7 @@ class MultiCodexHub:
             bridge_conversations_path=bridge_conversations_path.strip(),
             bridge_event_log_path=bridge_event_log_path.strip(),
             context_token=context_token.strip(),
+            codex_search_enabled=bool(codex_search_enabled),
         )
         with self.lock:
             self.tasks.append(task)
@@ -692,6 +728,7 @@ class MultiCodexHub:
                 mcp_server=mcp_server,
                 reasoning_effort=task.reasoning_effort.strip(),
                 permission_mode=task.permission_mode.strip(),
+                codex_search_enabled=bool(task.codex_search_enabled),
                 codex_slim_exec=self.config.codex_slim_exec,
                 codex_transport=self.config.codex_transport,
                 hub_task_timeout_seconds=600,
@@ -850,6 +887,7 @@ class MultiCodexHub:
                         str(payload.get("bridge_conversations_path") or ""),
                         str(payload.get("bridge_event_log_path") or ""),
                         str(payload.get("context_token") or ""),
+                        _bool_value(payload.get("codex_search_enabled"), False),
                     ),
                 },
             )

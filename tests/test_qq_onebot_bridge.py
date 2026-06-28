@@ -154,7 +154,7 @@ class QQOneBotBridgeTests(unittest.TestCase):
         )
 
         sender_key, prompt = bridge.submitted[0]
-        self.assertEqual("qq:group:20002:10001", sender_key)
+        self.assertEqual("qq:group:20002", sender_key)
         self.assertTrue(prompt.startswith("总结这个文件"))
         self.assertIn("文件: report.pdf", prompt)
 
@@ -252,6 +252,110 @@ class QQOneBotBridgeTests(unittest.TestCase):
                 "message": [
                     {"type": "text", "data": {"text": "不要回复这条"}},
                 ],
+            }
+        )
+
+        self.assertEqual([], bridge.submitted)
+
+    def test_group_message_without_at_self_is_accepted_when_mention_not_required(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.config.qq_group_require_mention = False
+        bridge.handle_event(
+            {
+                "post_type": "message",
+                "message_type": "group",
+                "group_id": 20002,
+                "user_id": 10001,
+                "self_id": 2493227263,
+                "message": [
+                    {"type": "text", "data": {"text": "不需要 at 也处理"}},
+                ],
+            }
+        )
+
+        self.assertEqual([("qq:group:20002", "不需要 at 也处理")], bridge.submitted)
+
+    def test_private_message_is_ignored_when_private_disabled(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.config.qq_private_enabled = False
+        bridge.handle_event(
+            {
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": 10001,
+                "message": "不要处理私聊",
+            }
+        )
+
+        self.assertEqual([], bridge.submitted)
+
+    def test_group_message_is_ignored_when_group_disabled(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.config.qq_group_enabled = False
+        bridge.handle_event(
+            {
+                "post_type": "message",
+                "message_type": "group",
+                "group_id": 20002,
+                "user_id": 10001,
+                "self_id": 2493227263,
+                "message": [
+                    {"type": "at", "data": {"qq": "2493227263"}},
+                    {"type": "text", "data": {"text": "不要处理群聊"}},
+                ],
+            }
+        )
+
+        self.assertEqual([], bridge.submitted)
+
+    def test_group_message_respects_group_allowlist(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.config.qq_allowed_group_ids = ["30003"]
+        bridge.handle_event(
+            {
+                "post_type": "message",
+                "message_type": "group",
+                "group_id": 20002,
+                "user_id": 10001,
+                "self_id": 2493227263,
+                "message": [
+                    {"type": "at", "data": {"qq": "2493227263"}},
+                    {"type": "text", "data": {"text": "群不在白名单"}},
+                ],
+            }
+        )
+
+        self.assertEqual([], bridge.submitted)
+
+    def test_group_control_command_is_rejected_without_agent_submission(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.handle_event(
+            {
+                "post_type": "message",
+                "message_type": "group",
+                "group_id": 20002,
+                "user_id": 10001,
+                "self_id": 2493227263,
+                "message": [
+                    {"type": "at", "data": {"qq": "2493227263"}},
+                    {"type": "text", "data": {"text": "/status"}},
+                ],
+            }
+        )
+
+        self.assertEqual([], bridge.submitted)
+        self.assertEqual("send_group_msg", bridge.api_calls[-1][0])
+        self.assertIn("群聊只支持普通问题", bridge.api_calls[-1][1]["message"])
+
+    def test_private_message_respects_private_user_blocklist(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.config.qq_blocked_private_user_ids = ["10001"]
+        bridge.handle_event(
+            {
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": 10001,
+                "message": "用户被拉黑",
             }
         )
 
@@ -961,6 +1065,16 @@ class QQOneBotBridgeTests(unittest.TestCase):
             bridge.api_calls,
         )
 
+    def test_reply_target_from_sender_key_supports_group_session_formats(self) -> None:
+        self.assertEqual(
+            {"message_type": "group", "group_id": "20002"},
+            QQOneBotBridge._reply_target_from_sender_key("qq:group:20002"),
+        )
+        self.assertEqual(
+            {"message_type": "group", "group_id": "20002", "user_id": "10001"},
+            QQOneBotBridge._reply_target_from_sender_key("qq:group:20002:10001"),
+        )
+
     def test_submit_task_uses_dedicated_qq_agent_and_sender_session(self) -> None:
         bridge = QQOneBotBridge(
             SimpleNamespace(backend_id="main", default_backend="codex", hub_task_timeout_seconds=30),
@@ -981,6 +1095,31 @@ class QQOneBotBridgeTests(unittest.TestCase):
         self.assertEqual(DEFAULT_QQ_AGENT_ID, calls[0][1]["agent_id"])
         self.assertEqual("qq-private-10001", calls[0][1]["session_name"])
         self.assertEqual("qq", calls[0][1]["source"])
+
+    def test_group_submit_task_uses_group_agent_restricted_permission_and_search(self) -> None:
+        bridge = QQOneBotBridge(
+            SimpleNamespace(backend_id="main", default_backend="codex", hub_task_timeout_seconds=30, language="zh-CN"),
+            api_base="http://onebot.local",
+        )
+        calls: list[tuple[str, dict[str, object]]] = []
+
+        def fake_create_request(action: str, payload: dict[str, object]) -> str:
+            calls.append((action, payload))
+            return "req-qq-group"
+
+        response = SimpleNamespace(ok=True, error="", payload={"task": {"id": "task-qq-group"}})
+        with patch("qq_onebot_bridge.create_request", side_effect=fake_create_request), patch("qq_onebot_bridge.wait_for_response", return_value=response):
+            task = bridge._submit_task("qq:group:20002", "总结今天的公开新闻")
+
+        self.assertEqual({"id": "task-qq-group"}, task)
+        payload = calls[0][1]
+        self.assertEqual("qq-group", payload["agent_id"])
+        self.assertEqual("read-only", payload["permission_mode"])
+        self.assertIs(True, payload["codex_search_enabled"])
+        self.assertEqual("qq-group-20002", payload["session_name"])
+        self.assertIn("QQ 群聊受限环境", payload["prompt"])
+        self.assertIn("不要查询", payload["prompt"])
+        self.assertIn("总结今天的公开新闻", payload["prompt"])
 
     def test_http_handler_returns_onebot_ok_for_message_event(self) -> None:
         bridge = FakeQQBridge(self.temp_path)

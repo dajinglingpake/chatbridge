@@ -37,6 +37,32 @@ def normalize_backend(value: str) -> str:
     return backend if backend in SUPPORTED_BACKENDS else DEFAULT_BACKEND_KEY
 
 
+def _string_list(value: object) -> list[str]:
+    if isinstance(value, str):
+        items = [value]
+    elif isinstance(value, list):
+        items = value
+    else:
+        return []
+    cleaned: list[str] = []
+    for item in items:
+        text = str(item or "").strip()
+        if text:
+            cleaned.append(text)
+    return cleaned
+
+def _bool_value(value: object, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
+
 @dataclass
 class WeixinAccountProfile:
     account_id: str
@@ -193,6 +219,16 @@ class BridgeConfig:
     bridge_name: str = "weixin-bridge"
     auto_reply_prefix: str = ""
     ignore_prefixes: list[str] = field(default_factory=lambda: ["/ignore"])
+    qq_private_enabled: bool = True
+    qq_group_enabled: bool = True
+    qq_group_require_mention: bool = True
+    qq_allowed_private_user_ids: list[str] = field(default_factory=list)
+    qq_blocked_private_user_ids: list[str] = field(default_factory=list)
+    qq_allowed_group_ids: list[str] = field(default_factory=list)
+    qq_blocked_group_ids: list[str] = field(default_factory=list)
+    qq_group_agent_id: str = "qq-group"
+    qq_group_permission_mode: str = "read-only"
+    qq_group_codex_search_enabled: bool = True
 
     @classmethod
     def load(cls) -> "BridgeConfig":
@@ -211,10 +247,23 @@ class BridgeConfig:
         raw["accounts"] = accounts
         raw["active_account_id"] = active_account_id
         raw["default_backend"] = normalize_backend(str(raw.get("default_backend") or DEFAULT_BACKEND_KEY))
-        raw["service_notice_enabled"] = bool(raw.get("service_notice_enabled", True))
-        raw["config_notice_enabled"] = bool(raw.get("config_notice_enabled", True))
-        raw["task_notice_enabled"] = bool(raw.get("task_notice_enabled", False))
+        raw["service_notice_enabled"] = _bool_value(raw.get("service_notice_enabled"), True)
+        raw["config_notice_enabled"] = _bool_value(raw.get("config_notice_enabled"), True)
+        raw["task_notice_enabled"] = _bool_value(raw.get("task_notice_enabled"), False)
         raw["language"] = str(raw.get("language") or "auto")
+        raw["ignore_prefixes"] = _string_list(raw.get("ignore_prefixes", ["/ignore"])) or ["/ignore"]
+        raw["qq_private_enabled"] = _bool_value(raw.get("qq_private_enabled"), True)
+        raw["qq_group_enabled"] = _bool_value(raw.get("qq_group_enabled"), True)
+        raw["qq_group_require_mention"] = _bool_value(raw.get("qq_group_require_mention"), True)
+        raw["qq_allowed_private_user_ids"] = _string_list(raw.get("qq_allowed_private_user_ids", raw.get("qq_allowed_user_ids", [])))
+        raw["qq_blocked_private_user_ids"] = _string_list(raw.get("qq_blocked_private_user_ids", raw.get("qq_blocked_user_ids", [])))
+        raw["qq_allowed_group_ids"] = _string_list(raw.get("qq_allowed_group_ids", []))
+        raw["qq_blocked_group_ids"] = _string_list(raw.get("qq_blocked_group_ids", []))
+        raw["qq_group_agent_id"] = str(raw.get("qq_group_agent_id") or "qq-group").strip() or "qq-group"
+        raw["qq_group_permission_mode"] = str(raw.get("qq_group_permission_mode") or "read-only").strip().lower() or "read-only"
+        raw["qq_group_codex_search_enabled"] = _bool_value(raw.get("qq_group_codex_search_enabled"), True)
+        raw.pop("qq_allowed_user_ids", None)
+        raw.pop("qq_blocked_user_ids", None)
         cfg = cls(**raw)
         cfg._sync_active_account_fields()
         return cfg
@@ -270,7 +319,17 @@ class BridgeConfig:
             "hub_task_timeout_seconds": int(self.hub_task_timeout_seconds),
             "bridge_name": self.bridge_name,
             "auto_reply_prefix": self.auto_reply_prefix,
-            "ignore_prefixes": list(self.ignore_prefixes),
+            "ignore_prefixes": _string_list(self.ignore_prefixes),
+            "qq_private_enabled": bool(self.qq_private_enabled),
+            "qq_group_enabled": bool(self.qq_group_enabled),
+            "qq_group_require_mention": bool(self.qq_group_require_mention),
+            "qq_allowed_private_user_ids": _string_list(self.qq_allowed_private_user_ids),
+            "qq_blocked_private_user_ids": _string_list(self.qq_blocked_private_user_ids),
+            "qq_allowed_group_ids": _string_list(self.qq_allowed_group_ids),
+            "qq_blocked_group_ids": _string_list(self.qq_blocked_group_ids),
+            "qq_group_agent_id": str(self.qq_group_agent_id or "qq-group").strip() or "qq-group",
+            "qq_group_permission_mode": str(self.qq_group_permission_mode or "read-only").strip().lower() or "read-only",
+            "qq_group_codex_search_enabled": bool(self.qq_group_codex_search_enabled),
         }
         save_json(CONFIG_PATH, data)
         self._save_account_runtime_state()

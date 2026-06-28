@@ -160,6 +160,34 @@ def _message_mentions_user(message: object, user_id: str) -> bool:
     return False
 
 
+def _config_bool(config: object, name: str, default: bool) -> bool:
+    value = getattr(config, name, default)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+def _config_id_set(config: object, name: str) -> set[str]:
+    value = getattr(config, name, [])
+    if isinstance(value, str):
+        items = [value]
+    elif isinstance(value, list):
+        items = value
+    else:
+        return set()
+    return {str(item or "").strip() for item in items if str(item or "").strip()}
+
+def _id_allowed(value: str, *, allowed: set[str], blocked: set[str]) -> bool:
+    if not value:
+        return False
+    if value in blocked:
+        return False
+    return not allowed or value in allowed
+
 class QQOneBotBridge:
     def __init__(
         self,
@@ -296,10 +324,19 @@ class QQOneBotBridge:
         message_type = str(event.get("message_type") or "").strip().lower()
         if message_type not in {"private", "group"}:
             return
-        if message_type == "group" and not self._is_group_message_for_self(event):
+        allowed, reason = self._is_message_event_allowed(event, message_type)
+        if not allowed:
+            self._log_ignored_message_event(event, message_type, reason)
+            return
+        if message_type == "group" and self._group_requires_mention() and not self._is_group_message_for_self(event):
+            self._log_ignored_message_event(event, message_type, "missing_mention")
             return
         sender_key = self._sender_key(event)
         text = _format_text_segments(event.get("message"))
+        if message_type == "group" and self._is_group_control_command(text):
+            self._send_reply(self._reply_event_snapshot(event), self._t("bridge.qq.group.command_rejected"))
+            self._log_ignored_message_event(event, message_type, "group_control_command")
+            return
         media_attachments, media_errors = self._extract_media_attachments(sender_key, event.get("message"))
         self.message_runtime.handle_message(
             IncomingBridgeMessage(
@@ -333,7 +370,11 @@ class QQOneBotBridge:
             attachments=[],
             attachment_errors=[],
         )
-        submitted = self.task_submit_runtime.submit(message, self.conversation_runtime.resolve_session(message), prompt)
+        submitted = self.task_submit_runtime.submit(
+            message,
+            self.conversation_runtime.resolve_session(message),
+            self._prepare_task_prompt(sender_key, prompt),
+        )
         return submitted.payload
 
     def _submit_runtime_task(
@@ -355,13 +396,14 @@ class QQOneBotBridge:
             session_meta = None
         backend = str(getattr(session_meta, "backend", "") or self.config.default_backend)
         return BridgeTaskSubmitContext(
-            agent_id=self.agent_id,
+            agent_id=self._resolve_message_agent_id(message.sender_id),
             session_name=session_name,
             backend=backend,
             workdir=str(getattr(session_meta, "workdir", "") or ""),
             model=str(getattr(session_meta, "model", "") or ""),
             reasoning_effort=str(getattr(session_meta, "reasoning_effort", "") or ""),
-            permission_mode=str(getattr(session_meta, "permission_mode", "") or ""),
+            permission_mode=self._resolve_message_permission_mode(message.sender_id, session_meta),
+            codex_search_enabled=self._resolve_message_codex_search_enabled(message.sender_id),
         )
 
     def _ipc_request(self, action: str, payload: dict[str, Any], *, timeout_seconds: float) -> Any:
@@ -618,6 +660,75 @@ class QQOneBotBridge:
         user_id = self._login_user_id_for_matching(event)
         return _message_mentions_user(event.get("message"), user_id)
 
+    @staticmethod
+    def _is_group_sender(sender_key: str) -> bool:
+        return str(sender_key or "").startswith("qq:group:")
+
+    @staticmethod
+    def _is_group_control_command(text: str) -> bool:
+        return str(text or "").strip().startswith("/")
+
+    def _resolve_message_permission_mode(self, sender_key: str, session_meta: Any) -> str:
+        if self._is_group_sender(sender_key):
+            return str(getattr(self.config, "qq_group_permission_mode", "") or "read-only").strip().lower() or "read-only"
+        return str(getattr(session_meta, "permission_mode", "") or "")
+
+    def _resolve_message_agent_id(self, sender_key: str) -> str:
+        if self._is_group_sender(sender_key):
+            return str(getattr(self.config, "qq_group_agent_id", "") or "qq-group").strip() or "qq-group"
+        return self.agent_id
+
+    def _resolve_message_codex_search_enabled(self, sender_key: str) -> bool:
+        return self._is_group_sender(sender_key) and _config_bool(self.config, "qq_group_codex_search_enabled", True)
+
+    def _prepare_task_prompt(self, sender_key: str, prompt: str) -> str:
+        cleaned_prompt = str(prompt or "").strip()
+        if not self._is_group_sender(sender_key):
+            return cleaned_prompt
+        policy = self._t("bridge.qq.group.restricted_prompt")
+        return "\n\n".join(part for part in [policy.strip(), cleaned_prompt] if part).strip()
+
+    def _group_requires_mention(self) -> bool:
+        return _config_bool(self.config, "qq_group_require_mention", True)
+
+    def _is_message_event_allowed(self, event: dict[str, Any], message_type: str) -> tuple[bool, str]:
+        user_id = str(event.get("user_id") or "").strip()
+        if not user_id:
+            return False, "missing_user_id"
+
+        if message_type == "private":
+            if not _config_bool(self.config, "qq_private_enabled", True):
+                return False, "private_disabled"
+            if not _id_allowed(
+                user_id,
+                allowed=_config_id_set(self.config, "qq_allowed_private_user_ids"),
+                blocked=_config_id_set(self.config, "qq_blocked_private_user_ids"),
+            ):
+                return False, "private_user_not_allowed"
+            return True, ""
+
+        if message_type == "group":
+            if not _config_bool(self.config, "qq_group_enabled", True):
+                return False, "group_disabled"
+            group_id = str(event.get("group_id") or "").strip()
+            if not _id_allowed(
+                group_id,
+                allowed=_config_id_set(self.config, "qq_allowed_group_ids"),
+                blocked=_config_id_set(self.config, "qq_blocked_group_ids"),
+            ):
+                return False, "group_not_allowed"
+            return True, ""
+
+        return False, "unsupported_message_type"
+
+    @staticmethod
+    def _log_ignored_message_event(event: dict[str, Any], message_type: str, reason: str) -> None:
+        _log(
+            "ignored message "
+            f"type={message_type or '-'} reason={reason or '-'} "
+            f"group_id={event.get('group_id') or '-'} user_id={event.get('user_id') or '-'}"
+        )
+
     def _extract_media_attachments(self, sender_key: str, message: object) -> tuple[list[dict[str, str]], list[str]]:
         attachments: list[dict[str, str]] = []
         errors: list[str] = []
@@ -726,7 +837,7 @@ class QQOneBotBridge:
     def _sender_key(self, event: dict[str, Any]) -> str:
         message_type = str(event.get("message_type") or "").strip().lower()
         if message_type == "group":
-            return f"qq:group:{event.get('group_id')}:{event.get('user_id')}"
+            return f"qq:group:{event.get('group_id')}"
         return f"qq:private:{event.get('user_id')}"
 
     def _session_name(self, sender_key: str) -> str:
@@ -1117,6 +1228,8 @@ class QQOneBotBridge:
         parts = str(sender_key or "").split(":")
         if len(parts) == 3 and parts[0] == "qq" and parts[1] == "private" and parts[2]:
             return {"message_type": "private", "user_id": parts[2]}
+        if len(parts) == 3 and parts[0] == "qq" and parts[1] == "group" and parts[2]:
+            return {"message_type": "group", "group_id": parts[2]}
         if len(parts) == 4 and parts[0] == "qq" and parts[1] == "group" and parts[2] and parts[3]:
             return {"message_type": "group", "group_id": parts[2], "user_id": parts[3]}
         return {}

@@ -133,6 +133,8 @@
   "bridge.notify.usage": "Usage: /notify <on|off|service-on|service-off|config-on|config-off|task-on|task-off|test>",
   "bridge.notify.test": "Test notice triggered\\nDelivery result: {summary}",
   "bridge.notify.qq.test_unsupported": "QQ bridge does not currently have a platform broadcast notice channel.",
+  "bridge.qq.group.command_rejected": "Group chats only support normal questions and summary requests. Local status, files, commands, and session management are only available in private chat.",
+  "bridge.qq.group.restricted_prompt": "This message comes from a restricted QQ group chat. Do not query, read, disclose, or summarize local computer information, including files, directories, logs, configuration, environment variables, processes, repository status, service status, or session content. Do not execute commands, modify files, or call local control features. You may help with public web lookups, source summaries, concept explanations, rewriting, and other read-only tasks. If this message explicitly includes image or file attachments, you may only read those attachment paths as user-provided input and must not expand access to other local paths.",
   "bridge.backend.current": "Current setup\\nCurrent session: {session}\\nCurrent backend: {backend}",
   "bridge.backend.usage": "Usage: /backend <backend>",
   "bridge.backend.switched": "Switched backend for current session: {backend}\\nSession: {session}",

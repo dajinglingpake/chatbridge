@@ -24,6 +24,16 @@
       "model": "gpt-5.5",
       "prompt_prefix": "",
       "enabled": true
+    },
+    {
+      "id": "qq-group",
+      "name": "QQ 群聊只读会话",
+      "workdir": ".runtime/qq-group-workspace",
+      "session_file": "sessions/qq-group.txt",
+      "backend": "codex",
+      "model": "gpt-5.5",
+      "prompt_prefix": "QQ 群聊只读安全环境。不要查询、读取、透露或总结本机/电脑信息；不要执行命令、修改文件或调用本地控制功能。可以协助公开网络查询、资料总结、概念解释、文本改写等只读任务。",
+      "enabled": true
     }
   ]
 }

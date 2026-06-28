@@ -20,6 +20,7 @@ class BridgeTaskSubmitContext:
     bridge_conversations_path: str = ""
     bridge_event_log_path: str = ""
     context_token: str = ""
+    codex_search_enabled: bool = False
 
 
 class BridgeTaskSubmitRuntime:
@@ -75,4 +76,6 @@ class BridgeTaskSubmitRuntime:
         for key, value in optional_fields.items():
             if str(value or "").strip():
                 payload[key] = value
+        if context.codex_search_enabled:
+            payload["codex_search_enabled"] = True
         return payload
