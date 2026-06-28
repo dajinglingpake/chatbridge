@@ -74,9 +74,54 @@ class AgentHubCancellationTests(unittest.TestCase):
         qq_group_agent = next(agent for agent in config.agents if agent.id == "qq-group")
         self.assertEqual("QQ 群聊只读会话", qq_group_agent.name)
         self.assertIn("qq-group-workspace", qq_group_agent.workdir)
+        self.assertEqual("", qq_group_agent.prompt_prefix)
         saved = config_path.read_text(encoding="utf-8")
         self.assertIn('"id": "qq"', saved)
         self.assertIn('"id": "qq-group"', saved)
+
+    def test_hub_config_load_clears_legacy_qq_group_prompt_prefix(self) -> None:
+        config_path = self.temp_path / "config" / "agent_hub.json"
+        session_dir = self.temp_path / "sessions"
+        workspace_dir = self.temp_path / "workspace"
+        config_path.parent.mkdir(parents=True)
+        session_dir.mkdir(parents=True)
+        workspace_dir.mkdir(parents=True)
+        config_path.write_text(
+            json.dumps(
+                {
+                    "codex_command": "codex",
+                    "claude_command": "claude",
+                    "opencode_command": "opencode",
+                    "agents": [
+                        {
+                            "id": "qq-group",
+                            "name": "QQ 群聊只读会话",
+                            "workdir": "workspace",
+                            "session_file": "sessions/qq-group.txt",
+                            "backend": "codex",
+                            "prompt_prefix": "QQ 群聊只读安全环境。不要查询、读取、透露或总结本机/电脑信息；不要执行命令、修改文件或调用本地控制功能。可以协助公开网络查询、资料总结、概念解释、文本改写等只读任务。",
+                            "enabled": True,
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("agent_hub.APP_DIR", self.temp_path),
+            patch("agent_hub.CONFIG_PATH", config_path),
+            patch("agent_hub.SESSION_DIR", session_dir),
+            patch("agent_hub.WORKSPACE_DIR", workspace_dir),
+        ):
+            config = HubConfig.load()
+
+        qq_group_agent = next(agent for agent in config.agents if agent.id == "qq-group")
+        self.assertEqual("", qq_group_agent.prompt_prefix)
+        saved = json.loads(config_path.read_text(encoding="utf-8"))
+        saved_group = next(agent for agent in saved["agents"] if agent["id"] == "qq-group")
+        self.assertEqual("", saved_group["prompt_prefix"])
 
     def _wait_until(self, predicate, timeout: float = 10.0) -> None:
         deadline = time.time() + timeout
@@ -272,6 +317,62 @@ class AgentHubCancellationTests(unittest.TestCase):
         runtime = hub.runtimes["main"]
         self.assertEqual("idle", runtime.status)
         self.assertEqual(0, runtime.queue_size)
+
+    def test_prepare_restart_marks_active_tasks_recoverable_and_terminates_running_process(self) -> None:
+        workdir = self.temp_path / "workspace"
+        session_file = self.temp_path / "sessions" / "main.txt"
+        workdir.mkdir(parents=True, exist_ok=True)
+        session_file.parent.mkdir(parents=True, exist_ok=True)
+        config = HubConfig(
+            codex_command="codex",
+            claude_command="claude",
+            opencode_command="opencode",
+            agents=[AgentConfig("main", "Main", str(workdir), str(session_file), backend="codex")],
+        )
+        state_path = self.temp_path / "state" / "agent_hub_state.json"
+        with (
+            patch("agent_hub.STATE_PATH", state_path),
+            patch("agent_hub.discover_external_agent_processes", return_value=[]),
+            patch("agent_hub.terminate_process_tree") as mocked_terminate,
+        ):
+            hub = MultiCodexHub(config)
+            queued = HubTask(
+                id="task-queued-prepare",
+                agent_id="main",
+                agent_name="Main",
+                backend="codex",
+                source="qq",
+                sender_id="qq:private:10001",
+                prompt="queued",
+                status="queued",
+                created_at="2026-04-24T00:00:00",
+                session_name="qq-private-10001",
+            )
+            running = HubTask(
+                id="task-running-prepare",
+                agent_id="main",
+                agent_name="Main",
+                backend="codex",
+                source="qq",
+                sender_id="qq:private:10001",
+                prompt="running",
+                status="running",
+                created_at="2026-04-24T00:01:00",
+                session_name="qq-private-10001",
+            )
+            hub.tasks.extend([queued, running])
+            hub.running_task_pids[running.id] = 4321
+
+            result = hub.prepare_restart("planned restart")
+
+        self.assertEqual(2, result["interrupted_count"])
+        self.assertEqual("unknown_after_restart", queued.status)
+        self.assertEqual("planned restart", queued.error)
+        self.assertEqual("unknown_after_restart", running.status)
+        self.assertEqual("planned restart", running.error)
+        self.assertIn(queued.id, hub.restart_prepared_task_ids)
+        self.assertIn(running.id, hub.restart_prepared_task_ids)
+        mocked_terminate.assert_called_once_with(4321)
 
     def test_progress_update_pushes_task_update_to_bridge_ipc(self) -> None:
         workdir = self.temp_path / "workspace"

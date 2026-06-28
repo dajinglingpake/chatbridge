@@ -61,6 +61,17 @@ WEIXIN_NOTICE_ACTIONS = {
     "restart",
     "restart-bridge",
 }
+SELF_DISRUPTIVE_ACTIONS = {
+    "restart",
+    "restart-qq-stack",
+    "stop",
+    "emergency-stop",
+}
+HUB_RESTART_ACTIONS = {
+    "restart",
+    "restart-qq-stack",
+}
+ACTION_RUNNER_ENV = "CHATBRIDGE_SERVICE_ACTION_RUNNER"
 
 
 @dataclass
@@ -123,7 +134,10 @@ def run_named_action(action: str) -> ServiceResult:
     if runner is None:
         return ServiceResult(ok=False, message=f"未知操作：{action}")
     pre_notice = _broadcast_pre_stop_notice(action) if action in {"stop", "emergency-stop"} else None
+    prepare_message = _prepare_hub_restart(action) if action in HUB_RESTART_ACTIONS else ""
     result_message = " | ".join(runner())
+    if prepare_message:
+        result_message = f"{prepare_message} | {result_message}"
     if pre_notice is not None:
         return ServiceResult(ok=True, message=f"{result_message} | {pre_notice.summary}")
     if action in QQ_ISOLATED_ACTIONS:
@@ -133,7 +147,19 @@ def run_named_action(action: str) -> ServiceResult:
     notice = broadcast_bridge_notice_by_kind("service", f"服务操作: {action}", result_message, channel="wechat")
     return ServiceResult(ok=True, message=f"{result_message} | {notice.summary}")
 
-
+def _prepare_hub_restart(action: str) -> str:
+    try:
+        request_id = create_request(
+            "prepare_restart",
+            {"reason": f"Hub restart requested by service action: {action}"},
+        )
+        response = wait_for_response(request_id, timeout_seconds=5)
+    except Exception as exc:  # noqa: BLE001
+        return f"Hub restart prepare skipped: {type(exc).__name__}: {exc}"
+    if not response.ok:
+        return f"Hub restart prepare failed: {response.error or 'unknown error'}"
+    interrupted_count = int(response.payload.get("interrupted_count") or 0)
+    return f"Hub restart prepared {interrupted_count} active task(s)"
 def _broadcast_pre_stop_notice(action: str):
     snapshot = get_runtime_snapshot(include_agent_processes=False)
     if not snapshot.bridge_running:
@@ -241,6 +267,8 @@ def spawn_named_action_runner(action: str, request_id: str, delay_seconds: float
         "--delay-seconds",
         f"{safe_delay:.2f}",
     ]
+    env = dict(os.environ)
+    env[ACTION_RUNNER_ENV] = "1"
     APP_SERVICE_OUT_LOG.parent.mkdir(parents=True, exist_ok=True)
     with APP_SERVICE_OUT_LOG.open("ab") as out_handle, APP_SERVICE_ERR_LOG.open("ab") as err_handle:
         proc = subprocess.Popen(
@@ -249,6 +277,7 @@ def spawn_named_action_runner(action: str, request_id: str, delay_seconds: float
             stdout=out_handle,
             stderr=err_handle,
             stdin=subprocess.DEVNULL,
+            env=env,
             creationflags=creationflags(),
             start_new_session=True,
         )
@@ -588,6 +617,26 @@ def _main(argv: list[str] | None = None) -> int:
 
     delay_seconds = max(0.0, float(args.delay_seconds or 0.0))
     request_id = str(args.request_id or "").strip() or f"svc-{uuid.uuid4().hex[:12]}"
+    is_action_runner = os.environ.get(ACTION_RUNNER_ENV) == "1"
+    if action in SELF_DISRUPTIVE_ACTIONS and not is_action_runner:
+        child_pid = spawn_named_action_runner(action, request_id, delay_seconds)
+        _write_action_state(
+            request_id=request_id,
+            action=action,
+            status="delegated",
+            child_pid=child_pid,
+            delay_seconds=delay_seconds,
+        )
+        _append_action_log(
+            "delegated",
+            request_id=request_id,
+            action=action,
+            child_pid=child_pid,
+            delay_seconds=delay_seconds,
+        )
+        return 0
+    if is_action_runner:
+        os.environ.pop(ACTION_RUNNER_ENV, None)
     _write_action_state(
         request_id=request_id,
         action=action,

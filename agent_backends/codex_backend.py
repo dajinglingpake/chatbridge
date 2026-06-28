@@ -15,7 +15,7 @@ from core.platform_compat import terminate_process_tree
 
 PROGRESS_PUSH_INTERVAL_SECONDS = 1.0
 CODEX_EXIT_TIMEOUT_SECONDS = 10
-CODEX_TRANSIENT_RETRY_ATTEMPTS = 1
+CODEX_TRANSIENT_RETRY_ATTEMPTS = 2
 TRANSIENT_ERROR_MARKERS = (
     "stream disconnected before completion",
     "error sending request",
@@ -231,7 +231,7 @@ class CodexBackend(AgentBackend):
                 if attempt >= CODEX_TRANSIENT_RETRY_ATTEMPTS or not self._is_transient_error(str(exc)):
                     raise
                 if context.on_progress is not None:
-                    context.on_progress("Codex 连接中断，正在自动重试一次...")
+                    context.on_progress("Codex 连接中断，正在自动重试...")
                 time.sleep(1)
         raise last_error or RuntimeError("Codex failed")
 
@@ -360,23 +360,39 @@ class CodexBackend(AgentBackend):
         if context.reasoning_effort:
             options.extend(["-c", f'model_reasoning_effort="{context.reasoning_effort}"'])
         sandbox_mode = self._sandbox_mode(context)
+        resume_options: list[str] | None = None
         if sandbox_mode in {"workspace-write", "read-only"}:
-            options.extend(["-a", "never", "-s", sandbox_mode])
+            options.extend(["-c", f'approval_policy="{self._approval_policy(context)}"', "-s", sandbox_mode])
+            resume_options = [
+                "--skip-git-repo-check",
+                "--json",
+                "-o",
+                str(output_path),
+                "-c",
+                f'approval_policy="{self._approval_policy(context)}"',
+                "-c",
+                f'sandbox_mode="{sandbox_mode}"',
+            ]
+            if context.codex_slim_exec:
+                resume_options.extend(["--disable", "plugins", "--ignore-rules"])
+            if agent.model:
+                resume_options.extend(["-m", agent.model])
+            if context.reasoning_effort:
+                resume_options.extend(["-c", f'model_reasoning_effort="{context.reasoning_effort}"'])
         else:
             options.append("--dangerously-bypass-approvals-and-sandbox")
-        if context.codex_search_enabled:
-            options.append("--search")
+            resume_options = list(options)
         if context.mcp_server is not None:
-            options.extend(
-                [
-                    "-c",
-                    f'mcp_servers.{context.mcp_server.name}.command="{context.mcp_server.command}"',
-                    "-c",
-                    f"mcp_servers.{context.mcp_server.name}.args={json.dumps(context.mcp_server.args, ensure_ascii=False)}",
-                ]
-            )
+            mcp_options = [
+                "-c",
+                f'mcp_servers.{context.mcp_server.name}.command="{context.mcp_server.command}"',
+                "-c",
+                f"mcp_servers.{context.mcp_server.name}.args={json.dumps(context.mcp_server.args, ensure_ascii=False)}",
+            ]
+            options.extend(mcp_options)
+            resume_options.extend(mcp_options)
         if existing_session:
-            argv = [context.codex_command, "exec", "resume", *options, existing_session, final_prompt]
+            argv = [context.codex_command, "exec", "resume", *resume_options, existing_session, final_prompt]
         else:
             argv = [context.codex_command, "exec", *options, "-C", str(workdir), final_prompt]
 

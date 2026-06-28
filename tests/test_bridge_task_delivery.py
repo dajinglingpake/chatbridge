@@ -62,16 +62,18 @@ class BridgeTaskDeliveryTests(unittest.TestCase):
         self.assertIn("/retry task-001", plan.reply)
         self.assertEqual("Task canceled during execution.", plan.error_preview)
 
-    def test_terminal_plan_treats_unknown_terminal_status_as_failed(self) -> None:
+    def test_terminal_plan_formats_unknown_after_restart_as_restart_interruption(self) -> None:
         plan = build_terminal_task_delivery_plan(
             _task(status="unknown_after_restart", output="", error="lost after restart"),
             session_name="work",
             backend="codex",
         )
 
-        self.assertEqual("failed", plan.event)
-        self.assertTrue(plan.failed)
-        self.assertIn("codex 任务失败", plan.reply)
+        self.assertEqual("restart_interrupted", plan.event)
+        self.assertFalse(plan.failed)
+        self.assertIn("Hub 已重启，上一轮任务被中断", plan.reply)
+        self.assertIn("请重新发送你的问题", plan.reply)
+        self.assertNotIn("codex 任务失败", plan.reply)
         self.assertEqual("lost after restart", plan.error_preview)
 
 

@@ -493,6 +493,10 @@ class QQOneBotBridge:
             save_pending_task=lambda _task_id: self._save_pending_tasks(),
             forget_pending_task=self._forget_pending_task,
             send_typing_keepalive=self._send_typing_keepalive,
+            should_send_progress=lambda progress_delta: (
+                not self._is_group_reply_target(pending.reply_target)
+                and bool(str(progress_delta or "").strip())
+            ),
         ).handle_task_update(
             reply_target=pending.reply_target,
             task=task,
@@ -578,7 +582,7 @@ class QQOneBotBridge:
         plan = build_restart_resume_plan(task, pending, translate=self._t)
         if not plan.should_resume:
             return False
-        if plan.notice:
+        if plan.notice and not self._is_group_reply_target(event):
             self._send_reply(event, plan.notice)
         submitted_task = self._submit_task(pending.sender_key, plan.prompt)
         submitted_task_id = str(submitted_task.get("id") or "").strip()
@@ -733,10 +737,7 @@ class QQOneBotBridge:
 
     def _prepare_task_prompt(self, sender_key: str, prompt: str) -> str:
         cleaned_prompt = str(prompt or "").strip()
-        if not self._is_group_sender(sender_key):
-            return cleaned_prompt
-        policy = self._t("bridge.qq.group.restricted_prompt")
-        return "\n\n".join(part for part in [policy.strip(), cleaned_prompt] if part).strip()
+        return cleaned_prompt
 
     def _group_requires_mention(self) -> bool:
         return _config_bool(self.config, "qq_group_require_mention", True)
@@ -1255,10 +1256,14 @@ class QQOneBotBridge:
     def _cancel_task_best_effort(self, task_id: str) -> None:
         self._interrupted_task_ids.add(task_id)
         try:
-            self._ipc_request("cancel_task", {"task_id": task_id}, timeout_seconds=5)
+            response = self._ipc_request("cancel_task", {"task_id": task_id}, timeout_seconds=5)
         except Exception as exc:  # noqa: BLE001
             _log_error(f"interrupt cancel failed task_id={task_id}: {exc}")
-        self._forget_pending_task(task_id)
+            return
+        if getattr(response, "ok", False):
+            self._forget_pending_task(task_id)
+            return
+        _log_error(f"interrupt cancel rejected task_id={task_id}: {getattr(response, 'error', '')}")
 
     def recover_pending_tasks(self) -> None:
         self._start_thread("reconcile_pending_tasks", self._reconcile_pending_tasks)

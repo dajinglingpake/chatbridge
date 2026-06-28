@@ -317,8 +317,7 @@ class McpServerCodexBackendTests(unittest.TestCase):
                 output_path.write_text("ok", encoding="utf-8")
                 self.assertIn('-c', argv)
                 self.assertIn('model_reasoning_effort="high"', argv)
-                self.assertIn('-a', argv)
-                self.assertIn('never', argv)
+                self.assertIn('approval_policy="never"', argv)
                 self.assertIn('-s', argv)
                 self.assertIn('workspace-write', argv)
                 self.assertNotIn('--dangerously-bypass-approvals-and-sandbox', argv)
@@ -374,11 +373,11 @@ class McpServerCodexBackendTests(unittest.TestCase):
 
             def fake_popen(argv: list[str], **kwargs):
                 output_path.write_text("ok", encoding="utf-8")
-                self.assertIn('-a', argv)
-                self.assertIn('never', argv)
+                self.assertIn('-c', argv)
+                self.assertIn('approval_policy="never"', argv)
                 self.assertIn('-s', argv)
                 self.assertIn('read-only', argv)
-                self.assertIn('--search', argv)
+                self.assertNotIn('--search', argv)
                 self.assertNotIn('--dangerously-bypass-approvals-and-sandbox', argv)
                 return FakeProcess()
 
@@ -391,6 +390,66 @@ class McpServerCodexBackendTests(unittest.TestCase):
 
             self.assertEqual("ok", result["output"])
             self.assertEqual("thread-readonly", result["session_id"])
+
+    def test_codex_backend_resume_uses_config_sandbox_instead_of_sandbox_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            workdir = temp_path / "workspace"
+            workdir.mkdir(parents=True, exist_ok=True)
+            session_dir = temp_path / "sessions"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            session_file = session_dir / "qq-group.txt"
+            session_file.write_text("existing-session", encoding="utf-8")
+            output_path = temp_path / "multi-codex-output-fixed.txt"
+
+            agent = SimpleNamespace(
+                id="qq-group",
+                name="QQ Group",
+                workdir=str(workdir),
+                session_file=str(session_file),
+                backend="codex",
+                model="gpt-5.4",
+                prompt_prefix="",
+            )
+            context = BackendContext(
+                codex_command="codex",
+                claude_command="claude",
+                opencode_command="opencode",
+                session_dir=session_dir,
+                creationflags=0,
+                permission_mode="read-only",
+            )
+            backend = CodexBackend()
+
+            class FakeProcess:
+                def __init__(self) -> None:
+                    self.pid = 4321
+                    self.stdout = iter([])
+                    self.stderr = iter([])
+
+                def wait(self) -> int:
+                    return 0
+
+            def fake_popen(argv: list[str], **kwargs):
+                output_path.write_text("ok", encoding="utf-8")
+                self.assertEqual(["codex", "exec", "resume"], argv[:3])
+                self.assertIn('approval_policy="never"', argv)
+                self.assertIn('sandbox_mode="read-only"', argv)
+                self.assertNotIn("-s", argv)
+                self.assertNotIn("-C", argv)
+                self.assertIn("existing-session", argv)
+                self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", argv)
+                return FakeProcess()
+
+            with (
+                patch("agent_backends.codex_backend.tempfile.gettempdir", return_value=str(temp_path)),
+                patch("agent_backends.codex_backend.uuid.uuid4", return_value=SimpleNamespace(hex="fixed")),
+                patch("agent_backends.codex_backend.subprocess.Popen", side_effect=fake_popen),
+            ):
+                result = backend.invoke(agent, "hello", "", context)
+
+            self.assertEqual("ok", result["output"])
+            self.assertEqual("existing-session", result["session_id"])
 
     def test_codex_backend_retries_transient_stream_disconnect_once(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -451,6 +510,74 @@ class McpServerCodexBackendTests(unittest.TestCase):
             self.assertEqual("ok after retry", result["output"])
             self.assertEqual(2, calls["count"])
             self.assertIn("自动重试", progress[0])
+
+    def test_codex_backend_retries_two_transient_stream_disconnects(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            workdir = temp_path / "workspace"
+            workdir.mkdir(parents=True, exist_ok=True)
+            session_dir = temp_path / "sessions"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            output_path = temp_path / "multi-codex-output-fixed.txt"
+            progress: list[str] = []
+
+            agent = SimpleNamespace(
+                id="main",
+                name="Main",
+                workdir=str(workdir),
+                session_file=str(session_dir / "main.txt"),
+                backend="codex",
+                model="",
+                prompt_prefix="",
+            )
+            context = BackendContext(
+                codex_command="codex",
+                claude_command="claude",
+                opencode_command="opencode",
+                session_dir=session_dir,
+                creationflags=0,
+                on_progress=progress.append,
+            )
+            backend = CodexBackend()
+
+            class FakeProcess:
+                def __init__(self, returncode: int) -> None:
+                    self.pid = 4321
+                    self.returncode = returncode
+                    self.stdout = iter(['{"type":"thread.started","thread_id":"thread-retry"}\n'])
+                    self.stderr = iter([])
+
+                def wait(self, timeout: float | None = None) -> int:
+                    return self.returncode
+
+            calls = {"count": 0}
+
+            def fake_popen(argv: list[str], **kwargs):
+                calls["count"] += 1
+                if calls["count"] < 3:
+                    return FakeProcess(1)
+                output_path.write_text("ok after second retry", encoding="utf-8")
+                return FakeProcess(0)
+
+            with (
+                patch("agent_backends.codex_backend.tempfile.gettempdir", return_value=str(temp_path)),
+                patch("agent_backends.codex_backend.uuid.uuid4", return_value=SimpleNamespace(hex="fixed")),
+                patch("agent_backends.codex_backend.subprocess.Popen", side_effect=fake_popen),
+            ):
+                with patch.object(
+                    CodexBackend,
+                    "_wait_for_exit",
+                    side_effect=[
+                        RuntimeError("stream disconnected before completion"),
+                        RuntimeError("stream disconnected before completion"),
+                        0,
+                    ],
+                ):
+                    result = backend.invoke(agent, "hello", "", context)
+
+            self.assertEqual("ok after second retry", result["output"])
+            self.assertEqual(3, calls["count"])
+            self.assertEqual(2, len([item for item in progress if "自动重试" in item]))
 
     def test_codex_backend_does_not_retry_transient_error_after_cancel(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -55,6 +55,15 @@ def format_bridge_task_reply(
         )
     status = str(task.status or "failed").strip() or "failed"
     error = (task.error or "task failed").strip()
+    if status == "unknown_after_restart":
+        return _translate(
+            translate,
+            "bridge.task.restart_interrupted",
+            "Hub 已重启，上一轮任务被中断，自动续跑次数已用尽。\n任务 ID: {task_id}\n会话: {session}\n会话 ID: {session_id}\n\n请重新发送你的问题。",
+            task_id=task.id,
+            session=session_name or task.session_name or "default",
+            session_id=session_id or task.session_id or "-",
+        )
     if status == "canceled":
         return _translate(
             translate,
@@ -115,6 +124,12 @@ def build_terminal_task_delivery_plan(
         return TerminalTaskDeliveryPlan(
             reply=reply,
             event="canceled",
+            error_preview=(task.error or "").strip()[:240],
+        )
+    if status == "unknown_after_restart":
+        return TerminalTaskDeliveryPlan(
+            reply=reply,
+            event="restart_interrupted",
             error_preview=(task.error or "").strip()[:240],
         )
     return TerminalTaskDeliveryPlan(

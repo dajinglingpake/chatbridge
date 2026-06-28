@@ -845,6 +845,90 @@ class QQOneBotBridgeTests(unittest.TestCase):
         sent_messages = [payload["message"] for action, payload in bridge.api_calls if action == "send_private_msg"]
         self.assertIn("Hub 已重启", sent_messages[-1])
 
+    def test_group_unknown_after_restart_resubmits_without_group_notice(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.pending_tasks = {
+            "task-qq-group": BridgePendingReplyTask(
+                task_id="task-qq-group",
+                sender_key="qq:group:20002",
+                reply_target={"message_type": "group", "group_id": 20002, "user_id": 10001},
+                created_at=123,
+                interrupt_base_prompt="你好",
+            )
+        }
+        task = HubTask.from_dict(
+            {
+                "id": "task-qq-group",
+                "agent_id": "qq-group",
+                "agent_name": "QQ 群聊",
+                "backend": "codex",
+                "source": "qq",
+                "sender_id": "qq:group:20002",
+                "prompt": "你好",
+                "status": "unknown_after_restart",
+                "created_at": "2026-06-26T01:00:00",
+                "finished_at": "2026-06-26T01:00:05",
+                "error": "Hub restarted while this task was running.",
+                "session_name": "qq-group-20002",
+            },
+            default_backend="codex",
+        )
+
+        with patch.object(bridge, "_submit_task", return_value={"id": "task-qq-resumed"}):
+            bridge._handle_pushed_task_update({"task": task.to_dict()})
+
+        self.assertNotIn("task-qq-group", bridge.pending_tasks)
+        self.assertIn("task-qq-resumed", bridge.pending_tasks)
+        sent_messages = [payload["message"] for action, payload in bridge.api_calls if action == "send_group_msg"]
+        self.assertEqual([], sent_messages)
+
+    def test_cancel_failure_keeps_pending_task_for_restart_resume(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.pending_tasks = {
+            "task-qq-001": BridgePendingReplyTask(
+                task_id="task-qq-001",
+                sender_key="qq:private:10001",
+                reply_target={"message_type": "private", "user_id": 10001},
+                created_at=123,
+            )
+        }
+
+        with patch.object(bridge, "_ipc_request", side_effect=TimeoutError("hub down")):
+            bridge._cancel_task_best_effort("task-qq-001")
+
+        self.assertIn("task-qq-001", bridge.pending_tasks)
+
+    def test_cancel_rejection_keeps_pending_task_for_restart_resume(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.pending_tasks = {
+            "task-qq-001": BridgePendingReplyTask(
+                task_id="task-qq-001",
+                sender_key="qq:private:10001",
+                reply_target={"message_type": "private", "user_id": 10001},
+                created_at=123,
+            )
+        }
+        bridge.ipc_responses["cancel_task"] = SimpleNamespace(ok=False, error="hub busy", payload={})
+
+        bridge._cancel_task_best_effort("task-qq-001")
+
+        self.assertIn("task-qq-001", bridge.pending_tasks)
+
+    def test_cancel_success_removes_pending_task(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.pending_tasks = {
+            "task-qq-001": BridgePendingReplyTask(
+                task_id="task-qq-001",
+                sender_key="qq:private:10001",
+                reply_target={"message_type": "private", "user_id": 10001},
+                created_at=123,
+            )
+        }
+
+        bridge._cancel_task_best_effort("task-qq-001")
+
+        self.assertNotIn("task-qq-001", bridge.pending_tasks)
+
     def test_pushed_task_update_streams_progress_and_final_reply(self) -> None:
         bridge = FakeQQBridge(self.temp_path)
         bridge.pending_tasks = {
@@ -969,6 +1053,58 @@ class QQOneBotBridgeTests(unittest.TestCase):
                     "progress_text": "",
                     "progress_at": "",
                     "progress_seq": 0,
+                }
+            }
+        )
+
+        self.assertNotIn("task-qq-group", bridge.pending_tasks)
+        sent_messages = [payload["message"] for action, payload in bridge.api_calls if action == "send_group_msg"]
+        self.assertEqual(["[CQ:at,qq=10001] 群聊回答"], sent_messages)
+
+    def test_group_pushed_progress_is_suppressed_and_final_answer_is_not_deduped(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.pending_tasks = {
+            "task-qq-group": BridgePendingReplyTask(
+                task_id="task-qq-group",
+                sender_key="qq:group:20002",
+                reply_target={"message_type": "group", "group_id": 20002, "user_id": 10001},
+                created_at=123,
+            )
+        }
+        base_task = {
+            "id": "task-qq-group",
+            "agent_id": "qq-group",
+            "agent_name": "QQ 群聊",
+            "backend": "codex",
+            "source": "qq",
+            "sender_id": "qq:group:20002",
+            "prompt": "hello",
+            "created_at": "2026-06-26T01:00:00",
+            "started_at": "2026-06-26T01:00:01",
+            "session_name": "qq-group-20002",
+            "progress_at": "2026-06-26T01:00:02",
+        }
+
+        bridge._handle_pushed_task_update(
+            {
+                "task": {
+                    **base_task,
+                    "status": "running",
+                    "progress_text": "群聊回答",
+                    "progress_seq": 1,
+                }
+            }
+        )
+        bridge._handle_pushed_task_update(
+            {
+                "task": {
+                    **base_task,
+                    "status": "succeeded",
+                    "finished_at": "2026-06-26T01:00:05",
+                    "output": "群聊回答",
+                    "error": "",
+                    "progress_text": "群聊回答",
+                    "progress_seq": 1,
                 }
             }
         )
@@ -1291,9 +1427,7 @@ class QQOneBotBridgeTests(unittest.TestCase):
         self.assertEqual("read-only", payload["permission_mode"])
         self.assertIs(True, payload["codex_search_enabled"])
         self.assertEqual("qq-group-20002", payload["session_name"])
-        self.assertIn("QQ 群聊受限环境", payload["prompt"])
-        self.assertIn("不要查询", payload["prompt"])
-        self.assertIn("总结今天的公开新闻", payload["prompt"])
+        self.assertEqual("总结今天的公开新闻", payload["prompt"])
 
     def test_http_handler_returns_onebot_ok_for_message_event(self) -> None:
         bridge = FakeQQBridge(self.temp_path)

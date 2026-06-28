@@ -134,7 +134,6 @@ def _default_agent(agent_id: str) -> AgentConfig:
             "QQ 群聊只读会话",
             str(RUNTIME_DIR / "qq-group-workspace"),
             str(SESSION_DIR / "qq-group.txt"),
-            prompt_prefix=QQ_GROUP_PROMPT_PREFIX,
         )
     return AgentConfig(DEFAULT_MAIN_AGENT_ID, "默认会话", str(WORKSPACE_DIR), str(SESSION_DIR / "main.txt"))
 
@@ -151,6 +150,14 @@ def _ensure_default_agents(agents: list[AgentConfig]) -> tuple[list[AgentConfig]
         agents.append(_default_agent(DEFAULT_QQ_GROUP_AGENT_ID))
         changed = True
     return agents, changed
+
+def _clear_legacy_qq_group_prompt_prefix(agents: list[AgentConfig]) -> bool:
+    changed = False
+    for agent in agents:
+        if agent.id == DEFAULT_QQ_GROUP_AGENT_ID and agent.prompt_prefix.strip() == QQ_GROUP_PROMPT_PREFIX:
+            agent.prompt_prefix = ""
+            changed = True
+    return changed
 
 
 @dataclass
@@ -203,6 +210,7 @@ class HubConfig:
                 _default_agent(DEFAULT_MAIN_AGENT_ID),
             ]
         raw["agents"], changed = _ensure_default_agents(raw["agents"])
+        changed = _clear_legacy_qq_group_prompt_prefix(raw["agents"]) or changed
         for agent in raw["agents"]:
             agent.name = (agent.name or "默认会话").strip()
             agent.workdir = _to_abs_path(agent.workdir, WORKSPACE_DIR)
@@ -234,6 +242,7 @@ class MultiCodexHub:
         self.started_workers: set[str] = set()
         self.running_task_pids: dict[str, int] = {}
         self.cancel_requested_task_ids: set[str] = set()
+        self.restart_prepared_task_ids: set[str] = set()
         self.external_agent_processes_cache: list[dict[str, Any]] = []
         self.external_agent_processes_cache_at = 0.0
         self._restore_previous_state()
@@ -348,6 +357,40 @@ class MultiCodexHub:
                 raise ValueError(f"task cannot be canceled from status: {task.status}")
         terminate_process_tree(pid)
         return task_payload
+
+    def prepare_restart(self, reason: str = "") -> dict[str, Any]:
+        interrupted: list[dict[str, Any]] = []
+        pids: list[int] = []
+        finished_at = now_iso()
+        with self.lock:
+            for task in self.tasks:
+                if task.status not in {"queued", "running"}:
+                    continue
+                previous_status = task.status
+                task.status = "unknown_after_restart"
+                task.error = reason.strip() or (
+                    "Hub restart requested before this task could run."
+                    if previous_status == "queued"
+                    else "Hub restart requested while this task was running."
+                )
+                task.finished_at = finished_at
+                task.progress_text = ""
+                task.progress_at = ""
+                self.restart_prepared_task_ids.add(task.id)
+                pid = int(self.running_task_pids.get(task.id) or 0)
+                if pid > 0:
+                    pids.append(pid)
+                interrupted.append(task.to_dict())
+            for agent_id, runtime in self.runtimes.items():
+                if not any(task.agent_id == agent_id and task.status == "running" for task in self.tasks):
+                    runtime.status = "idle"
+                runtime.queue_size = self._queued_task_count(agent_id)
+                runtime.updated_at = finished_at
+            if interrupted:
+                self._save_state()
+        for pid in pids:
+            terminate_process_tree(pid)
+        return {"interrupted_count": len(interrupted), "tasks": interrupted}
 
     def retry_task(
         self,
@@ -529,7 +572,7 @@ class MultiCodexHub:
         while True:
             task = q.get()
             try:
-                if task.status == "canceled":
+                if task.status != "queued":
                     continue
                 self._run_task(agent_id, task)
             finally:
@@ -564,9 +607,14 @@ class MultiCodexHub:
                 flush=True,
             )
             canceled = self._consume_cancel_request(task.id)
+            restart_prepared = self._consume_restart_prepared(task.id)
             self._clear_running_task_pid(task.id)
             with self.lock:
                 runtime = self.runtimes[agent_id]
+                if restart_prepared or task.status == "unknown_after_restart":
+                    runtime.status = "idle"
+                    self._save_state()
+                    return
                 task.finished_at = now_iso()
                 task.progress_text = ""
                 runtime.status = "idle"
@@ -598,9 +646,14 @@ class MultiCodexHub:
                 flush=True,
             )
             canceled = self._consume_cancel_request(task.id)
+            restart_prepared = self._consume_restart_prepared(task.id)
             self._clear_running_task_pid(task.id)
             with self.lock:
                 runtime = self.runtimes[agent_id]
+                if restart_prepared or task.status == "unknown_after_restart":
+                    runtime.status = "idle"
+                    self._save_state()
+                    return
                 task.finished_at = now_iso()
                 task.progress_text = ""
                 if canceled:
@@ -636,6 +689,13 @@ class MultiCodexHub:
             if task_id not in self.cancel_requested_task_ids:
                 return False
             self.cancel_requested_task_ids.remove(task_id)
+            return True
+
+    def _consume_restart_prepared(self, task_id: str) -> bool:
+        with self.lock:
+            if task_id not in self.restart_prepared_task_ids:
+                return False
+            self.restart_prepared_task_ids.remove(task_id)
             return True
 
     def _is_cancel_requested(self, task_id: str) -> bool:
@@ -898,6 +958,8 @@ class MultiCodexHub:
             return IpcResponseEnvelope(ok=True, payload={"task": task})
         if action == "cancel_task":
             return IpcResponseEnvelope(ok=True, payload={"task": self.cancel_task(str(payload.get("task_id") or ""))})
+        if action == "prepare_restart":
+            return IpcResponseEnvelope(ok=True, payload=self.prepare_restart(str(payload.get("reason") or "")))
         if action == "retry_task":
             return IpcResponseEnvelope(
                 ok=True,
