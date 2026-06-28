@@ -330,16 +330,20 @@ class QQOneBotBridge:
         if not allowed:
             self._log_ignored_message_event(event, message_type, reason)
             return
-        if message_type == "group" and self._group_requires_mention() and not self._is_group_message_for_self(event):
+        group_mentions_self = message_type == "group" and self._is_group_message_for_self(event)
+        if message_type == "group" and self._group_requires_mention() and not group_mentions_self:
             self._log_ignored_message_event(event, message_type, "missing_mention")
             return
         sender_key = self._sender_key(event)
         text = _format_text_segments(event.get("message"))
+        media_attachments, media_errors = self._extract_media_attachments(sender_key, event.get("message"))
+        if message_type == "group" and group_mentions_self and not text and not media_attachments and not media_errors:
+            self._send_reply(self._reply_event_snapshot(event), "你好")
+            return
         if message_type == "group" and self._is_group_control_command(text):
             self._send_reply(self._reply_event_snapshot(event), self._t("bridge.qq.group.command_rejected"))
             self._log_ignored_message_event(event, message_type, "group_control_command")
             return
-        media_attachments, media_errors = self._extract_media_attachments(sender_key, event.get("message"))
         self.message_runtime.handle_message(
             IncomingBridgeMessage(
                 sender_id=sender_key,
@@ -551,7 +555,7 @@ class QQOneBotBridge:
             output = task.output.strip()
             if last_progress_text and normalize_message_for_dedupe(output) == normalize_message_for_dedupe(last_progress_text):
                 return ""
-            return output
+            return self._format_group_reply_text(event, output)
         resolved_sender_key = sender_key or task.sender_id
         session_name = task.session_name or self._session_name(resolved_sender_key)
         plan = build_terminal_task_delivery_plan(
@@ -665,6 +669,17 @@ class QQOneBotBridge:
         payload = {"user_id": event.get("user_id"), "message": text}
         response = self._onebot_api("send_private_msg", payload)
         _log(f"sent user_id={event.get('user_id')} status={response.get('status')} retcode={response.get('retcode')} message_id={(response.get('data') or {}).get('message_id') if isinstance(response.get('data'), dict) else '-'} preview={text[:120]!r}")
+
+    @staticmethod
+    def _format_group_reply_text(event: dict[str, Any], text: str) -> str:
+        user_id = str(event.get("user_id") or "").strip()
+        body = str(text or "")
+        if not user_id:
+            return body
+        mention = f"[CQ:at,qq={user_id}]"
+        if body.startswith(mention):
+            return body
+        return f"{mention} {body}".rstrip()
 
     def _onebot_api(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")

@@ -276,6 +276,25 @@ class QQOneBotBridgeTests(unittest.TestCase):
 
         self.assertEqual([("qq:group:20002", "不需要 at 也处理")], bridge.submitted)
 
+    def test_group_empty_mention_replies_hello_without_agent_submission(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.handle_event(
+            {
+                "post_type": "message",
+                "message_type": "group",
+                "group_id": 20002,
+                "user_id": 10001,
+                "self_id": 2493227263,
+                "message": [
+                    {"type": "at", "data": {"qq": "2493227263"}},
+                ],
+            }
+        )
+
+        self.assertEqual([], bridge.submitted)
+        sent_messages = [payload["message"] for action, payload in bridge.api_calls if action == "send_group_msg"]
+        self.assertEqual(["你好"], sent_messages)
+
     def test_group_interrupt_suppresses_notice_but_resubmits_latest_message(self) -> None:
         bridge = FakeQQBridge(self.temp_path)
         bridge.config.qq_group_require_mention = False
@@ -303,6 +322,50 @@ class QQOneBotBridgeTests(unittest.TestCase):
         self.assertNotIn("task-old", bridge.pending_tasks)
         time.sleep(0.2)
         self.assertEqual([("qq:group:20002", "新的补充")], bridge.submitted)
+        sent_messages = [payload["message"] for action, payload in bridge.api_calls if action == "send_group_msg"]
+        self.assertEqual([], sent_messages)
+
+    def test_group_repeated_interrupt_targets_latest_speaker(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.config.qq_group_require_mention = False
+        bridge.interrupt_runtime.delay_seconds = 0.08
+        bridge.pending_tasks = {
+            "task-old": BridgePendingReplyTask(
+                task_id="task-old",
+                sender_key="qq:group:20002",
+                reply_target={"message_type": "group", "group_id": 20002, "user_id": 10001},
+                created_at=123,
+                interrupt_base_prompt="原始问题",
+            )
+        }
+
+        bridge.handle_event(
+            {
+                "post_type": "message",
+                "message_type": "group",
+                "group_id": 20002,
+                "user_id": 10001,
+                "message": "第一次补充",
+            }
+        )
+        bridge.handle_event(
+            {
+                "post_type": "message",
+                "message_type": "group",
+                "group_id": 20002,
+                "user_id": 10002,
+                "message": "第二次补充",
+            }
+        )
+
+        time.sleep(0.2)
+
+        self.assertIn("task-qq-001", bridge.pending_tasks)
+        self.assertEqual(
+            {"message_type": "group", "group_id": 20002, "user_id": 10002},
+            bridge.pending_tasks["task-qq-001"].reply_target,
+        )
+        self.assertEqual([("qq:group:20002", "第一次补充\n\n第二次补充")], bridge.submitted)
         sent_messages = [payload["message"] for action, payload in bridge.api_calls if action == "send_group_msg"]
         self.assertEqual([], sent_messages)
 
@@ -881,7 +944,7 @@ class QQOneBotBridgeTests(unittest.TestCase):
             "task-qq-group": BridgePendingReplyTask(
                 task_id="task-qq-group",
                 sender_key="qq:group:20002",
-                reply_target={"message_type": "group", "group_id": 20002},
+                reply_target={"message_type": "group", "group_id": 20002, "user_id": 10001},
                 created_at=123,
             )
         }
@@ -912,7 +975,7 @@ class QQOneBotBridgeTests(unittest.TestCase):
 
         self.assertNotIn("task-qq-group", bridge.pending_tasks)
         sent_messages = [payload["message"] for action, payload in bridge.api_calls if action == "send_group_msg"]
-        self.assertEqual(["群聊回答"], sent_messages)
+        self.assertEqual(["[CQ:at,qq=10001] 群聊回答"], sent_messages)
 
     def test_group_pushed_terminal_failure_is_silent(self) -> None:
         bridge = FakeQQBridge(self.temp_path)
@@ -1165,11 +1228,13 @@ class QQOneBotBridgeTests(unittest.TestCase):
         bridge = FakeQQBridge(self.temp_path)
         bridge._send_reply({"message_type": "private", "user_id": 10001}, "hello")
         bridge._send_reply({"message_type": "group", "group_id": 20002}, "world")
+        bridge._send_reply({"message_type": "group", "group_id": 20002, "user_id": 10002}, "answer")
 
         self.assertEqual(
             [
                 ("send_private_msg", {"user_id": 10001, "message": "hello"}),
                 ("send_group_msg", {"group_id": 20002, "message": "world"}),
+                ("send_group_msg", {"group_id": 20002, "message": "answer"}),
             ],
             bridge.api_calls,
         )
