@@ -114,5 +114,34 @@ class BridgeInterruptRuntimeTests(unittest.TestCase):
         self.assertFalse(runtime.intercept(self._message("普通问题", source="wechat"), {"session_name": "session-a"}, "普通问题"))
 
 
+    def test_interrupt_can_suppress_notice_without_disabling_resubmit(self) -> None:
+        initial_task = FakePendingTask("task-001", interrupt_base_prompt="原始问题")
+        replies: list[str] = []
+        cancelled: list[str] = []
+        submitted: list[tuple[IncomingBridgeMessage, Any, str, bool]] = []
+        submitted_event = threading.Event()
+
+        def submit_delayed(message: IncomingBridgeMessage, session: Any, prompt: str, passthrough: bool) -> None:
+            submitted.append((message, session, prompt, passthrough))
+            submitted_event.set()
+
+        runtime = BridgeInterruptRuntime(
+            find_active_task=lambda _sender_id: initial_task,
+            cancel_task=lambda task_id: cancelled.append(task_id),
+            submit_delayed=submit_delayed,
+            send_reply=lambda _target, text: replies.append(text),
+            save_pending_tasks=lambda: None,
+            should_send_notice=lambda _message: False,
+            delay_seconds=0.08,
+        )
+
+        self.assertTrue(runtime.intercept(self._message("群聊补充"), {"session_name": "session-a"}, "群聊补充"))
+
+        self.assertTrue(submitted_event.wait(1.0))
+        self.assertEqual(["task-001"], cancelled)
+        self.assertEqual([], replies)
+        self.assertEqual(1, len(submitted))
+        self.assertEqual("群聊补充", submitted[0][2])
+
 if __name__ == "__main__":
     unittest.main()

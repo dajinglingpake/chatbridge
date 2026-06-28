@@ -146,6 +146,7 @@ class PollingTaskDeliveryController:
         update_pending_progress: Callable[[str, int, str], None],
         forget_pending_task: Callable[[str], None],
         log: Callable[[str], None],
+        format_terminal_reply: Callable[[HubTask, str, int | None], str] | None = None,
         sleep_seconds: float = 1.0,
     ) -> None:
         self.default_backend = default_backend
@@ -159,6 +160,7 @@ class PollingTaskDeliveryController:
         self.update_pending_progress = update_pending_progress
         self.forget_pending_task = forget_pending_task
         self.log = log
+        self.format_terminal_reply = format_terminal_reply
         self.sleep_seconds = sleep_seconds
 
     def wait_and_reply(self, reply_target: dict[str, Any], task_id: str) -> None:
@@ -200,11 +202,15 @@ class PollingTaskDeliveryController:
             f"task terminal task_id={task_id} status={latest_task.status} "
             f"output_preview={latest_task.output[:80]!r} error_preview={latest_task.error[:80]!r}"
         )
-        final_reply = format_bridge_task_reply(
-            latest_task,
-            last_progress_text=last_sent_progress_text,
-            context_left_percent=self.resolve_context_left_percent(latest_task),
-        )
+        context_left_percent = self.resolve_context_left_percent(latest_task)
+        if self.format_terminal_reply is not None:
+            final_reply = self.format_terminal_reply(latest_task, last_sent_progress_text, context_left_percent)
+        else:
+            final_reply = format_bridge_task_reply(
+                latest_task,
+                last_progress_text=last_sent_progress_text,
+                context_left_percent=context_left_percent,
+            )
         if final_reply:
             self.send_reply(reply_target, final_reply)
         if latest_task.status in TERMINAL_TASK_STATUSES:

@@ -20,6 +20,7 @@ from core.bridge_conversation_runtime import BridgeConversationRuntime
 from core.bridge_control_runtime import BridgeControlRuntime
 from core.bridge_interrupt_runtime import BridgeInterruptRuntime
 from core.bridge_message_control import (
+    normalize_message_for_dedupe,
     normalize_context_left_percent,
 )
 from core.bridge_pending_tasks import BridgePendingReplyTask, JsonBackedTaskStore
@@ -296,6 +297,7 @@ class QQOneBotBridge:
             send_reply=self._send_reply,
             save_pending_tasks=self._save_pending_tasks,
             translate=lambda key, **kwargs: self._t(key, **kwargs),
+            should_send_notice=lambda message: str(message.message_type or "").strip().lower() != "group",
         )
         self.message_runtime = BridgeMessageRuntime(
             pending_media=self.pending_media_store,
@@ -429,6 +431,12 @@ class QQOneBotBridge:
             ),
             forget_pending_task=self._forget_pending_task,
             log=_log,
+            format_terminal_reply=lambda task, last_progress_text, context_left_percent: self._format_task_terminal_reply(
+                event,
+                task,
+                last_progress_text=last_progress_text,
+                context_left_percent=context_left_percent,
+            ),
         ).wait_and_reply(event, task_id)
 
     def _bridge_ipc_worker(self) -> None:
@@ -518,22 +526,49 @@ class QQOneBotBridge:
         )
         if self._resume_task_after_hub_restart(event, pending, task):
             return
-        plan = build_terminal_task_delivery_plan(
+        reply = self._format_task_terminal_reply(
+            event,
             task,
             last_progress_text=pending.last_progress_text,
             context_left_percent=self._resolve_task_context_left_percent(task),
+            sender_key=pending.sender_key,
+        )
+        if reply:
+            self._send_reply(event, reply)
+
+    def _format_task_terminal_reply(
+        self,
+        event: dict[str, Any],
+        task: HubTask,
+        *,
+        last_progress_text: str,
+        context_left_percent: int | None,
+        sender_key: str = "",
+    ) -> str:
+        if self._is_group_reply_target(event):
+            if task.status != "succeeded":
+                return ""
+            output = task.output.strip()
+            if last_progress_text and normalize_message_for_dedupe(output) == normalize_message_for_dedupe(last_progress_text):
+                return ""
+            return output
+        resolved_sender_key = sender_key or task.sender_id
+        session_name = task.session_name or self._session_name(resolved_sender_key)
+        plan = build_terminal_task_delivery_plan(
+            task,
+            last_progress_text=last_progress_text,
+            context_left_percent=context_left_percent,
             translate=self._t,
-            session_name=task.session_name or self._session_name(pending.sender_key),
+            session_name=session_name,
             session_id=task.session_id or "-",
             backend=task.backend or self.config.default_backend,
             hint=build_task_followup_hint(
                 task_id=task.id,
-                session_name=task.session_name or self._session_name(pending.sender_key),
+                session_name=session_name,
                 allow_retry=True,
             ),
         )
-        if plan.reply:
-            self._send_reply(event, plan.reply)
+        return plan.reply
 
     def _resume_task_after_hub_restart(self, event: dict[str, Any], pending: BridgePendingReplyTask, task: HubTask) -> bool:
         plan = build_restart_resume_plan(task, pending, translate=self._t)
@@ -1222,6 +1257,10 @@ class QQOneBotBridge:
         if user_id:
             return {"message_type": "private", "user_id": user_id}
         return {}
+
+    @staticmethod
+    def _is_group_reply_target(event: dict[str, Any]) -> bool:
+        return str(event.get("message_type") or "").strip().lower() == "group" and bool(event.get("group_id"))
 
     @staticmethod
     def _reply_target_from_sender_key(sender_key: str) -> dict[str, Any]:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import threading
+import time
 import unittest
 import socket
 import urllib.error
@@ -274,6 +275,36 @@ class QQOneBotBridgeTests(unittest.TestCase):
         )
 
         self.assertEqual([("qq:group:20002", "不需要 at 也处理")], bridge.submitted)
+
+    def test_group_interrupt_suppresses_notice_but_resubmits_latest_message(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.config.qq_group_require_mention = False
+        bridge.interrupt_runtime.delay_seconds = 0.08
+        bridge.pending_tasks = {
+            "task-old": BridgePendingReplyTask(
+                task_id="task-old",
+                sender_key="qq:group:20002",
+                reply_target={"message_type": "group", "group_id": 20002},
+                created_at=123,
+                interrupt_base_prompt="原始问题",
+            )
+        }
+
+        bridge.handle_event(
+            {
+                "post_type": "message",
+                "message_type": "group",
+                "group_id": 20002,
+                "user_id": 10001,
+                "message": "新的补充",
+            }
+        )
+
+        self.assertNotIn("task-old", bridge.pending_tasks)
+        time.sleep(0.2)
+        self.assertEqual([("qq:group:20002", "新的补充")], bridge.submitted)
+        sent_messages = [payload["message"] for action, payload in bridge.api_calls if action == "send_group_msg"]
+        self.assertEqual([], sent_messages)
 
     def test_private_message_is_ignored_when_private_disabled(self) -> None:
         bridge = FakeQQBridge(self.temp_path)
@@ -843,6 +874,84 @@ class QQOneBotBridgeTests(unittest.TestCase):
         self.assertIn("\n\n这是最终回答", sent_messages[0])
         self.assertTrue(sent_messages[1].startswith("done · "))
         self.assertNotIn("\n\n", sent_messages[1])
+
+    def test_group_pushed_terminal_success_sends_plain_answer_without_done_metadata(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.pending_tasks = {
+            "task-qq-group": BridgePendingReplyTask(
+                task_id="task-qq-group",
+                sender_key="qq:group:20002",
+                reply_target={"message_type": "group", "group_id": 20002},
+                created_at=123,
+            )
+        }
+
+        bridge._handle_pushed_task_update(
+            {
+                "task": {
+                    "id": "task-qq-group",
+                    "agent_id": "qq-group",
+                    "agent_name": "QQ 群聊",
+                    "backend": "codex",
+                    "source": "qq",
+                    "sender_id": "qq:group:20002",
+                    "prompt": "hello",
+                    "status": "succeeded",
+                    "created_at": "2026-06-26T01:00:00",
+                    "started_at": "2026-06-26T01:00:01",
+                    "finished_at": "2026-06-26T01:00:05",
+                    "output": "群聊回答",
+                    "error": "",
+                    "session_name": "qq-group-20002",
+                    "progress_text": "",
+                    "progress_at": "",
+                    "progress_seq": 0,
+                }
+            }
+        )
+
+        self.assertNotIn("task-qq-group", bridge.pending_tasks)
+        sent_messages = [payload["message"] for action, payload in bridge.api_calls if action == "send_group_msg"]
+        self.assertEqual(["群聊回答"], sent_messages)
+
+    def test_group_pushed_terminal_failure_is_silent(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.pending_tasks = {
+            "task-qq-group": BridgePendingReplyTask(
+                task_id="task-qq-group",
+                sender_key="qq:group:20002",
+                reply_target={"message_type": "group", "group_id": 20002},
+                created_at=123,
+            )
+        }
+
+        bridge._handle_pushed_task_update(
+            {
+                "task": {
+                    "id": "task-qq-group",
+                    "agent_id": "qq-group",
+                    "agent_name": "QQ 群聊",
+                    "backend": "codex",
+                    "source": "qq",
+                    "sender_id": "qq:group:20002",
+                    "prompt": "hello",
+                    "status": "failed",
+                    "created_at": "2026-06-26T01:00:00",
+                    "started_at": "2026-06-26T01:00:01",
+                    "finished_at": "2026-06-26T01:00:05",
+                    "output": "",
+                    "error": "local permission denied",
+                    "session_name": "qq-group-20002",
+                    "progress_text": "",
+                    "progress_at": "",
+                    "progress_seq": 0,
+                }
+            }
+        )
+
+        self.assertNotIn("task-qq-group", bridge.pending_tasks)
+        sent_messages = [payload["message"] for action, payload in bridge.api_calls if action == "send_group_msg"]
+        self.assertEqual([], sent_messages)
 
     def test_process_bridge_ipc_consumes_qq_channel_update(self) -> None:
         bridge = FakeQQBridge(self.temp_path)

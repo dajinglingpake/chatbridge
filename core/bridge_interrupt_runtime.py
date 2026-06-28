@@ -31,6 +31,7 @@ class BridgeInterruptRuntime:
         send_reply: Callable[[dict[str, Any], str], None],
         save_pending_tasks: Callable[[], None],
         translate: Callable[..., str] | None = None,
+        should_send_notice: Callable[[IncomingBridgeMessage], bool] | None = None,
         delay_seconds: float = 5.0,
         notice_text: str = "",
     ) -> None:
@@ -40,6 +41,7 @@ class BridgeInterruptRuntime:
         self.send_reply = send_reply
         self.save_pending_tasks = save_pending_tasks
         self.translate = translate
+        self.should_send_notice = should_send_notice or (lambda _message: True)
         self.delay_seconds = max(0.1, float(delay_seconds))
         self.notice_text = notice_text
         self._lock = threading.RLock()
@@ -87,7 +89,7 @@ class BridgeInterruptRuntime:
                 )
                 self._chains[message.sender_id] = chain
                 notice_text = self._notice_text()
-                if notice_text:
+                if notice_text and self.should_send_notice(message):
                     self.send_reply(message.reply_target, notice_text)
             else:
                 active_task = None
