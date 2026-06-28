@@ -76,6 +76,7 @@ LOCAL_URL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 DEFAULT_QQ_AGENT_ID = "qq"
 QQ_TYPING_KEEPALIVE_SECONDS = 5.0
 QQ_BRIDGE_CHANNEL = "qq"
+QQ_GROUP_ATTACHMENT_DIR_NAME = ".chatbridge_attachments"
 
 
 def _configure_process_stdio() -> None:
@@ -386,12 +387,16 @@ class QQOneBotBridge:
     def _submit_runtime_task(
         self,
         message: IncomingBridgeMessage,
-        _session_name: str,
+        session: Any,
         prompt: str,
         _passthrough: bool,
     ) -> BridgeSubmittedTask:
-        task = self._submit_task(message.sender_id, prompt)
-        return BridgeSubmittedTask(task_id=str(task.get("id") or "").strip(), payload=task)
+        submitted = self.task_submit_runtime.submit(
+            message,
+            session,
+            self._prepare_task_prompt(message.sender_id, prompt),
+        )
+        return BridgeSubmittedTask(task_id=submitted.task_id, payload=submitted.payload)
 
     def _resolve_task_submit_context(self, message: IncomingBridgeMessage, session: Any) -> BridgeTaskSubmitContext:
         if isinstance(session, dict):
@@ -409,6 +414,8 @@ class QQOneBotBridge:
             model=str(getattr(session_meta, "model", "") or ""),
             reasoning_effort=str(getattr(session_meta, "reasoning_effort", "") or ""),
             permission_mode=self._resolve_message_permission_mode(message.sender_id, session_meta),
+            permission_profile=self._resolve_message_permission_profile(message.sender_id),
+            images=self._message_image_paths(message),
             codex_search_enabled=self._resolve_message_codex_search_enabled(message.sender_id),
         )
 
@@ -727,6 +734,11 @@ class QQOneBotBridge:
             return str(getattr(self.config, "qq_group_permission_mode", "") or "read-only").strip().lower() or "read-only"
         return str(getattr(session_meta, "permission_mode", "") or "")
 
+    def _resolve_message_permission_profile(self, sender_key: str) -> str:
+        if self._is_group_sender(sender_key):
+            return str(getattr(self.config, "qq_group_permission_profile", "") or "qq_group").strip() or "qq_group"
+        return ""
+
     def _resolve_message_agent_id(self, sender_key: str) -> str:
         if self._is_group_sender(sender_key):
             return str(getattr(self.config, "qq_group_agent_id", "") or "qq-group").strip() or "qq-group"
@@ -738,6 +750,22 @@ class QQOneBotBridge:
     def _prepare_task_prompt(self, sender_key: str, prompt: str) -> str:
         cleaned_prompt = str(prompt or "").strip()
         return cleaned_prompt
+
+    @staticmethod
+    def _message_image_paths(message: IncomingBridgeMessage) -> list[str]:
+        raw_attachments = message.metadata.get("media_attachments")
+        if not isinstance(raw_attachments, list):
+            return []
+        paths: list[str] = []
+        for attachment in raw_attachments:
+            if not isinstance(attachment, dict):
+                continue
+            if str(attachment.get("kind") or "").strip().lower() != "image":
+                continue
+            path = str(attachment.get("path") or "").strip()
+            if path:
+                paths.append(path)
+        return paths
 
     def _group_requires_mention(self) -> bool:
         return _config_bool(self.config, "qq_group_require_mention", True)
@@ -796,7 +824,7 @@ class QQOneBotBridge:
         raw_name = str(data.get("file") or data.get("filename") or data.get("name") or f"{kind}-{index}")
         filename = _safe_path_part(Path(raw_name.replace("\\", "/")).name)
         saved_path = self._save_onebot_media_payload(sender_key, data, filename=filename)
-        return {"kind": "image" if kind == "image" else "file", "name": filename, "path": str(saved_path)}
+        return {"kind": "image" if kind == "image" else "file", "name": filename, "path": self._prompt_media_path(sender_key, saved_path)}
 
     def _save_onebot_media_payload(self, sender_key: str, data: dict[str, Any], *, filename: str) -> Path:
         url = str(data.get("url") or "").strip()
@@ -868,7 +896,7 @@ class QQOneBotBridge:
         data = source_path.read_bytes()
         if len(data) > MEDIA_RECEIVE_MAX_BYTES:
             raise ValueError(f"file is too large: {len(data)} bytes")
-        target_dir = ONEBOT_UPLOAD_DIR / _safe_path_part(sender_key)
+        target_dir = self._media_storage_dir(sender_key)
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / f"{now_seconds()}-{secrets.token_hex(4)}-{filename}"
         target.write_bytes(data)
@@ -879,11 +907,35 @@ class QQOneBotBridge:
             data = response.read(MEDIA_RECEIVE_MAX_BYTES + 1)
         if len(data) > MEDIA_RECEIVE_MAX_BYTES:
             raise ValueError(f"file is too large: {len(data)} bytes")
-        target_dir = ONEBOT_UPLOAD_DIR / _safe_path_part(sender_key)
+        target_dir = self._media_storage_dir(sender_key)
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / f"{now_seconds()}-{secrets.token_hex(4)}-{filename}"
         target.write_bytes(data)
         return target
+
+    def _media_storage_dir(self, sender_key: str) -> Path:
+        safe_sender = _safe_path_part(sender_key)
+        if self._is_group_sender(sender_key):
+            return self._resolve_group_agent_workdir() / QQ_GROUP_ATTACHMENT_DIR_NAME / safe_sender
+        return ONEBOT_UPLOAD_DIR / safe_sender
+
+    def _prompt_media_path(self, sender_key: str, saved_path: Path) -> str:
+        if not self._is_group_sender(sender_key):
+            return str(saved_path)
+        try:
+            return str(saved_path.resolve().relative_to(self._resolve_group_agent_workdir()))
+        except ValueError:
+            return str(saved_path)
+
+    def _resolve_group_agent_workdir(self) -> Path:
+        agent_id = self._resolve_message_agent_id("qq:group:")
+        for agent in self._load_agents():
+            if str(getattr(agent, "id", "") or "").strip() != agent_id:
+                continue
+            workdir = str(getattr(agent, "workdir", "") or "").strip()
+            if workdir:
+                return Path(workdir).expanduser().resolve()
+        return (RUNTIME_DIR / "qq-group-workspace").resolve()
 
     def _sender_key(self, event: dict[str, Any]) -> str:
         message_type = str(event.get("message_type") or "").strip().lower()

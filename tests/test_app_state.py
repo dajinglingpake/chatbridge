@@ -120,8 +120,8 @@ class AppStateTests(unittest.TestCase):
             codex_processes=[],
             log_dir=".runtime/logs",
             qq_logged_in=True,
-            qq_user_id="2493227263",
-            qq_nickname="纳西妲",
+            qq_user_id="900000001",
+            qq_nickname="测试QQ",
         )
         bridge_state = BridgeRuntimeState(
             started_at="2026-01-01T00:00:00",
@@ -134,7 +134,7 @@ class AppStateTests(unittest.TestCase):
         lines = build_overview_lines(snapshot, bridge_state, "acct-1")
 
         self.assertIn("当前账号: acct-1", lines)
-        self.assertIn("QQ 登录: 已登录 纳西妲 (2493227263)", lines)
+        self.assertIn("QQ 登录: 已登录 测试QQ (900000001)", lines)
         self.assertIn("微信桥状态:", lines)
         self.assertIn("started_at: 2026-01-01T00:00:00", lines)
 

@@ -2213,7 +2213,9 @@ class WeixinBridgeCommandTests(unittest.TestCase):
 
         prompt = bridge.submit_payloads[-1]["prompt"]
         self.assertTrue(prompt.startswith("你能看到这张图吗"))
-        self.assertIn("image-1.jpg", prompt)
+        self.assertNotIn("\n", prompt)
+        self.assertNotIn("图片:", prompt)
+        self.assertNotIn("本地路径", prompt)
         self.assertIn(str(saved_image), prompt)
         self.assertNotIn("sender-test", bridge.pending_media_context)
 

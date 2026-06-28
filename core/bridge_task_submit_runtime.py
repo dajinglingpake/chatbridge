@@ -17,6 +17,8 @@ class BridgeTaskSubmitContext:
     model: str = ""
     reasoning_effort: str = ""
     permission_mode: str = ""
+    permission_profile: str = ""
+    images: list[str] | None = None
     bridge_conversations_path: str = ""
     bridge_event_log_path: str = ""
     context_token: str = ""
@@ -69,6 +71,7 @@ class BridgeTaskSubmitRuntime:
             "model": context.model,
             "reasoning_effort": context.reasoning_effort,
             "permission_mode": context.permission_mode,
+            "permission_profile": context.permission_profile,
             "bridge_conversations_path": context.bridge_conversations_path,
             "bridge_event_log_path": context.bridge_event_log_path,
             "context_token": context.context_token or message.context_token,
@@ -76,6 +79,9 @@ class BridgeTaskSubmitRuntime:
         for key, value in optional_fields.items():
             if str(value or "").strip():
                 payload[key] = value
+        images = [str(item).strip() for item in (context.images or []) if str(item).strip()]
+        if images:
+            payload["images"] = images
         if context.codex_search_enabled:
             payload["codex_search_enabled"] = True
         return payload

@@ -12,9 +12,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from core.bridge_pending_tasks import BridgePendingReplyTask
+from core.bridge_runtime import BridgeSubmittedTask, IncomingBridgeMessage
 from core.state_models import HubTask
 import local_ipc
-from qq_onebot_bridge import DEFAULT_QQ_AGENT_ID, QQOneBotBridge
+from qq_onebot_bridge import DEFAULT_QQ_AGENT_ID, QQ_GROUP_ATTACHMENT_DIR_NAME, QQOneBotBridge
 from http.server import ThreadingHTTPServer
 
 
@@ -49,6 +50,17 @@ class FakeQQBridge(QQOneBotBridge):
     def _submit_task(self, sender_key: str, prompt: str) -> dict[str, object]:
         self.submitted.append((sender_key, prompt))
         return {"id": "task-qq-001"}
+
+    def _submit_runtime_task(
+        self,
+        message: IncomingBridgeMessage,
+        _session: object,
+        prompt: str,
+        _passthrough: bool,
+    ) -> BridgeSubmittedTask:
+        self.submitted.append((message.sender_id, prompt))
+        payload = {"id": "task-qq-001"}
+        return BridgeSubmittedTask(task_id="task-qq-001", payload=payload)
 
     def _wait_and_reply(self, event: dict[str, object], task_id: str) -> None:
         self.replies.append((event, task_id))
@@ -149,9 +161,9 @@ class QQOneBotBridgeTests(unittest.TestCase):
                 "message_type": "group",
                 "group_id": 20002,
                 "user_id": 10001,
-                "self_id": 2493227263,
+                "self_id": 900000001,
                 "message": [
-                    {"type": "at", "data": {"qq": "2493227263"}},
+                    {"type": "at", "data": {"qq": "900000001"}},
                     {"type": "text", "data": {"text": "总结这个文件"}},
                     {"type": "file", "data": {"url": "http://media.local/file", "file": "report.pdf"}},
                 ],
@@ -165,6 +177,44 @@ class QQOneBotBridgeTests(unittest.TestCase):
         self.assertNotIn("\n", prompt)
         self.assertNotIn("文件:", prompt)
         self.assertNotIn("本地路径", prompt)
+
+    def test_group_media_is_copied_under_group_agent_workdir(self) -> None:
+        source_file = self.temp_path / "onebot-cache-report.txt"
+        source_file.write_text("report-data", encoding="utf-8")
+        group_workdir = self.temp_path / "qq-group-workspace"
+        bridge = FakeQQBridge(self.temp_path)
+
+        with patch.object(
+            QQOneBotBridge,
+            "_load_agents",
+            return_value=[SimpleNamespace(id="qq-group", workdir=str(group_workdir))],
+        ):
+            bridge.handle_event(
+                {
+                    "post_type": "message",
+                    "message_type": "group",
+                    "group_id": 20002,
+                    "user_id": 10001,
+                    "self_id": 900000001,
+                    "message": [
+                        {"type": "at", "data": {"qq": "900000001"}},
+                        {"type": "text", "data": {"text": "总结这个文件"}},
+                        {"type": "file", "data": {"url": str(source_file), "file": "report.txt"}},
+                    ],
+                }
+            )
+
+        sender_key, prompt = bridge.submitted[0]
+        self.assertEqual("qq:group:20002", sender_key)
+        saved_path_text = prompt.rsplit(" ", 1)[1]
+        self.assertFalse(Path(saved_path_text).is_absolute())
+        self.assertIn(QQ_GROUP_ATTACHMENT_DIR_NAME, saved_path_text)
+        self.assertIn("qq-group-20002", saved_path_text)
+        saved_path = group_workdir / saved_path_text
+        self.assertTrue(saved_path.exists())
+        self.assertIn("report-data", saved_path.read_text(encoding="utf-8"))
+        self.assertNotIn("I:", saved_path_text)
+        self.assertNotIn("\n", prompt)
 
     def test_file_id_media_message_uses_onebot_get_file(self) -> None:
         source_file = self.temp_path / "onebot-cache-report.pdf"
@@ -265,7 +315,7 @@ class QQOneBotBridgeTests(unittest.TestCase):
                 "message_type": "group",
                 "group_id": 20002,
                 "user_id": 10001,
-                "self_id": 2493227263,
+                "self_id": 900000001,
                 "message": [
                     {"type": "text", "data": {"text": "不要回复这条"}},
                 ],
@@ -283,7 +333,7 @@ class QQOneBotBridgeTests(unittest.TestCase):
                 "message_type": "group",
                 "group_id": 20002,
                 "user_id": 10001,
-                "self_id": 2493227263,
+                "self_id": 900000001,
                 "message": [
                     {"type": "text", "data": {"text": "不需要 at 也处理"}},
                 ],
@@ -300,9 +350,9 @@ class QQOneBotBridgeTests(unittest.TestCase):
                 "message_type": "group",
                 "group_id": 20002,
                 "user_id": 10001,
-                "self_id": 2493227263,
+                "self_id": 900000001,
                 "message": [
-                    {"type": "at", "data": {"qq": "2493227263"}},
+                    {"type": "at", "data": {"qq": "900000001"}},
                 ],
             }
         )
@@ -408,9 +458,9 @@ class QQOneBotBridgeTests(unittest.TestCase):
                 "message_type": "group",
                 "group_id": 20002,
                 "user_id": 10001,
-                "self_id": 2493227263,
+                "self_id": 900000001,
                 "message": [
-                    {"type": "at", "data": {"qq": "2493227263"}},
+                    {"type": "at", "data": {"qq": "900000001"}},
                     {"type": "text", "data": {"text": "不要处理群聊"}},
                 ],
             }
@@ -427,9 +477,9 @@ class QQOneBotBridgeTests(unittest.TestCase):
                 "message_type": "group",
                 "group_id": 20002,
                 "user_id": 10001,
-                "self_id": 2493227263,
+                "self_id": 900000001,
                 "message": [
-                    {"type": "at", "data": {"qq": "2493227263"}},
+                    {"type": "at", "data": {"qq": "900000001"}},
                     {"type": "text", "data": {"text": "群不在白名单"}},
                 ],
             }
@@ -445,9 +495,9 @@ class QQOneBotBridgeTests(unittest.TestCase):
                 "message_type": "group",
                 "group_id": 20002,
                 "user_id": 10001,
-                "self_id": 2493227263,
+                "self_id": 900000001,
                 "message": [
-                    {"type": "at", "data": {"qq": "2493227263"}},
+                    {"type": "at", "data": {"qq": "900000001"}},
                     {"type": "text", "data": {"text": "/status"}},
                 ],
             }
@@ -1366,7 +1416,7 @@ class QQOneBotBridgeTests(unittest.TestCase):
                 "message_type": "group",
                 "group_id": 20002,
                 "user_id": 10001,
-                "self_id": 2493227263,
+                "self_id": 900000001,
                 "message": [
                     {"type": "at", "data": {"qq": "10002"}},
                     {"type": "text", "data": {"text": "也不要回复这条"}},
@@ -1441,9 +1491,60 @@ class QQOneBotBridgeTests(unittest.TestCase):
         payload = calls[0][1]
         self.assertEqual("qq-group", payload["agent_id"])
         self.assertEqual("read-only", payload["permission_mode"])
+        self.assertEqual("qq_group", payload["permission_profile"])
         self.assertIs(True, payload["codex_search_enabled"])
         self.assertEqual("qq-group-20002", payload["session_name"])
         self.assertEqual("总结今天的公开新闻", payload["prompt"])
+
+    def test_group_image_submit_uses_permission_profile_and_codex_image(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_image = temp_path / "onebot-cache-image.png"
+            source_image.write_bytes(b"png-data")
+            group_workdir = temp_path / "qq-group-workspace"
+            bridge = QQOneBotBridge(
+                SimpleNamespace(backend_id="main", default_backend="codex", hub_task_timeout_seconds=30, language="zh-CN"),
+                api_base="http://onebot.local",
+            )
+            calls: list[tuple[str, dict[str, object]]] = []
+
+            def fake_create_request(action: str, payload: dict[str, object]) -> str:
+                calls.append((action, payload))
+                return "req-qq-group-image"
+
+            response = SimpleNamespace(ok=True, error="", payload={"task": {"id": "task-qq-group-image"}})
+            with (
+                patch.object(QQOneBotBridge, "_load_agents", return_value=[SimpleNamespace(id="qq-group", workdir=str(group_workdir))]),
+                patch("qq_onebot_bridge.create_request", side_effect=fake_create_request),
+                patch("qq_onebot_bridge.wait_for_response", return_value=response),
+            ):
+                bridge.handle_event(
+                    {
+                        "post_type": "message",
+                        "message_type": "group",
+                        "group_id": 20002,
+                        "user_id": 10001,
+                        "self_id": 900000001,
+                        "message": [
+                            {"type": "at", "data": {"qq": "900000001"}},
+                            {"type": "text", "data": {"text": "看这张图"}},
+                            {"type": "image", "data": {"url": str(source_image), "file": "image.png"}},
+                        ],
+                    }
+                )
+
+            payload = calls[0][1]
+            self.assertEqual("qq-group", payload["agent_id"])
+            self.assertEqual("read-only", payload["permission_mode"])
+            self.assertEqual("qq_group", payload["permission_profile"])
+            self.assertIs(True, payload["codex_search_enabled"])
+            self.assertEqual(1, len(payload["images"]))
+            image_path = str(payload["images"][0])
+            self.assertFalse(Path(image_path).is_absolute())
+            self.assertIn(QQ_GROUP_ATTACHMENT_DIR_NAME, image_path)
+            self.assertIn(image_path, str(payload["prompt"]))
+            self.assertNotIn("\n", str(payload["prompt"]))
+            self.assertTrue((group_workdir / image_path).exists())
 
     def test_http_handler_returns_onebot_ok_for_message_event(self) -> None:
         bridge = FakeQQBridge(self.temp_path)

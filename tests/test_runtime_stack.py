@@ -190,10 +190,10 @@ class RuntimeStackTests(unittest.TestCase):
 
     def test_onebot_runtime_env_sets_quick_login_from_napcat_config(self) -> None:
         with patch("runtime_stack._managed_subprocess_env", return_value={}):
-            with patch("runtime_stack._detect_napcat_quick_login_uin", return_value="2493227263"):
+            with patch("runtime_stack._detect_napcat_quick_login_uin", return_value="900000001"):
                 env = _onebot_runtime_env({})
 
-        self.assertEqual("2493227263", env["CHATBRIDGE_NAPCAT_QQ"])
+        self.assertEqual("900000001", env["CHATBRIDGE_NAPCAT_QQ"])
 
     def test_discover_external_agents_skips_cmdline_for_unrelated_processes(self) -> None:
         unrelated = FakeProcess(101, "chrome.exe", ["chrome.exe", "--type=renderer"])

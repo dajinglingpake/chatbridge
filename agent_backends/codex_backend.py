@@ -359,9 +359,32 @@ class CodexBackend(AgentBackend):
             options.extend(["-m", agent.model])
         if context.reasoning_effort:
             options.extend(["-c", f'model_reasoning_effort="{context.reasoning_effort}"'])
+        if context.codex_search_enabled:
+            options.extend(["-c", 'web_search="live"'])
+        image_options = self._image_options(context)
         sandbox_mode = self._sandbox_mode(context)
         resume_options: list[str] | None = None
-        if sandbox_mode in {"workspace-write", "read-only"}:
+        permission_profile_options = self._permission_profile_options(context)
+        if permission_profile_options:
+            options.extend(["-c", f'approval_policy="{self._approval_policy(context)}"', *permission_profile_options])
+            resume_options = [
+                "--skip-git-repo-check",
+                "--json",
+                "-o",
+                str(output_path),
+                "-c",
+                f'approval_policy="{self._approval_policy(context)}"',
+                *permission_profile_options,
+            ]
+            if context.codex_slim_exec:
+                resume_options.extend(["--disable", "plugins", "--ignore-rules"])
+            if agent.model:
+                resume_options.extend(["-m", agent.model])
+            if context.reasoning_effort:
+                resume_options.extend(["-c", f'model_reasoning_effort="{context.reasoning_effort}"'])
+            if context.codex_search_enabled:
+                resume_options.extend(["-c", 'web_search="live"'])
+        elif sandbox_mode in {"workspace-write", "read-only"}:
             options.extend(["-c", f'approval_policy="{self._approval_policy(context)}"', "-s", sandbox_mode])
             resume_options = [
                 "--skip-git-repo-check",
@@ -379,9 +402,13 @@ class CodexBackend(AgentBackend):
                 resume_options.extend(["-m", agent.model])
             if context.reasoning_effort:
                 resume_options.extend(["-c", f'model_reasoning_effort="{context.reasoning_effort}"'])
+            if context.codex_search_enabled:
+                resume_options.extend(["-c", 'web_search="live"'])
         else:
             options.append("--dangerously-bypass-approvals-and-sandbox")
             resume_options = list(options)
+        options.extend(image_options)
+        resume_options.extend(image_options)
         if context.mcp_server is not None:
             mcp_options = [
                 "-c",
@@ -557,6 +584,37 @@ class CodexBackend(AgentBackend):
     @staticmethod
     def _is_cancel_requested(context: BackendContext) -> bool:
         return bool(context.is_cancel_requested and context.is_cancel_requested())
+
+    @staticmethod
+    def _image_options(context: BackendContext) -> list[str]:
+        options: list[str] = []
+        for image in context.images or []:
+            path = str(image or "").strip()
+            if path:
+                options.extend(["-i", path])
+        return options
+
+    @staticmethod
+    def _permission_profile_options(context: BackendContext) -> list[str]:
+        profile = str(context.permission_profile or "").strip()
+        if not profile:
+            return []
+        profile_key = profile.replace("\\", "\\\\").replace('"', '\\"')
+        filesystem = '{":minimal"="read",":workspace_roots"={"."="read",".chatbridge_attachments"="read"}}'
+        options = [
+            "-c",
+            f'default_permissions="{profile_key}"',
+            "-c",
+            f"permissions.{profile_key}.filesystem={filesystem}",
+        ]
+        if context.codex_search_enabled:
+            options.extend(
+                [
+                    "-c",
+                    f'permissions.{profile_key}.network={{enabled=true,domains={{"*"="allow"}}}}',
+                ]
+            )
+        return options
 
     def _take_stream_chunk(self, buffer: str, *, force: bool) -> tuple[str, str]:
         normalized = buffer.replace("\r", "")

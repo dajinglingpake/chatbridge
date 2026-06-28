@@ -139,6 +139,13 @@ def _bool_value(value: object) -> bool:
     text = str(value or "").strip().lower()
     return text in {"1", "true", "yes", "on"}
 
+def _string_list(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
+
 
 @dataclass
 class HubTask:
@@ -161,6 +168,8 @@ class HubTask:
     model: str = ""
     reasoning_effort: str = ""
     permission_mode: str = ""
+    permission_profile: str = ""
+    images: list[str] = field(default_factory=list)
     bridge_conversations_path: str = ""
     bridge_event_log_path: str = ""
     context_token: str = ""
@@ -199,6 +208,8 @@ class HubTask:
             model=str(raw.get("model") or "").strip(),
             reasoning_effort=str(raw.get("reasoning_effort") or "").strip(),
             permission_mode=str(raw.get("permission_mode") or "").strip(),
+            permission_profile=str(raw.get("permission_profile") or "").strip(),
+            images=_string_list(raw.get("images")),
             bridge_conversations_path=str(raw.get("bridge_conversations_path") or "").strip(),
             bridge_event_log_path=str(raw.get("bridge_event_log_path") or "").strip(),
             context_token=str(raw.get("context_token") or "").strip(),

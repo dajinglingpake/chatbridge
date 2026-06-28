@@ -75,6 +75,8 @@ class StateModelTests(unittest.TestCase):
         self.assertEqual("codex", task.backend)
         self.assertEqual("queued", task.status)
         self.assertEqual("", task.model)
+        self.assertEqual("", task.permission_profile)
+        self.assertEqual([], task.images)
 
     def test_agent_runtime_from_dict_recovers_invalid_payload(self) -> None:
         runtime = AgentRuntimeState.from_dict("broken", now="2026-01-01T00:00:00")

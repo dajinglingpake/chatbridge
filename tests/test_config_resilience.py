@@ -95,6 +95,7 @@ class ConfigResilienceTests(unittest.TestCase):
                         "qq_blocked_group_ids": [" 20002 "],
                         "qq_group_agent_id": " custom-qq-group ",
                         "qq_group_permission_mode": "READ-ONLY",
+                        "qq_group_permission_profile": " custom_profile ",
                         "qq_group_codex_search_enabled": "false",
                     }
                 ),
@@ -119,6 +120,7 @@ class ConfigResilienceTests(unittest.TestCase):
         self.assertEqual(["20002"], config.qq_blocked_group_ids)
         self.assertEqual("custom-qq-group", config.qq_group_agent_id)
         self.assertEqual("read-only", config.qq_group_permission_mode)
+        self.assertEqual("custom_profile", config.qq_group_permission_profile)
         self.assertFalse(config.qq_group_codex_search_enabled)
 
     def test_bridge_config_loads_local_qq_access_ids_without_saving_them_to_main_config(self) -> None:

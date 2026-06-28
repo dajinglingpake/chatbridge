@@ -377,7 +377,7 @@ class McpServerCodexBackendTests(unittest.TestCase):
                 self.assertIn('approval_policy="never"', argv)
                 self.assertIn('-s', argv)
                 self.assertIn('read-only', argv)
-                self.assertNotIn('--search', argv)
+                self.assertIn('web_search="live"', argv)
                 self.assertNotIn('--dangerously-bypass-approvals-and-sandbox', argv)
                 return FakeProcess()
 
@@ -390,6 +390,72 @@ class McpServerCodexBackendTests(unittest.TestCase):
 
             self.assertEqual("ok", result["output"])
             self.assertEqual("thread-readonly", result["session_id"])
+
+    def test_codex_backend_applies_permission_profile_images_and_search(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            workdir = temp_path / "workspace"
+            workdir.mkdir(parents=True, exist_ok=True)
+            image_path = workdir / ".chatbridge_attachments" / "qq-group-1" / "image.png"
+            image_path.parent.mkdir(parents=True, exist_ok=True)
+            image_path.write_bytes(b"png")
+            session_dir = temp_path / "sessions"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            output_path = temp_path / "multi-codex-output-fixed.txt"
+
+            agent = SimpleNamespace(
+                id="qq-group",
+                name="QQ Group",
+                workdir=str(workdir),
+                session_file=str(session_dir / "qq-group.txt"),
+                backend="codex",
+                model="gpt-5.4",
+                prompt_prefix="",
+            )
+            context = BackendContext(
+                codex_command="codex",
+                claude_command="claude",
+                opencode_command="opencode",
+                session_dir=session_dir,
+                creationflags=0,
+                permission_mode="read-only",
+                permission_profile="qq_group",
+                codex_search_enabled=True,
+                images=[str(image_path.relative_to(workdir))],
+            )
+            backend = CodexBackend()
+
+            class FakeProcess:
+                def __init__(self) -> None:
+                    self.pid = 4321
+                    self.stdout = iter(['{"type":"thread.started","thread_id":"thread-profile"}\n'])
+                    self.stderr = iter([])
+
+                def wait(self) -> int:
+                    return 0
+
+            def fake_popen(argv: list[str], **kwargs):
+                output_path.write_text("ok", encoding="utf-8")
+                self.assertIn('approval_policy="never"', argv)
+                self.assertIn('default_permissions="qq_group"', argv)
+                self.assertTrue(any(str(item).startswith("permissions.qq_group.filesystem=") for item in argv))
+                self.assertTrue(any(str(item).startswith("permissions.qq_group.network=") for item in argv))
+                self.assertIn('web_search="live"', argv)
+                self.assertIn("-i", argv)
+                self.assertIn(str(image_path.relative_to(workdir)), argv)
+                self.assertNotIn("-s", argv)
+                self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", argv)
+                return FakeProcess()
+
+            with (
+                patch("agent_backends.codex_backend.tempfile.gettempdir", return_value=str(temp_path)),
+                patch("agent_backends.codex_backend.uuid.uuid4", return_value=SimpleNamespace(hex="fixed")),
+                patch("agent_backends.codex_backend.subprocess.Popen", side_effect=fake_popen),
+            ):
+                result = backend.invoke(agent, "hello", "", context)
+
+            self.assertEqual("ok", result["output"])
+            self.assertEqual("thread-profile", result["session_id"])
 
     def test_codex_backend_resume_uses_config_sandbox_instead_of_sandbox_flag(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

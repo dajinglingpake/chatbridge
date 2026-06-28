@@ -219,9 +219,11 @@ class BridgeMessageRuntime:
         decision = self.prepare_prompt(message, session)
         if decision.handled:
             return None
+        media_attachments = [*self.pending_media.consume(message.sender_id), *message.attachments]
+        message.metadata["media_attachments"] = media_attachments
         prompt = build_prompt_with_media(
             decision.prompt,
-            [*self.pending_media.consume(message.sender_id), *message.attachments],
+            media_attachments,
             message.attachment_errors,
             self.translate,
         )

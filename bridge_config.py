@@ -248,6 +248,7 @@ class BridgeConfig:
     qq_blocked_group_ids: list[str] = field(default_factory=list)
     qq_group_agent_id: str = "qq-group"
     qq_group_permission_mode: str = "read-only"
+    qq_group_permission_profile: str = "qq_group"
     qq_group_codex_search_enabled: bool = True
 
     @classmethod
@@ -282,6 +283,7 @@ class BridgeConfig:
         raw["qq_blocked_group_ids"] = _string_list(raw.get("qq_blocked_group_ids", []))
         raw["qq_group_agent_id"] = str(raw.get("qq_group_agent_id") or "qq-group").strip() or "qq-group"
         raw["qq_group_permission_mode"] = str(raw.get("qq_group_permission_mode") or "read-only").strip().lower() or "read-only"
+        raw["qq_group_permission_profile"] = str(raw.get("qq_group_permission_profile") or "qq_group").strip() or "qq_group"
         raw["qq_group_codex_search_enabled"] = _bool_value(raw.get("qq_group_codex_search_enabled"), True)
         raw.pop("qq_allowed_user_ids", None)
         raw.pop("qq_blocked_user_ids", None)
@@ -346,6 +348,7 @@ class BridgeConfig:
             "qq_group_require_mention": bool(self.qq_group_require_mention),
             "qq_group_agent_id": str(self.qq_group_agent_id or "qq-group").strip() or "qq-group",
             "qq_group_permission_mode": str(self.qq_group_permission_mode or "read-only").strip().lower() or "read-only",
+            "qq_group_permission_profile": str(self.qq_group_permission_profile or "qq_group").strip() or "qq_group",
             "qq_group_codex_search_enabled": bool(self.qq_group_codex_search_enabled),
         }
         for key in LOCAL_ONLY_CONFIG_KEYS:
