@@ -15,9 +15,7 @@
   "qq_private_enabled": true,
   "qq_group_enabled": true,
   "qq_group_require_mention": true,
-  "qq_allowed_private_user_ids": [
-    "10001"
-  ],
+  "qq_allowed_private_user_ids": [],
   "qq_blocked_private_user_ids": [],
   "qq_allowed_group_ids": [],
   "qq_blocked_group_ids": [],

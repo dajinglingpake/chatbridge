@@ -19,6 +19,7 @@ class ConfigResilienceTests(unittest.TestCase):
             accounts_dir = root / "accounts"
             accounts_dir.mkdir(parents=True, exist_ok=True)
             config_path = root / "config" / "weixin_bridge.json"
+            local_config_path = root / "config" / "weixin_bridge.local.json"
             config_path.parent.mkdir(parents=True, exist_ok=True)
             config_path.write_text("{invalid", encoding="utf-8")
             state_path = accounts_dir / "bridge-account-state.local.json"
@@ -27,6 +28,7 @@ class ConfigResilienceTests(unittest.TestCase):
                 patch("bridge_config.APP_DIR", root),
                 patch("bridge_config.WEIXIN_ACCOUNTS_DIR", accounts_dir),
                 patch("bridge_config.CONFIG_PATH", config_path),
+                patch("bridge_config.CONFIG_LOCAL_PATH", local_config_path),
                 patch("bridge_config.ACCOUNT_STATE_PATH", state_path),
             ):
                 config = BridgeConfig.load()
@@ -79,6 +81,7 @@ class ConfigResilienceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             config_path = root / "config" / "weixin_bridge.json"
+            local_config_path = root / "config" / "weixin_bridge.local.json"
             config_path.parent.mkdir(parents=True, exist_ok=True)
             config_path.write_text(
                 json.dumps(
@@ -101,6 +104,7 @@ class ConfigResilienceTests(unittest.TestCase):
 
             with (
                 patch("bridge_config.CONFIG_PATH", config_path),
+                patch("bridge_config.CONFIG_LOCAL_PATH", local_config_path),
                 patch("bridge_config.ACCOUNT_STATE_PATH", state_path),
                 patch("bridge_config.WEIXIN_ACCOUNTS_DIR", root / "accounts"),
             ):
@@ -116,6 +120,40 @@ class ConfigResilienceTests(unittest.TestCase):
         self.assertEqual("custom-qq-group", config.qq_group_agent_id)
         self.assertEqual("read-only", config.qq_group_permission_mode)
         self.assertFalse(config.qq_group_codex_search_enabled)
+
+    def test_bridge_config_loads_local_qq_access_ids_without_saving_them_to_main_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "config" / "weixin_bridge.json"
+            local_config_path = root / "config" / "weixin_bridge.local.json"
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "qq_private_enabled": True,
+                        "qq_allowed_private_user_ids": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            local_config_path.write_text(
+                json.dumps({"qq_allowed_private_user_ids": ["10001"]}),
+                encoding="utf-8",
+            )
+            state_path = root / "accounts" / "bridge-account-state.local.json"
+
+            with (
+                patch("bridge_config.CONFIG_PATH", config_path),
+                patch("bridge_config.CONFIG_LOCAL_PATH", local_config_path),
+                patch("bridge_config.ACCOUNT_STATE_PATH", state_path),
+                patch("bridge_config.WEIXIN_ACCOUNTS_DIR", root / "accounts"),
+            ):
+                config = BridgeConfig.load()
+                config.save()
+
+            self.assertEqual(["10001"], config.qq_allowed_private_user_ids)
+            saved = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual([], saved["qq_allowed_private_user_ids"])
 
     def test_resolve_ilink_base_url_falls_back_when_missing(self) -> None:
         config = BridgeConfig(
@@ -185,6 +223,7 @@ class ConfigResilienceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             config_path = root / "config" / "weixin_bridge.json"
+            local_config_path = root / "config" / "weixin_bridge.local.json"
             state_path = root / "accounts" / "bridge-account-state.local.json"
             old_account = root / "accounts" / "old@im.bot.json"
             old_sync = root / "accounts" / "old@im.bot.sync.json"
@@ -208,6 +247,7 @@ class ConfigResilienceTests(unittest.TestCase):
             ]
             with (
                 patch("bridge_config.CONFIG_PATH", config_path),
+                patch("bridge_config.CONFIG_LOCAL_PATH", local_config_path),
                 patch("bridge_config.ACCOUNT_STATE_PATH", state_path),
                 patch("bridge_config.discover_account_profiles", return_value=profiles),
             ):

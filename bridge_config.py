@@ -10,8 +10,15 @@ from core.json_store import load_json, save_json
 APP_DIR = Path(__file__).resolve().parent
 WEIXIN_ACCOUNTS_DIR = APP_DIR / "accounts"
 CONFIG_PATH = APP_DIR / "config" / "weixin_bridge.json"
+CONFIG_LOCAL_PATH = APP_DIR / "config" / "weixin_bridge.local.json"
 ACCOUNT_STATE_PATH = WEIXIN_ACCOUNTS_DIR / "bridge-account-state.local.json"
 SUPPORTED_BACKENDS = set(supported_backend_keys())
+LOCAL_ONLY_CONFIG_KEYS = {
+    "qq_allowed_private_user_ids",
+    "qq_blocked_private_user_ids",
+    "qq_allowed_group_ids",
+    "qq_blocked_group_ids",
+}
 
 
 def _to_abs_path(value: str, default: Path) -> str:
@@ -62,6 +69,19 @@ def _bool_value(value: object, default: bool) -> bool:
     if text in {"0", "false", "no", "off"}:
         return False
     return default
+
+def _load_local_config() -> dict[str, object]:
+    raw = load_json(CONFIG_LOCAL_PATH, {}, expect_type=dict)
+    return raw if isinstance(raw, dict) else {}
+
+def _merge_local_config(raw: dict[str, object]) -> dict[str, object]:
+    local = _load_local_config()
+    if not local:
+        return raw
+    merged = dict(raw)
+    for key, value in local.items():
+        merged[str(key)] = value
+    return merged
 
 @dataclass
 class WeixinAccountProfile:
@@ -243,6 +263,7 @@ class BridgeConfig:
             cfg._sync_active_account_fields()
             cfg.save()
             return cfg
+        raw = _merge_local_config(raw)
         accounts, active_account_id = build_account_profiles(raw)
         raw["accounts"] = accounts
         raw["active_account_id"] = active_account_id
@@ -323,14 +344,12 @@ class BridgeConfig:
             "qq_private_enabled": bool(self.qq_private_enabled),
             "qq_group_enabled": bool(self.qq_group_enabled),
             "qq_group_require_mention": bool(self.qq_group_require_mention),
-            "qq_allowed_private_user_ids": _string_list(self.qq_allowed_private_user_ids),
-            "qq_blocked_private_user_ids": _string_list(self.qq_blocked_private_user_ids),
-            "qq_allowed_group_ids": _string_list(self.qq_allowed_group_ids),
-            "qq_blocked_group_ids": _string_list(self.qq_blocked_group_ids),
             "qq_group_agent_id": str(self.qq_group_agent_id or "qq-group").strip() or "qq-group",
             "qq_group_permission_mode": str(self.qq_group_permission_mode or "read-only").strip().lower() or "read-only",
             "qq_group_codex_search_enabled": bool(self.qq_group_codex_search_enabled),
         }
+        for key in LOCAL_ONLY_CONFIG_KEYS:
+            data[key] = []
         save_json(CONFIG_PATH, data)
         self._save_account_runtime_state()
 
