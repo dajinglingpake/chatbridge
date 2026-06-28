@@ -53,11 +53,13 @@ class BridgeMessageRuntimeTests(unittest.TestCase):
 
         self.assertEqual(["已收到 1 个附件，继续发送文字说明后我会一起处理。"], replies)
         self.assertEqual("sender-a", submitted[0][0])
-        self.assertIn("看图", submitted[0][1])
-        self.assertIn("用户发送了以下附件", submitted[0][1])
-        self.assertIn("图片: a.png", submitted[0][1])
-        self.assertIn("如果附件包含图片，必须先查看本地图片路径中的图片内容，再回答用户。", submitted[0][1])
-        self.assertIn("请结合用户文字和这些附件处理，不要忽略附件内容。", submitted[0][1])
+        self.assertEqual("看图 /tmp/a.png", submitted[0][1])
+        self.assertNotIn("\n", submitted[0][1])
+        self.assertNotIn("图片: a.png", submitted[0][1])
+        self.assertNotIn("本地路径", submitted[0][1])
+        self.assertNotIn("用户发送了以下附件", submitted[0][1])
+        self.assertNotIn("必须先查看", submitted[0][1])
+        self.assertNotIn("请结合用户文字", submitted[0][1])
         self.assertEqual(["task-001"], remembered)
 
     def test_control_command_replies_without_submitting_task(self) -> None:

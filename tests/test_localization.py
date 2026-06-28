@@ -22,9 +22,12 @@ class LocalizationTests(unittest.TestCase):
             [],
             localizer.translate,
         )
-        self.assertIn("The user sent the following attachments", rendered)
-        self.assertIn("Local path: C:/tmp/scene.png", rendered)
-        self.assertIn("inspect the image at the local path", rendered)
+        self.assertEqual("describe C:/tmp/scene.png", rendered)
+        self.assertNotIn("\n", rendered)
+        self.assertNotIn("image: scene.png", rendered)
+        self.assertNotIn("Local path", rendered)
+        self.assertNotIn("The user sent the following attachments", rendered)
+        self.assertNotIn("inspect the image at the local path", rendered)
         self.assertEqual(
             "Received 1 attachment(s). Send a text instruction next and I will handle them together.",
             build_media_context_reply([{"kind": "file", "name": "a.txt", "path": "C:/tmp/a.txt"}], localizer.translate),

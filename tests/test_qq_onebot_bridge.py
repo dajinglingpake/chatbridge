@@ -111,8 +111,10 @@ class QQOneBotBridgeTests(unittest.TestCase):
         sender_key, prompt = bridge.submitted[0]
         self.assertEqual("qq:private:10001", sender_key)
         self.assertTrue(prompt.startswith("看下这张图"))
-        self.assertIn("图片: image.png", prompt)
         self.assertIn("qq-private-10001-image.png", prompt)
+        self.assertNotIn("\n", prompt)
+        self.assertNotIn("图片:", prompt)
+        self.assertNotIn("本地路径", prompt)
         self.assertNotIn("qq:private:10001", bridge.pending_media_context)
 
     def test_private_text_with_image_submits_prompt_with_attachment(self) -> None:
@@ -134,8 +136,10 @@ class QQOneBotBridgeTests(unittest.TestCase):
         sender_key, prompt = bridge.submitted[0]
         self.assertEqual("qq:private:10001", sender_key)
         self.assertTrue(prompt.startswith("看下这张图"))
-        self.assertIn("图片: image.png", prompt)
         self.assertIn("qq-private-10001-image.png", prompt)
+        self.assertNotIn("\n", prompt)
+        self.assertNotIn("图片:", prompt)
+        self.assertNotIn("本地路径", prompt)
 
     def test_group_text_with_file_submits_prompt_with_attachment(self) -> None:
         bridge = FakeQQBridge(self.temp_path)
@@ -157,7 +161,10 @@ class QQOneBotBridgeTests(unittest.TestCase):
         sender_key, prompt = bridge.submitted[0]
         self.assertEqual("qq:group:20002", sender_key)
         self.assertTrue(prompt.startswith("总结这个文件"))
-        self.assertIn("文件: report.pdf", prompt)
+        self.assertIn("qq-group-20002-report.pdf", prompt)
+        self.assertNotIn("\n", prompt)
+        self.assertNotIn("文件:", prompt)
+        self.assertNotIn("本地路径", prompt)
 
     def test_file_id_media_message_uses_onebot_get_file(self) -> None:
         source_file = self.temp_path / "onebot-cache-report.pdf"
@@ -187,8 +194,11 @@ class QQOneBotBridgeTests(unittest.TestCase):
         self.assertEqual("get_file", bridge.api_calls[0][0])
         sender_key, prompt = bridge.submitted[0]
         self.assertEqual("qq:private:10001", sender_key)
-        self.assertIn("文件: report.pdf", prompt)
-        self.assertIn("report-data", Path(prompt.split("本地路径: ", 1)[1].splitlines()[0]).read_bytes().decode("utf-8"))
+        saved_path = Path(prompt.rsplit(" ", 1)[1])
+        self.assertTrue(saved_path.name.endswith("-report.pdf"))
+        self.assertNotIn("文件:", prompt)
+        self.assertNotIn("本地路径", prompt)
+        self.assertIn("report-data", saved_path.read_bytes().decode("utf-8"))
 
     def test_local_path_url_media_message_copies_file_without_urlopen(self) -> None:
         source_file = self.temp_path / "onebot-cache-report.txt"
@@ -208,8 +218,11 @@ class QQOneBotBridgeTests(unittest.TestCase):
 
         sender_key, prompt = bridge.submitted[0]
         self.assertEqual("qq:private:10001", sender_key)
-        self.assertIn("文件: report.txt", prompt)
-        self.assertIn("report-data", Path(prompt.split("本地路径: ", 1)[1].splitlines()[0]).read_text(encoding="utf-8"))
+        saved_path = Path(prompt.rsplit(" ", 1)[1])
+        self.assertTrue(saved_path.name.endswith("-report.txt"))
+        self.assertNotIn("文件:", prompt)
+        self.assertNotIn("本地路径", prompt)
+        self.assertIn("report-data", saved_path.read_text(encoding="utf-8"))
 
     def test_inaccessible_local_path_url_uses_file_id_without_urlopen(self) -> None:
         source_file = self.temp_path / "onebot-cache-report.txt"
@@ -238,8 +251,11 @@ class QQOneBotBridgeTests(unittest.TestCase):
         self.assertEqual("get_file", bridge.api_calls[0][0])
         sender_key, prompt = bridge.submitted[0]
         self.assertEqual("qq:private:10001", sender_key)
-        self.assertIn("文件: report.txt", prompt)
-        self.assertIn("report-data", Path(prompt.split("本地路径: ", 1)[1].splitlines()[0]).read_text(encoding="utf-8"))
+        saved_path = Path(prompt.rsplit(" ", 1)[1])
+        self.assertTrue(saved_path.name.endswith("-report.txt"))
+        self.assertNotIn("文件:", prompt)
+        self.assertNotIn("本地路径", prompt)
+        self.assertIn("report-data", saved_path.read_text(encoding="utf-8"))
 
     def test_group_message_without_at_self_is_ignored(self) -> None:
         bridge = FakeQQBridge(self.temp_path)

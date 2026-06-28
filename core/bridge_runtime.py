@@ -125,30 +125,11 @@ def build_prompt_with_media(
     if cleaned_prompt:
         parts.append(cleaned_prompt)
     if attachments:
-        lines = [_translate(translate, "bridge.media.prompt.header", "用户发送了以下附件，已保存到本地：")]
-        has_image = False
-        for attachment in attachments:
-            is_image = attachment.get("kind") == "image"
-            has_image = has_image or is_image
-            label = _translate(translate, "bridge.media.kind.image", "图片") if is_image else _translate(translate, "bridge.media.kind.file", "文件")
-            lines.append(_translate(translate, "bridge.media.prompt.item", "- {label}: {name}", label=label, name=attachment.get("name") or "-"))
-            lines.append(_translate(translate, "bridge.media.prompt.path", "  本地路径: {path}", path=attachment.get("path") or "-"))
-        if has_image:
-            lines.append(
-                _translate(
-                    translate,
-                    "bridge.media.prompt.image_instruction",
-                    "如果附件包含图片，必须先查看本地图片路径中的图片内容，再回答用户。",
-                )
-            )
-        if cleaned_prompt:
-            lines.append(_translate(translate, "bridge.media.prompt.with_text", "请结合用户文字和这些附件处理，不要忽略附件内容。"))
-        else:
-            lines.append(_translate(translate, "bridge.media.prompt.media_only", "请根据这些附件继续处理。"))
-        parts.append("\n".join(lines))
+        paths = [str(attachment.get("path") or "").strip() for attachment in attachments]
+        parts.extend(path for path in paths if path)
     if errors:
         parts.append(_translate(translate, "bridge.media.prompt.errors", "以下附件接收失败：\n{errors}", errors="\n".join(errors)))
-    return "\n\n".join(part for part in parts if part).strip()
+    return " ".join(part for part in parts if part).strip()
 
 def build_media_context_reply(attachments: list[Attachment], translate: Callable[..., str] | None = None) -> str:
     count = len(attachments)
