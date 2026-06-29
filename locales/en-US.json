@@ -433,6 +433,7 @@
   "ui.qq_login.waiting_runtime_qr": "QQ login runtime is running; waiting for the QR code.",
   "ui.qq_login.opened": "Preparing QQ login",
   "ui.web.account.active": "Active account: {account}",
+  "ui.web.account.login_status": "Login status: {status}",
   "ui.web.action.apply_filter": "Apply filters",
   "ui.web.action.apply_notice": "Apply notice settings",
   "ui.web.action.clear_filter": "Clear filters",

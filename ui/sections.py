@@ -262,15 +262,11 @@ def render_home_section(
                             ui.label(model.home.summary_text).classes("text-base font-bold text-slate-900")
                             ui.label(
                                 model.home.primary_hint
-                                if active_mode == "weixin"
-                                else _tr(t, "ui.web.mode.qq_hint", "QQ 模式会停止微信桥，只保留 QQ OneBot 入口。")
                             ).classes("text-sm cb-muted")
-                            if active_mode == "qq":
-                                ui.label(model.home.qq_login_text).classes("cb-chip cb-chip-ok w-fit" if model.home.qq_login_ok else "cb-chip cb-chip-warn w-fit")
                         ui.label(model.home.badge_text).classes(f"{badge_class} self-start")
                 with ui.row().classes("gap-2 pt-4 flex-wrap"):
                     if active_mode == "weixin":
-                        ui.button(_tr(t, "ui.web.action.switch_weixin_mode", "切换到微信模式"), on_click=lambda: on_run_action("start-weixin"), icon="play_arrow")
+                        ui.button(_tr(t, "ui.primary.start.label", "启动服务"), on_click=lambda: on_run_action("start-weixin"), icon="play_arrow")
                         ui.button(_tr(t, "ui.primary.stop.label", "停止服务"), on_click=lambda: on_run_action("stop"), icon="stop")
                         ui.button(_tr(t, "ui.web.action.restart", "重启服务"), on_click=lambda: on_run_action("restart"), icon="restart_alt")
                     else:
@@ -279,36 +275,6 @@ def render_home_section(
                         ui.button(_tr(t, "ui.web.action.restart", "重启服务"), on_click=lambda: on_run_action("restart-qq-stack"), icon="restart_alt")
                         ui.button(_tr(t, "ui.web.action.restart_onebot_runtime", "重启 QQ OneBot"), on_click=lambda: on_run_action("restart-onebot-runtime"), icon="restart_alt").props("outline")
                     ui.button(_tr(t, "ui.web.action.emergency_stop", "紧急停止"), on_click=lambda: on_run_action("emergency-stop"), color="negative", icon="warning")
-
-        if active_mode == "qq":
-            with _responsive_grid(ui, "grid-cols-1 xl:grid-cols-2"):
-                with ui.card().classes("cb-card w-full p-5"):
-                    _render_card_title(ui, _tr(t, "ui.web.mode.qq", "QQ 模式"), _tr(t, "ui.web.mode.qq_detail", "用于 QQ 私聊/群聊的 OneBot 入口；切换后微信桥会停止。"))
-                    with _panel(ui):
-                        ui.label(model.home.qq_login_text).classes("cb-chip cb-chip-ok w-fit" if model.home.qq_login_ok else "cb-chip cb-chip-warn w-fit")
-                        ui.label(_tr(t, "ui.qq_login.onebot_api", "OneBot HTTP API: http://127.0.0.1:3000")).classes("text-sm cb-muted")
-                        ui.label(_tr(t, "ui.qq_login.reverse_http", "反向 HTTP 上报: http://127.0.0.1:5701/")).classes("text-sm cb-muted")
-                    with ui.row().classes("gap-2 flex-wrap pt-4"):
-                        ui.button(_tr(t, "ui.qq_login.button", "扫码登录 QQ"), on_click=on_open_qq_login, icon="qr_code_scanner")
-                        ui.button(_tr(t, "ui.web.action.switch_qq_mode", "切换到 QQ 模式"), on_click=lambda: on_run_action("start-qq-bridge"), icon="play_arrow").props("outline")
-                with ui.card().classes("cb-card w-full p-5"):
-                    _render_card_title(ui, _tr(t, "ui.web.home.submit_task", "提交任务"))
-                    ui.label(_tr(t, "ui.web.mode.qq_submit_hint", "QQ 模式启动后，请优先从 QQ 会话发送消息；这里仍可用于直接向 Hub 提交测试任务。")).classes("text-sm cb-muted")
-                    agent_options = {item.agent_id: item.label for item in model.agent_options}
-                    with _panel(ui):
-                        prompt = ui.textarea(label=_tr(t, "ui.web.field.prompt", "Prompt"), placeholder=_tr(t, "ui.web.form.prompt_placeholder", "输入要发给 Agent 的内容")).classes("w-full")
-                        prompt.props("autogrow outlined input-class=text-base")
-                        agent = ui.select(
-                            agent_options,
-                            value=model.agent_options[0].agent_id if model.agent_options else "main",
-                            label=_tr(t, "ui.web.field.agent", "Agent"),
-                        ).classes("w-full")
-                    ui.button(
-                        _tr(t, "ui.web.action.submit_to_hub", "提交到 Hub"),
-                        on_click=lambda: on_submit_task(agent.value or "main", prompt.value or "", "", ""),
-                        icon="send",
-                    ).props("color=primary unelevated").classes("mt-4")
-            return
 
         with _responsive_grid(ui, "grid-cols-1 xl:grid-cols-2"):
             with ui.card().classes("cb-card w-full p-5"):
@@ -344,32 +310,46 @@ def render_home_section(
                 ).props("color=primary unelevated").classes("mt-4")
 
             with ui.card().classes("cb-card w-full p-5"):
-                _render_card_title(ui, _tr(t, "ui.web.home.accounts", "账号管理"))
-                ui.label(_tr(t, "ui.web.account.active", "当前激活账号：{account}", account=model.active_account_label)).classes("cb-chip w-fit")
-                account_options = {item.account_id: item.label for item in model.account_options}
-                account_select = ui.select(
-                    account_options,
-                    value=model.active_account_id or None,
-                    label=_tr(t, "ui.web.field.switch_account", "切换账号"),
+                _render_card_title(
+                    ui,
+                    _tr(t, "ui.web.home.accounts", "账号管理"),
+                    _tr(t, "ui.web.mode.qq_detail", "用于 QQ 私聊/群聊的 OneBot 入口；切换后微信桥会停止。") if active_mode == "qq" else "",
                 )
-                with ui.row().classes("gap-2 flex-wrap"):
-                    ui.button(_tr(t, "ui.web.action.switch_account", "切换当前账号"), on_click=lambda: on_switch_account(account_select.value or ""), icon="swap_horiz")
-                    ui.button(_tr(t, "ui.button.login", "扫码登录微信"), on_click=on_open_qr_login, icon="qr_code_scanner").props("outline")
+                if active_mode == "qq":
+                    with _panel(ui):
+                        ui.label(_tr(t, "ui.web.account.active", "当前激活账号：{account}", account=model.home.qq_account_label)).classes("cb-chip cb-chip-ok w-fit" if model.home.qq_login_ok else "cb-chip cb-chip-warn w-fit")
+                        ui.label(_tr(t, "ui.web.account.login_status", "登录状态：{status}", status=model.home.qq_login_status_text)).classes("text-sm cb-muted")
+                        ui.label(_tr(t, "ui.qq_login.onebot_api", "OneBot HTTP API: http://127.0.0.1:3000")).classes("text-sm cb-muted")
+                        ui.label(_tr(t, "ui.qq_login.reverse_http", "反向 HTTP 上报: http://127.0.0.1:5701/")).classes("text-sm cb-muted")
+                    with ui.row().classes("gap-2 flex-wrap pt-4"):
+                        ui.button(_tr(t, "ui.qq_login.button", "扫码登录 QQ"), on_click=on_open_qq_login, icon="qr_code_scanner")
+                else:
+                    ui.label(_tr(t, "ui.web.account.active", "当前激活账号：{account}", account=model.active_account_label)).classes("cb-chip w-fit")
+                    account_options = {item.account_id: item.label for item in model.account_options}
+                    account_select = ui.select(
+                        account_options,
+                        value=model.active_account_id or None,
+                        label=_tr(t, "ui.web.field.switch_account", "切换账号"),
+                    )
+                    with ui.row().classes("gap-2 flex-wrap"):
+                        ui.button(_tr(t, "ui.web.action.switch_account", "切换当前账号"), on_click=lambda: on_switch_account(account_select.value or ""), icon="swap_horiz")
+                        ui.button(_tr(t, "ui.button.login", "扫码登录微信"), on_click=on_open_qr_login, icon="qr_code_scanner").props("outline")
 
-            with ui.card().classes("cb-card w-full p-5"):
-                _render_card_title(ui, _tr(t, "ui.web.home.notifications", "系统通知"))
-                service_notice = ui.switch(_tr(t, "ui.web.notice.service", "服务生命周期通知"), value=model.service_notice_enabled)
-                config_notice = ui.switch(_tr(t, "ui.web.notice.config", "配置变更通知"), value=model.config_notice_enabled)
-                task_notice = ui.switch(_tr(t, "ui.web.notice.task", "任务通知"), value=model.task_notice_enabled)
-                ui.button(
-                    _tr(t, "ui.web.action.apply_notice", "应用通知设置"),
-                    on_click=lambda: on_set_weixin_notice_enabled(
-                        bool(service_notice.value),
-                        bool(config_notice.value),
-                        bool(task_notice.value),
-                    ),
-                    icon="notifications_active",
-                ).props("color=primary unelevated")
+            if active_mode == "weixin":
+                with ui.card().classes("cb-card w-full p-5"):
+                    _render_card_title(ui, _tr(t, "ui.web.home.notifications", "系统通知"))
+                    service_notice = ui.switch(_tr(t, "ui.web.notice.service", "服务生命周期通知"), value=model.service_notice_enabled)
+                    config_notice = ui.switch(_tr(t, "ui.web.notice.config", "配置变更通知"), value=model.config_notice_enabled)
+                    task_notice = ui.switch(_tr(t, "ui.web.notice.task", "任务通知"), value=model.task_notice_enabled)
+                    ui.button(
+                        _tr(t, "ui.web.action.apply_notice", "应用通知设置"),
+                        on_click=lambda: on_set_weixin_notice_enabled(
+                            bool(service_notice.value),
+                            bool(config_notice.value),
+                            bool(task_notice.value),
+                        ),
+                        icon="notifications_active",
+                    ).props("color=primary unelevated")
 
 
 def _render_repair_suggestions(ui: UIFactoryLike, model: WebConsoleViewModel, t: Translator, on_run_repair_command) -> None:

@@ -433,6 +433,7 @@
   "ui.qq_login.waiting_runtime_qr": "QQ 登录组件已启动，正在等待二维码生成。",
   "ui.qq_login.opened": "正在准备 QQ 登录",
   "ui.web.account.active": "当前激活账号：{account}",
+  "ui.web.account.login_status": "登录状态：{status}",
   "ui.web.action.apply_filter": "应用筛选",
   "ui.web.action.apply_notice": "应用通知设置",
   "ui.web.action.clear_filter": "清空筛选",

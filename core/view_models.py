@@ -81,6 +81,8 @@ class HomeViewModel:
     summary_text: str
     primary_hint: str
     qq_login_text: str
+    qq_account_label: str
+    qq_login_status_text: str
     qq_login_ok: bool
     runtime_bridge_mode: str
 
@@ -264,6 +266,8 @@ def build_home_view_model(
             status=_t(t, "ui.status.logged_in", "已登录") if snapshot.qq_logged_in else _t(t, "ui.status.not_logged_in", "未登录"),
             account=qq_account,
         ),
+        qq_account_label=qq_account,
+        qq_login_status_text=_t(t, "ui.status.logged_in", "已登录") if snapshot.qq_logged_in else _t(t, "ui.status.not_logged_in", "未登录"),
         qq_login_ok=snapshot.qq_logged_in,
         runtime_bridge_mode=infer_bridge_mode(snapshot),
     )
