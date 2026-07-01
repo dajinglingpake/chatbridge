@@ -162,6 +162,30 @@ def _message_mentions_user(message: object, user_id: str) -> bool:
     return False
 
 
+def _message_text_mentions_name(message: object, name: str) -> bool:
+    cleaned_name = str(name or "").strip()
+    if not cleaned_name:
+        return False
+    mention = f"@{cleaned_name}"
+    text = _format_text_segments(message)
+    if not text:
+        return False
+    return any(line.lstrip().startswith(mention) for line in text.splitlines())
+
+def _strip_leading_text_mention(text: str, name: str) -> str:
+    cleaned_name = str(name or "").strip()
+    if not cleaned_name:
+        return text
+    mention = f"@{cleaned_name}"
+    lines = str(text or "").splitlines()
+    if not lines:
+        return ""
+    first = lines[0].lstrip()
+    if not first.startswith(mention):
+        return text
+    lines[0] = first[len(mention):].lstrip()
+    return "\n".join(line for line in lines if line.strip()).strip()
+
 def _config_bool(config: object, name: str, default: bool) -> bool:
     value = getattr(config, name, default)
     if isinstance(value, bool):
@@ -204,6 +228,7 @@ class QQOneBotBridge:
         self.agent_id = str(os.environ.get("QQ_BRIDGE_AGENT_ID") or DEFAULT_QQ_AGENT_ID).strip() or DEFAULT_QQ_AGENT_ID
         self.localizer = Localizer(str(getattr(config, "language", "") or ""))
         self._login_user_id = ""
+        self._login_nickname = ""
         self._typing_status_available = True
         self.conversations = self._load_conversations()
         self.pending_media_store = PendingMediaContextStore(
@@ -337,6 +362,8 @@ class QQOneBotBridge:
             return
         sender_key = self._sender_key(event)
         text = _format_text_segments(event.get("message"))
+        if message_type == "group" and group_mentions_self and str(event.get("atType") or "").strip() == "2":
+            text = _strip_leading_text_mention(text, self._login_nickname_for_matching())
         media_attachments, media_errors = self._extract_media_attachments(sender_key, event.get("message"))
         if message_type == "group" and group_mentions_self and not text and not media_attachments and not media_errors:
             self._send_reply(self._reply_event_snapshot(event), "你好")
@@ -712,14 +739,30 @@ class QQOneBotBridge:
             return event_self_id
         if self._login_user_id:
             return self._login_user_id
+        self._load_login_info()
+        return self._login_user_id
+
+    def _login_nickname_for_matching(self) -> str:
+        if not self._login_nickname:
+            self._load_login_info()
+        return self._login_nickname
+
+    def _load_login_info(self) -> None:
         payload = self._onebot_api("get_login_info", {})
         data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
-        self._login_user_id = str(data.get("user_id") or "").strip()
-        return self._login_user_id
+        if not self._login_user_id:
+            self._login_user_id = str(data.get("user_id") or "").strip()
+        if not self._login_nickname:
+            self._login_nickname = str(data.get("nickname") or data.get("nick") or "").strip()
 
     def _is_group_message_for_self(self, event: dict[str, Any]) -> bool:
         user_id = self._login_user_id_for_matching(event)
-        return _message_mentions_user(event.get("message"), user_id)
+        message = event.get("message")
+        if _message_mentions_user(message, user_id):
+            return True
+        if str(event.get("atType") or "").strip() != "2":
+            return False
+        return _message_text_mentions_name(message, self._login_nickname_for_matching())
 
     @staticmethod
     def _is_group_sender(sender_key: str) -> bool:

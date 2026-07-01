@@ -39,11 +39,16 @@ from core.mcp_service import (
     get_command_catalog,
     get_sender_snapshot,
     get_tool_guide,
+    get_qq_admin_group_recent_messages,
+    get_qq_current_group_recent_messages,
     get_task,
+    list_qq_admin_groups,
     list_senders,
     list_agents,
     execute_sender_command,
     restart_services,
+    search_qq_admin_group_messages,
+    search_qq_current_group_messages,
     send_bridge_media,
     send_weixin_media,
     start_agent_session,
@@ -75,6 +80,11 @@ class ToolSpec:
             "description": self.description,
             "inputSchema": self.input_schema,
         }
+@dataclass(frozen=True)
+class ServerScope:
+    qq_history_scope: str = ""
+    qq_group_id: str = ""
+    qq_admin_user_id: str = ""
 
 
 def _tool_result_text(result: ToolActionResult) -> str:
@@ -93,13 +103,138 @@ def _args_as_dict(raw: object) -> JsonObject:
     return raw if isinstance(raw, dict) else {}
 
 
+def _arg_int(args: JsonObject, key: str, default: int) -> int:
+    try:
+        return int(args.get(key) or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _server_scope_from_argv(argv: list[str]) -> ServerScope:
+    values = {
+        "qq_history_scope": "",
+        "qq_group_id": "",
+        "qq_admin_user_id": "",
+    }
+    flags = {
+        "--qq-history-scope": "qq_history_scope",
+        "--qq-group-id": "qq_group_id",
+        "--qq-admin-user-id": "qq_admin_user_id",
+    }
+    index = 0
+    while index < len(argv):
+        flag = str(argv[index] or "")
+        key = flags.get(flag)
+        if key is None:
+            index += 1
+            continue
+        if index + 1 < len(argv):
+            values[key] = str(argv[index + 1] or "").strip()
+        index += 2
+    history_scope = values["qq_history_scope"].strip().lower()
+    if history_scope not in {"group", "admin"}:
+        history_scope = ""
+    return ServerScope(
+        qq_history_scope=history_scope,
+        qq_group_id=values["qq_group_id"].strip(),
+        qq_admin_user_id=values["qq_admin_user_id"].strip(),
+    )
+
+
+SERVER_SCOPE = _server_scope_from_argv(sys.argv[1:])
+
+
 def _server_instructions() -> str:
+    if SERVER_SCOPE.qq_history_scope == "group":
+        return "This server exposes read-only QQ history tools for the current group chat."
+    if SERVER_SCOPE.qq_history_scope == "admin":
+        return "This server exposes read-only QQ group history tools for the private admin chat."
     return "This server exposes the built-in bridge tools with direct mutation access for a private deployment."
 
 
-def _build_tool_specs() -> dict[str, ToolSpec]:
+def _build_tool_specs(scope: ServerScope | None = None) -> dict[str, ToolSpec]:
     def no_args(handler: Callable[[], ToolActionResult]) -> Callable[[JsonObject], ToolActionResult]:
         return lambda _args: handler()
+
+    active_scope = scope or SERVER_SCOPE
+    if active_scope.qq_history_scope == "group":
+        current_group_id = active_scope.qq_group_id
+        return {
+            "qq_current_group_recent_messages": ToolSpec(
+                name="qq_current_group_recent_messages",
+                description="读取当前 QQ 群的最近聊天记录。只返回脱敏摘要，不需要也不接受 group_id。",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "limit": {"type": "integer", "description": "返回条数，默认 20，最多 100。"},
+                    },
+                },
+                handler=lambda args: get_qq_current_group_recent_messages(
+                    current_group_id,
+                    _arg_int(args, "limit", 20),
+                ),
+            ),
+            "qq_current_group_search_messages": ToolSpec(
+                name="qq_current_group_search_messages",
+                description="搜索当前 QQ 群聊天记录。只搜索当前群，不需要也不接受 group_id。",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "搜索关键词。"},
+                        "limit": {"type": "integer", "description": "返回条数，默认 20，最多 100。"},
+                    },
+                    "required": ["query"],
+                },
+                handler=lambda args: search_qq_current_group_messages(
+                    current_group_id,
+                    str(args.get("query") or ""),
+                    _arg_int(args, "limit", 20),
+                ),
+            ),
+        }
+    if active_scope.qq_history_scope == "admin":
+        return {
+            "qq_admin_list_groups": ToolSpec(
+                name="qq_admin_list_groups",
+                description="列出 NapCat 日志中出现过的 QQ 群及最近消息时间。只返回脱敏摘要。",
+                input_schema={"type": "object", "properties": {}},
+                handler=no_args(list_qq_admin_groups),
+            ),
+            "qq_admin_group_recent_messages": ToolSpec(
+                name="qq_admin_group_recent_messages",
+                description="按 group_id 读取指定 QQ 群的最近聊天记录。只返回脱敏摘要。",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "group_id": {"type": "string", "description": "目标 QQ 群号。"},
+                        "limit": {"type": "integer", "description": "返回条数，默认 20，最多 100。"},
+                    },
+                    "required": ["group_id"],
+                },
+                handler=lambda args: get_qq_admin_group_recent_messages(
+                    str(args.get("group_id") or ""),
+                    _arg_int(args, "limit", 20),
+                ),
+            ),
+            "qq_admin_group_search_messages": ToolSpec(
+                name="qq_admin_group_search_messages",
+                description="按 group_id 搜索指定 QQ 群聊天记录。只返回脱敏摘要。",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "group_id": {"type": "string", "description": "目标 QQ 群号。"},
+                        "query": {"type": "string", "description": "搜索关键词。"},
+                        "limit": {"type": "integer", "description": "返回条数，默认 20，最多 100。"},
+                    },
+                    "required": ["group_id", "query"],
+                },
+                handler=lambda args: search_qq_admin_group_messages(
+                    str(args.get("group_id") or ""),
+                    str(args.get("query") or ""),
+                    _arg_int(args, "limit", 20),
+                ),
+            ),
+        }
 
     return {
         "get_tool_guide": ToolSpec(

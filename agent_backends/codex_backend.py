@@ -304,6 +304,7 @@ class CodexBackend(AgentBackend):
                 context.mcp_server.name: {
                     "command": context.mcp_server.command,
                     "args": context.mcp_server.args,
+                    "default_tools_approval_mode": "approve",
                 }
             }
         return {
@@ -415,6 +416,8 @@ class CodexBackend(AgentBackend):
                 f'mcp_servers.{context.mcp_server.name}.command="{context.mcp_server.command}"',
                 "-c",
                 f"mcp_servers.{context.mcp_server.name}.args={json.dumps(context.mcp_server.args, ensure_ascii=False)}",
+                "-c",
+                f'mcp_servers.{context.mcp_server.name}.default_tools_approval_mode="approve"',
             ]
             options.extend(mcp_options)
             resume_options.extend(mcp_options)

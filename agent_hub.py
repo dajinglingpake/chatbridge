@@ -44,6 +44,7 @@ STATE_PATH = STATE_DIR / "agent_hub_state.json"
 SUPPORTED_BACKENDS = set(supported_backend_keys())
 WECHAT_SOURCE = "wechat"
 MCP_SERVER_NAME = "operations"
+QQ_HISTORY_MCP_SERVER_NAME = "qq_history"
 MCP_SERVER_PATH = APP_DIR / "tools" / "operations_server.py"
 PERF_LOG_MIN_SECONDS = 0.25
 IPC_IDLE_SLEEP_SECONDS = 0.05
@@ -761,13 +762,13 @@ class MultiCodexHub:
         broadcast_bridge_notice_by_kind("task", "任务已取消", detail, channel=task.source)
 
     def _invoke_backend(self, agent: AgentConfig, task: HubTask) -> dict[str, str]:
-        mcp_server = self._build_wechat_mcp_server(task)
+        mcp_server = self._build_task_mcp_server(task)
         normalized_backend = normalize_backend(task.backend or agent.backend)
         backend = self.backend_registry.get(normalized_backend)
         if backend is None:
             raise ValueError(f"unsupported backend: {normalized_backend}")
         if mcp_server is not None and normalized_backend == "opencode":
-            raise RuntimeError("当前微信会话暂不支持在 opencode 后端挂载 ChatBridge MCP，请改用 codex 或 claude")
+            raise RuntimeError("当前会话暂不支持在 opencode 后端挂载 ChatBridge MCP，请改用 codex 或 claude")
         effective_agent = AgentConfig(
             id=agent.id,
             name=agent.name,
@@ -864,9 +865,32 @@ class MultiCodexHub:
     def _resolve_task_prompt_prefix(self, agent: AgentConfig, task: HubTask) -> str:
         return agent.prompt_prefix
 
+    def _build_task_mcp_server(self, task: HubTask) -> McpServerConfig | None:
+        source = task.source.strip().lower()
+        sender_id = task.sender_id.strip()
+        if source.startswith("wechat"):
+            return self._build_wechat_mcp_server(task)
+        if source.startswith("qq") and sender_id.lower().startswith("qq:group:"):
+            group_id = self._qq_group_id_from_sender(sender_id)
+            if not group_id:
+                return None
+            return McpServerConfig(
+                name=QQ_HISTORY_MCP_SERVER_NAME,
+                command=sys.executable,
+                args=[str(MCP_SERVER_PATH), "--qq-history-scope", "group", "--qq-group-id", group_id],
+            )
+        if source.startswith("qq") and sender_id.lower().startswith("qq:private:"):
+            user_id = self._qq_private_user_id_from_sender(sender_id)
+            if not self._is_qq_history_admin_user(user_id):
+                return None
+            return McpServerConfig(
+                name=QQ_HISTORY_MCP_SERVER_NAME,
+                command=sys.executable,
+                args=[str(MCP_SERVER_PATH), "--qq-history-scope", "admin", "--qq-admin-user-id", user_id],
+            )
+        return None
+
     def _build_wechat_mcp_server(self, task: HubTask) -> McpServerConfig | None:
-        if not task.source.strip().lower().startswith("wechat"):
-            return None
         args = [str(MCP_SERVER_PATH)]
         if task.bridge_conversations_path.strip():
             args.extend(["--bridge-conversations-path", task.bridge_conversations_path.strip()])
@@ -877,6 +901,29 @@ class MultiCodexHub:
             command=sys.executable,
             args=args,
         )
+
+    @staticmethod
+    def _qq_group_id_from_sender(sender_id: str) -> str:
+        parts = str(sender_id or "").strip().split(":")
+        if len(parts) >= 3 and parts[0].lower() == "qq" and parts[1].lower() == "group":
+            return parts[2].strip()
+        return ""
+
+    @staticmethod
+    def _qq_private_user_id_from_sender(sender_id: str) -> str:
+        parts = str(sender_id or "").strip().split(":")
+        if len(parts) >= 3 and parts[0].lower() == "qq" and parts[1].lower() == "private":
+            return parts[2].strip()
+        return ""
+
+    @staticmethod
+    def _is_qq_history_admin_user(user_id: str) -> bool:
+        cleaned_user_id = str(user_id or "").strip()
+        if not cleaned_user_id:
+            return False
+        config = BridgeConfig.load()
+        admins = {str(item or "").strip() for item in getattr(config, "qq_allowed_private_user_ids", [])}
+        return cleaned_user_id in admins
 
     def _save_state(self) -> None:
         ensure_ipc_dirs()

@@ -138,10 +138,7 @@ class ConfigResilienceTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            local_config_path.write_text(
-                json.dumps({"qq_allowed_private_user_ids": ["10001"]}),
-                encoding="utf-8",
-            )
+            local_config_path.write_text(json.dumps({"qq_allowed_private_user_ids": ["10001"]}), encoding="utf-8")
             state_path = root / "accounts" / "bridge-account-state.local.json"
 
             with (

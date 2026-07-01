@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from agent_backends.shared import resolve_session_file
 from agent_backends import supported_backend_keys
@@ -15,7 +16,7 @@ from core.bridge_service_control_runtime import MCP_RESTART_SCOPES, resolve_rest
 from core.context_relations import build_context_relation_lines
 from core.dashboard import load_dashboard_state
 from core.json_store import load_json
-from core.runtime_paths import PROJECT_SPACES_PATH, RUNTIME_DIR, WORKSPACE_DIR
+from core.runtime_paths import ONEBOT_RUNTIME_DIR, PROJECT_SPACES_PATH, RUNTIME_DIR, WORKSPACE_DIR
 from core.state_models import HubTask, JsonObject, WeixinConversationBinding, WeixinSessionMeta
 from runtime_stack import get_runtime_snapshot
 from weixin_hub_bridge import DEFAULT_WEIXIN_BASE_URL, EVENT_LOG_PATH, WeixinBridge
@@ -34,6 +35,12 @@ def _summarize_text(value: str, *, limit: int = 120) -> str:
     if not text:
         return ""
     return text[: limit - 1] + "..." if len(text) > limit else text
+
+QQ_NAPCAT_LOG_DIR = ONEBOT_RUNTIME_DIR / "napcat-shell" / "logs"
+QQ_OB11_LOG_MARKER = "转化为 OB11Message"
+QQ_HISTORY_MAX_LIMIT = 100
+QQ_HISTORY_DEFAULT_LIMIT = 20
+_CQ_CODE_PATTERN = re.compile(r"\[CQ:[^\]]+\]")
 
 
 def _prepare_media_delivery_copy(file_path: Path) -> Path:
@@ -108,6 +115,242 @@ class ToolActionResult:
             "summary": self.summary,
             "data": self.data,
         }
+
+def _clamp_history_limit(limit: int, *, default: int = QQ_HISTORY_DEFAULT_LIMIT) -> int:
+    try:
+        value = int(limit)
+    except (TypeError, ValueError):
+        value = default
+    return max(1, min(QQ_HISTORY_MAX_LIMIT, value))
+
+def _safe_media_name(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    normalized = text.replace("\\", "/")
+    posix_name = PurePosixPath(normalized).name
+    windows_name = PureWindowsPath(text).name
+    name = windows_name if len(windows_name) < len(posix_name) else posix_name
+    return name.strip()
+
+def _strip_cq_codes(value: str) -> str:
+    return " ".join(_CQ_CODE_PATTERN.sub(" ", str(value or "")).split())
+
+def _qq_message_text_and_media(message: JsonObject) -> tuple[str, list[JsonObject]]:
+    segments = message.get("message")
+    text_parts: list[str] = []
+    media: list[JsonObject] = []
+    if isinstance(segments, list):
+        for item in segments:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("type") or "").strip().lower()
+            data = item.get("data") if isinstance(item.get("data"), dict) else {}
+            if kind == "text":
+                text = str(data.get("text") or "").strip()
+                if text:
+                    text_parts.append(text)
+                continue
+            if kind == "at":
+                qq = str(data.get("qq") or "").strip()
+                if qq and qq != "all":
+                    text_parts.append(f"@{qq}")
+                elif qq:
+                    text_parts.append("@all")
+                continue
+            if kind in {"image", "file", "video", "record", "audio"}:
+                raw_name = data.get("name") or data.get("filename") or data.get("file") or data.get("file_name")
+                entry: JsonObject = {"type": kind}
+                name = _safe_media_name(raw_name)
+                if name:
+                    entry["name"] = name
+                raw_size = data.get("file_size") or data.get("size")
+                if isinstance(raw_size, int):
+                    entry["size"] = raw_size
+                else:
+                    try:
+                        if str(raw_size or "").strip():
+                            entry["size"] = int(str(raw_size).strip())
+                    except ValueError:
+                        pass
+                media.append(entry)
+    text = " ".join(" ".join(text_parts).split())
+    if not text:
+        text = _strip_cq_codes(str(message.get("raw_message") or ""))
+    return text, media
+
+def _sanitize_qq_group_message(message: JsonObject) -> JsonObject | None:
+    if str(message.get("message_type") or "").strip().lower() != "group":
+        return None
+    group_id = str(message.get("group_id") or "").strip()
+    if not group_id:
+        return None
+    sender = message.get("sender") if isinstance(message.get("sender"), dict) else {}
+    text, media = _qq_message_text_and_media(message)
+    created_at = ""
+    raw_time = message.get("time")
+    try:
+        if raw_time is not None:
+            created_at = datetime.fromtimestamp(int(raw_time)).isoformat(timespec="seconds")
+    except (OSError, OverflowError, TypeError, ValueError):
+        created_at = ""
+    payload: JsonObject = {
+        "time": int(raw_time) if isinstance(raw_time, int) else raw_time,
+        "created_at": created_at,
+        "group_id": group_id,
+        "group_name": str(message.get("group_name") or "").strip(),
+        "user_id": str(message.get("user_id") or sender.get("user_id") or "").strip(),
+        "display_name": str(sender.get("card") or sender.get("nickname") or "").strip(),
+        "text": text,
+    }
+    if media:
+        payload["media"] = media
+    return payload
+
+def _extract_qq_ob11_payload(line: str) -> JsonObject | None:
+    marker_index = line.find(QQ_OB11_LOG_MARKER)
+    if marker_index < 0:
+        return None
+    json_index = line.find("{", marker_index)
+    if json_index < 0:
+        return None
+    try:
+        parsed = json.loads(line[json_index:])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    candidate = parsed.get("arrayMsg") if isinstance(parsed.get("arrayMsg"), dict) else parsed
+    return candidate if isinstance(candidate, dict) else None
+
+def _iter_qq_group_history_messages(log_dir: Path | None = None) -> list[JsonObject]:
+    root = log_dir or QQ_NAPCAT_LOG_DIR
+    if not root.exists() or not root.is_dir():
+        return []
+    paths = sorted((item for item in root.glob("*.log") if item.is_file()), key=lambda item: item.stat().st_mtime)
+    messages: list[JsonObject] = []
+    for path in paths:
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            payload = _extract_qq_ob11_payload(line)
+            if payload is None:
+                continue
+            if str(payload.get("post_type") or "message").strip().lower() not in {"", "message"}:
+                continue
+            sanitized = _sanitize_qq_group_message(payload)
+            if sanitized is not None:
+                messages.append(sanitized)
+    messages.sort(key=lambda item: int(item.get("time") or 0))
+    return messages
+
+def _qq_history_summary(messages: list[JsonObject], *, prefix: str) -> str:
+    if not messages:
+        return f"{prefix}：暂无记录。"
+    lines = [f"{prefix}：共 {len(messages)} 条。"]
+    for item in messages[-10:]:
+        speaker = str(item.get("display_name") or item.get("user_id") or "unknown")
+        text = _summarize_text(str(item.get("text") or ""), limit=80)
+        media = item.get("media") if isinstance(item.get("media"), list) else []
+        media_suffix = f" [媒体 {len(media)} 个]" if media else ""
+        lines.append(f"- {item.get('created_at') or item.get('time')}: {speaker}: {text or '(无文字)'}{media_suffix}")
+    return "\n".join(lines)
+
+def get_qq_current_group_recent_messages(current_group_id: str, limit: int = QQ_HISTORY_DEFAULT_LIMIT) -> ToolActionResult:
+    group_id = str(current_group_id or "").strip()
+    if not group_id:
+        return ToolActionResult(ok=False, summary="当前 QQ 群上下文缺少 group_id")
+    count = _clamp_history_limit(limit)
+    messages = [item for item in _iter_qq_group_history_messages() if str(item.get("group_id") or "") == group_id][-count:]
+    return ToolActionResult(
+        ok=True,
+        summary=_qq_history_summary(messages, prefix=f"当前 QQ 群 {group_id} 最近消息"),
+        data={"group_id": group_id, "limit": count, "messages": messages},
+    )
+
+def search_qq_current_group_messages(current_group_id: str, query: str, limit: int = QQ_HISTORY_DEFAULT_LIMIT) -> ToolActionResult:
+    group_id = str(current_group_id or "").strip()
+    cleaned_query = str(query or "").strip()
+    if not group_id:
+        return ToolActionResult(ok=False, summary="当前 QQ 群上下文缺少 group_id")
+    if not cleaned_query:
+        return ToolActionResult(ok=False, summary="query 不能为空")
+    count = _clamp_history_limit(limit)
+    query_lower = cleaned_query.lower()
+    matches = [
+        item
+        for item in _iter_qq_group_history_messages()
+        if str(item.get("group_id") or "") == group_id
+        and query_lower in f"{item.get('display_name') or ''} {item.get('user_id') or ''} {item.get('text') or ''}".lower()
+    ][-count:]
+    return ToolActionResult(
+        ok=True,
+        summary=_qq_history_summary(matches, prefix=f"当前 QQ 群 {group_id} 搜索 {cleaned_query!r}"),
+        data={"group_id": group_id, "query": cleaned_query, "limit": count, "messages": matches},
+    )
+
+def get_qq_admin_group_recent_messages(group_id: str, limit: int = QQ_HISTORY_DEFAULT_LIMIT) -> ToolActionResult:
+    cleaned_group_id = str(group_id or "").strip()
+    if not cleaned_group_id:
+        return ToolActionResult(ok=False, summary="group_id 不能为空")
+    count = _clamp_history_limit(limit)
+    messages = [item for item in _iter_qq_group_history_messages() if str(item.get("group_id") or "") == cleaned_group_id][-count:]
+    return ToolActionResult(
+        ok=True,
+        summary=_qq_history_summary(messages, prefix=f"QQ 群 {cleaned_group_id} 最近消息"),
+        data={"group_id": cleaned_group_id, "limit": count, "messages": messages},
+    )
+
+def search_qq_admin_group_messages(group_id: str, query: str, limit: int = QQ_HISTORY_DEFAULT_LIMIT) -> ToolActionResult:
+    cleaned_group_id = str(group_id or "").strip()
+    cleaned_query = str(query or "").strip()
+    if not cleaned_group_id:
+        return ToolActionResult(ok=False, summary="group_id 不能为空")
+    if not cleaned_query:
+        return ToolActionResult(ok=False, summary="query 不能为空")
+    count = _clamp_history_limit(limit)
+    query_lower = cleaned_query.lower()
+    matches = [
+        item
+        for item in _iter_qq_group_history_messages()
+        if str(item.get("group_id") or "") == cleaned_group_id
+        and query_lower in f"{item.get('display_name') or ''} {item.get('user_id') or ''} {item.get('text') or ''}".lower()
+    ][-count:]
+    return ToolActionResult(
+        ok=True,
+        summary=_qq_history_summary(matches, prefix=f"QQ 群 {cleaned_group_id} 搜索 {cleaned_query!r}"),
+        data={"group_id": cleaned_group_id, "query": cleaned_query, "limit": count, "messages": matches},
+    )
+
+def list_qq_admin_groups() -> ToolActionResult:
+    groups: dict[str, JsonObject] = {}
+    for item in _iter_qq_group_history_messages():
+        group_id = str(item.get("group_id") or "").strip()
+        if not group_id:
+            continue
+        existing = groups.setdefault(
+            group_id,
+            {
+                "group_id": group_id,
+                "group_name": str(item.get("group_name") or "").strip(),
+                "message_count": 0,
+                "latest_time": "",
+                "latest_created_at": "",
+            },
+        )
+        existing["message_count"] = int(existing.get("message_count") or 0) + 1
+        existing["latest_time"] = item.get("time") or ""
+        existing["latest_created_at"] = item.get("created_at") or ""
+        if item.get("group_name"):
+            existing["group_name"] = item.get("group_name")
+    group_list = sorted(groups.values(), key=lambda item: int(item.get("latest_time") or 0), reverse=True)
+    return ToolActionResult(
+        ok=True,
+        summary=f"已返回 {len(group_list)} 个 QQ 群的历史摘要。",
+        data={"groups": group_list},
+    )
 
 
 def _resolve_session_model(session_meta: WeixinSessionMeta, agent_model: str) -> str:

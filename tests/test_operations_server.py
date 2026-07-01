@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
-from tools.operations_server import handle_request
+from tools.operations_server import ServerScope, _build_tool_specs, handle_request
 
 
 class ChatBridgeMcpServerTests(unittest.TestCase):
@@ -37,6 +41,104 @@ class ChatBridgeMcpServerTests(unittest.TestCase):
         self.assertIn("send_weixin_media", tool_names)
         self.assertNotIn("enter_control_mode", tool_names)
         self.assertNotIn("exit_control_mode", tool_names)
+
+    def test_qq_group_scope_lists_current_group_history_tools_only(self) -> None:
+        tool_names = set(_build_tool_specs(ServerScope(qq_history_scope="group", qq_group_id="811708184")))
+
+        self.assertEqual(
+            {"qq_current_group_recent_messages", "qq_current_group_search_messages"},
+            tool_names,
+        )
+        self.assertNotIn("qq_admin_group_recent_messages", tool_names)
+        self.assertNotIn("restart_services", tool_names)
+
+    def test_qq_admin_scope_lists_admin_history_tools_only(self) -> None:
+        tool_names = set(_build_tool_specs(ServerScope(qq_history_scope="admin", qq_admin_user_id="10001")))
+
+        self.assertEqual(
+            {"qq_admin_list_groups", "qq_admin_group_recent_messages", "qq_admin_group_search_messages"},
+            tool_names,
+        )
+        self.assertNotIn("qq_current_group_recent_messages", tool_names)
+        self.assertNotIn("restart_services", tool_names)
+
+    def test_qq_group_history_tool_parses_napcat_log_and_sanitizes_media(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_dir = Path(temp_dir)
+            payload = {
+                "arrayMsg": {
+                    "self_id": 900000001,
+                    "user_id": 10001,
+                    "time": 1782674955,
+                    "message_type": "group",
+                    "sender": {"user_id": 10001, "nickname": "nick", "card": "tester"},
+                    "raw_message": "看图[CQ:image,file=secret.png,url=https://example.test/rkey-secret]",
+                    "message": [
+                        {"type": "text", "data": {"text": "看图"}},
+                        {
+                            "type": "image",
+                            "data": {
+                                "file": "C:/secret/source/secret.png",
+                                "url": "https://example.test/rkey-secret",
+                                "rkey": "do-not-return",
+                                "sourcePath": "C:/secret/source/secret.png",
+                            },
+                        },
+                    ],
+                    "post_type": "message",
+                    "group_id": 811708184,
+                    "group_name": "测试群",
+                }
+            }
+            (log_dir / "napcat.log").write_text(
+                "2026-06-29 转化为 OB11Message " + json.dumps(payload, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            specs = _build_tool_specs(ServerScope(qq_history_scope="group", qq_group_id="811708184"))
+
+            with patch("core.mcp_service.QQ_NAPCAT_LOG_DIR", log_dir):
+                result = specs["qq_current_group_recent_messages"].handler({"limit": 10})
+
+        self.assertTrue(result.ok)
+        messages = result.data["messages"]
+        self.assertEqual(1, len(messages))
+        self.assertEqual("811708184", messages[0]["group_id"])
+        self.assertEqual("tester", messages[0]["display_name"])
+        self.assertEqual("看图", messages[0]["text"])
+        self.assertEqual([{"type": "image", "name": "secret.png"}], messages[0]["media"])
+        serialized = json.dumps(result.data, ensure_ascii=False)
+        self.assertNotIn("rkey", serialized)
+        self.assertNotIn("sourcePath", serialized)
+        self.assertNotIn("https://example.test", serialized)
+
+    def test_qq_group_history_scope_ignores_group_id_argument(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_dir = Path(temp_dir)
+            payload = {
+                "arrayMsg": {
+                    "user_id": 10001,
+                    "time": 1782674956,
+                    "message_type": "group",
+                    "sender": {"nickname": "member"},
+                    "raw_message": "当前群消息",
+                    "message": [{"type": "text", "data": {"text": "当前群消息"}}],
+                    "post_type": "message",
+                    "group_id": 811708184,
+                    "group_name": "测试群",
+                }
+            }
+            (log_dir / "napcat.log").write_text(
+                "转化为 OB11Message " + json.dumps(payload, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            specs = _build_tool_specs(ServerScope(qq_history_scope="group", qq_group_id="811708184"))
+
+            with patch("core.mcp_service.QQ_NAPCAT_LOG_DIR", log_dir):
+                result = specs["qq_current_group_recent_messages"].handler({"group_id": "999999", "limit": 10})
+
+        self.assertTrue(result.ok)
+        self.assertEqual("811708184", result.data["group_id"])
+        self.assertEqual(1, len(result.data["messages"]))
 
     def test_tools_call_returns_text_content(self) -> None:
         response = handle_request(

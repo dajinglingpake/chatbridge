@@ -285,6 +285,7 @@ class BridgeConfig:
         raw["qq_group_permission_mode"] = str(raw.get("qq_group_permission_mode") or "read-only").strip().lower() or "read-only"
         raw["qq_group_permission_profile"] = str(raw.get("qq_group_permission_profile") or "qq_group").strip() or "qq_group"
         raw["qq_group_codex_search_enabled"] = _bool_value(raw.get("qq_group_codex_search_enabled"), True)
+        raw.pop("qq_history_admin_user_ids", None)
         raw.pop("qq_allowed_user_ids", None)
         raw.pop("qq_blocked_user_ids", None)
         cfg = cls(**raw)

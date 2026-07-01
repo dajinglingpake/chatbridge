@@ -342,6 +342,68 @@ class QQOneBotBridgeTests(unittest.TestCase):
 
         self.assertEqual([("qq:group:20002", "不需要 at 也处理")], bridge.submitted)
 
+    def test_group_text_name_mention_with_napcat_at_type_is_accepted(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge._login_nickname = "测试机器人"
+        bridge.handle_event(
+            {
+                "post_type": "message",
+                "message_type": "group",
+                "group_id": 20002,
+                "user_id": 10001,
+                "self_id": 900000001,
+                "atType": 2,
+                "message": [
+                    {"type": "reply", "data": {"id": "1660339207"}},
+                    {"type": "text", "data": {"text": "@测试机器人 你也做一个一样的群总结，根据历史群消息"}},
+                ],
+            }
+        )
+
+        self.assertEqual(
+            [("qq:group:20002", "你也做一个一样的群总结，根据历史群消息")],
+            bridge.submitted,
+        )
+
+    def test_group_text_name_only_mention_replies_hello_without_agent_submission(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge._login_nickname = "测试机器人"
+        bridge.handle_event(
+            {
+                "post_type": "message",
+                "message_type": "group",
+                "group_id": 20002,
+                "user_id": 10001,
+                "self_id": 900000001,
+                "atType": 2,
+                "message": [
+                    {"type": "text", "data": {"text": "@测试机器人"}},
+                ],
+            }
+        )
+
+        self.assertEqual([], bridge.submitted)
+        sent_messages = [payload["message"] for action, payload in bridge.api_calls if action == "send_group_msg"]
+        self.assertEqual(["你好"], sent_messages)
+
+    def test_group_text_name_mention_without_napcat_at_type_is_ignored(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge._login_nickname = "测试机器人"
+        bridge.handle_event(
+            {
+                "post_type": "message",
+                "message_type": "group",
+                "group_id": 20002,
+                "user_id": 10001,
+                "self_id": 900000001,
+                "message": [
+                    {"type": "text", "data": {"text": "@测试机器人 这只是普通文本"}},
+                ],
+            }
+        )
+
+        self.assertEqual([], bridge.submitted)
+
     def test_group_empty_mention_replies_hello_without_agent_submission(self) -> None:
         bridge = FakeQQBridge(self.temp_path)
         bridge.handle_event(

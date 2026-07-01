@@ -200,6 +200,129 @@ class McpServerInjectionTests(unittest.TestCase):
 
             self.assertIsNone(backend.last_context.mcp_server)
 
+    def test_qq_group_task_injects_current_group_history_mcp(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            workdir = temp_path / "workspace"
+            session_file = temp_path / "sessions" / "qq-group.txt"
+            workdir.mkdir(parents=True, exist_ok=True)
+            session_file.parent.mkdir(parents=True, exist_ok=True)
+            config = HubConfig(
+                codex_command="codex",
+                claude_command="claude",
+                opencode_command="opencode",
+                agents=[AgentConfig("qq-group", "QQ Group", str(workdir), str(session_file), backend="codex")],
+            )
+            backend = RecordingBackend()
+            with (
+                patch("agent_hub.STATE_PATH", temp_path / "state" / "agent_hub_state.json"),
+                patch("agent_hub.discover_external_agent_processes", return_value=[]),
+            ):
+                hub = MultiCodexHub(config)
+                hub.backend_registry["codex"] = backend
+                task = HubTask(
+                    id="task-qq-group-001",
+                    agent_id="qq-group",
+                    agent_name="QQ Group",
+                    backend="codex",
+                    source="qq",
+                    sender_id="qq:group:811708184",
+                    prompt="看看群里刚才说了什么",
+                    status="queued",
+                    created_at="2026-04-20T20:00:00",
+                    session_name="default",
+                )
+
+                hub._invoke_backend(config.agents[0], task)
+
+            self.assertIsNotNone(backend.last_context.mcp_server)
+            self.assertEqual("qq_history", backend.last_context.mcp_server.name)
+            self.assertIn("--qq-history-scope", backend.last_context.mcp_server.args)
+            self.assertIn("group", backend.last_context.mcp_server.args)
+            self.assertIn("--qq-group-id", backend.last_context.mcp_server.args)
+            self.assertIn("811708184", backend.last_context.mcp_server.args)
+
+    def test_qq_private_non_admin_does_not_mount_history_mcp(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            workdir = temp_path / "workspace"
+            session_file = temp_path / "sessions" / "qq.txt"
+            workdir.mkdir(parents=True, exist_ok=True)
+            session_file.parent.mkdir(parents=True, exist_ok=True)
+            config = HubConfig(
+                codex_command="codex",
+                claude_command="claude",
+                opencode_command="opencode",
+                agents=[AgentConfig("qq", "QQ", str(workdir), str(session_file), backend="codex")],
+            )
+            backend = RecordingBackend()
+            with (
+                patch("agent_hub.STATE_PATH", temp_path / "state" / "agent_hub_state.json"),
+                patch("agent_hub.discover_external_agent_processes", return_value=[]),
+                patch("agent_hub.BridgeConfig.load", return_value=SimpleNamespace(qq_allowed_private_user_ids=["10001"])),
+            ):
+                hub = MultiCodexHub(config)
+                hub.backend_registry["codex"] = backend
+                task = HubTask(
+                    id="task-qq-private-001",
+                    agent_id="qq",
+                    agent_name="QQ",
+                    backend="codex",
+                    source="qq",
+                    sender_id="qq:private:20002",
+                    prompt="hello",
+                    status="queued",
+                    created_at="2026-04-20T20:00:00",
+                    session_name="default",
+                )
+
+                hub._invoke_backend(config.agents[0], task)
+
+            self.assertIsNone(backend.last_context.mcp_server)
+
+    def test_qq_private_admin_injects_admin_history_mcp(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            workdir = temp_path / "workspace"
+            session_file = temp_path / "sessions" / "qq.txt"
+            workdir.mkdir(parents=True, exist_ok=True)
+            session_file.parent.mkdir(parents=True, exist_ok=True)
+            config = HubConfig(
+                codex_command="codex",
+                claude_command="claude",
+                opencode_command="opencode",
+                agents=[AgentConfig("qq", "QQ", str(workdir), str(session_file), backend="codex")],
+            )
+            backend = RecordingBackend()
+            with (
+                patch("agent_hub.STATE_PATH", temp_path / "state" / "agent_hub_state.json"),
+                patch("agent_hub.discover_external_agent_processes", return_value=[]),
+                patch("agent_hub.BridgeConfig.load", return_value=SimpleNamespace(qq_allowed_private_user_ids=["10001"])),
+            ):
+                hub = MultiCodexHub(config)
+                hub.backend_registry["codex"] = backend
+                task = HubTask(
+                    id="task-qq-private-002",
+                    agent_id="qq",
+                    agent_name="QQ",
+                    backend="codex",
+                    source="qq",
+                    sender_id="qq:private:10001",
+                    prompt="查一下群历史",
+                    status="queued",
+                    created_at="2026-04-20T20:00:00",
+                    session_name="default",
+                )
+
+                hub._invoke_backend(config.agents[0], task)
+
+            self.assertIsNotNone(backend.last_context.mcp_server)
+            self.assertEqual("qq_history", backend.last_context.mcp_server.name)
+            self.assertIn("--qq-history-scope", backend.last_context.mcp_server.args)
+            self.assertIn("admin", backend.last_context.mcp_server.args)
+            self.assertIn("--qq-admin-user-id", backend.last_context.mcp_server.args)
+            self.assertIn("10001", backend.last_context.mcp_server.args)
+
 
 class McpServerCodexBackendTests(unittest.TestCase):
     def test_codex_backend_injects_mcp_server_overrides(self) -> None:
@@ -261,6 +384,7 @@ class McpServerCodexBackendTests(unittest.TestCase):
                 self.assertIn("--ignore-rules", argv)
                 self.assertIn('mcp_servers.operations.command="python3"', argv)
                 self.assertIn('mcp_servers.operations.args=["/tmp/operations_server.py"]', argv)
+                self.assertIn('mcp_servers.operations.default_tools_approval_mode="approve"', argv)
                 return FakeProcess(argv)
 
             with (
@@ -274,6 +398,43 @@ class McpServerCodexBackendTests(unittest.TestCase):
             self.assertEqual("thread-1", result["session_id"])
             self.assertEqual("60", result["context_left_percent"])
             self.assertEqual([60], context_left_values)
+
+    def test_codex_backend_app_server_approves_injected_mcp_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            workdir = temp_path / "workspace"
+            workdir.mkdir(parents=True, exist_ok=True)
+            session_dir = temp_path / "sessions"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            agent = SimpleNamespace(
+                id="main",
+                name="Main",
+                workdir=str(workdir),
+                session_file=str(session_dir / "main.txt"),
+                backend="codex",
+                model="gpt-5.4",
+                prompt_prefix="system",
+            )
+            context = BackendContext(
+                codex_command="codex",
+                claude_command="claude",
+                opencode_command="opencode",
+                session_dir=session_dir,
+                creationflags=0,
+                mcp_server=McpServerConfig(
+                    name="operations",
+                    command="python3",
+                    args=["/tmp/operations_server.py"],
+                ),
+            )
+            backend = CodexBackend()
+
+            params = backend._app_server_thread_params(agent, workdir, context)
+
+            mcp_server = params["config"]["mcp_servers"]["operations"]
+            self.assertEqual("python3", mcp_server["command"])
+            self.assertEqual(["/tmp/operations_server.py"], mcp_server["args"])
+            self.assertEqual("approve", mcp_server["default_tools_approval_mode"])
 
     def test_codex_backend_applies_reasoning_effort_and_default_permission_mode(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
