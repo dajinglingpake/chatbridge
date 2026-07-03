@@ -480,15 +480,15 @@ class CodexBackend(AgentBackend):
         stdout_thread = threading.Thread(target=read_stdout, daemon=True)
         stdout_thread.start()
         timeout_seconds = max(1, int(getattr(context, "hub_task_timeout_seconds", 600) or 600))
-        deadline = time.time() + timeout_seconds
+        last_stdout_at = time.time()
         while True:
             if self._is_cancel_requested(context):
                 terminate_process_tree(int(getattr(proc, "pid", 0) or 0))
                 raise RuntimeError("Task canceled during execution.")
-            remaining = deadline - time.time()
+            remaining = (last_stdout_at + timeout_seconds) - time.time()
             if remaining <= 0:
                 terminate_process_tree(int(getattr(proc, "pid", 0) or 0))
-                raise RuntimeError(f"Codex request timed out after {timeout_seconds} seconds")
+                raise RuntimeError(f"Codex stdout idle timed out after {timeout_seconds} seconds")
             try:
                 event = stdout_events.get(timeout=min(0.5, remaining))
             except queue.Empty:
@@ -497,6 +497,7 @@ class CodexBackend(AgentBackend):
                 continue
             if event is None:
                 break
+            last_stdout_at = time.time()
             if event.get("type") == "thread.started" and event.get("thread_id"):
                 session_id = str(event["thread_id"])
             if event.get("type") == "error" and event.get("message"):

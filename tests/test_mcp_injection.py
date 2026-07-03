@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
 import time
@@ -922,6 +923,78 @@ class McpServerCodexBackendTests(unittest.TestCase):
                     backend.invoke(agent, "hello", "", context)
 
         terminate.assert_called_once_with(9877)
+
+    def test_codex_backend_does_not_timeout_while_stdout_is_active(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            workdir = temp_path / "workspace"
+            workdir.mkdir(parents=True, exist_ok=True)
+            session_dir = temp_path / "sessions"
+            session_dir.mkdir(parents=True, exist_ok=True)
+
+            agent = SimpleNamespace(
+                id="main",
+                name="Main",
+                workdir=str(workdir),
+                session_file=str(session_dir / "main.txt"),
+                backend="codex",
+                model="",
+                prompt_prefix="",
+            )
+            context = BackendContext(
+                codex_command="codex",
+                claude_command="claude",
+                opencode_command="opencode",
+                session_dir=session_dir,
+                creationflags=0,
+                hub_task_timeout_seconds=1,
+            )
+            backend = CodexBackend()
+
+            class StreamingStdout:
+                def __iter__(self):
+                    return self
+
+                def __init__(self) -> None:
+                    self.events = iter(
+                        [
+                            {"type": "thread.started", "thread_id": "thread-active"},
+                            {"type": "response.output_text.delta", "delta": "part 1"},
+                            {"type": "response.output_text.delta", "delta": "part 2"},
+                            {"type": "response.output_text.delta", "delta": "part 3"},
+                        ]
+                    )
+
+                def __next__(self) -> str:
+                    event = next(self.events)
+                    time.sleep(0.4)
+                    return json.dumps(event) + "\n"
+
+            class StreamingProcess:
+                pid = 9878
+                stdout = StreamingStdout()
+                stderr = iter([])
+                returncode = 0
+
+                def __init__(self, argv: list[str], *args: object, **kwargs: object) -> None:
+                    output_path = Path(argv[argv.index("-o") + 1])
+                    output_path.write_text("final output", encoding="utf-8")
+
+                def poll(self) -> int | None:
+                    return None
+
+                def wait(self, timeout: float | None = None) -> int:
+                    return 0
+
+            with (
+                patch("agent_backends.codex_backend.subprocess.Popen", side_effect=StreamingProcess),
+                patch("agent_backends.codex_backend.terminate_process_tree") as terminate,
+            ):
+                result = backend.invoke(agent, "hello", "", context)
+
+        self.assertEqual("final output", result["output"])
+        self.assertEqual("thread-active", result["session_id"])
+        terminate.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()
