@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import time
@@ -872,6 +873,82 @@ class McpServerCodexBackendTests(unittest.TestCase):
 
         terminate.assert_called_once_with(9876)
 
+    def test_codex_backend_finishes_when_task_complete_event_precedes_process_exit(self) -> None:
+        self._assert_codex_backend_finishes_after_complete_event(
+            '{"type":"event_msg","payload":{"type":"task_complete"}}\n'
+        )
+
+    def test_codex_backend_finishes_when_turn_completed_event_precedes_process_exit(self) -> None:
+        self._assert_codex_backend_finishes_after_complete_event('{"type":"turn.completed"}\n')
+
+    def _assert_codex_backend_finishes_after_complete_event(self, complete_event: str) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            workdir = temp_path / "workspace"
+            workdir.mkdir(parents=True, exist_ok=True)
+            session_dir = temp_path / "sessions"
+            session_dir.mkdir(parents=True, exist_ok=True)
+
+            agent = SimpleNamespace(
+                id="main",
+                name="Main",
+                workdir=str(workdir),
+                session_file=str(session_dir / "main.txt"),
+                backend="codex",
+                model="",
+                prompt_prefix="",
+            )
+            context = BackendContext(
+                codex_command="codex",
+                claude_command="claude",
+                opencode_command="opencode",
+                session_dir=session_dir,
+                creationflags=0,
+                hub_task_timeout_seconds=30,
+            )
+            backend = CodexBackend()
+
+            class CompletedButHangingProcess:
+                pid = 9877
+                stdout = iter(
+                    [
+                        '{"type":"thread.started","thread_id":"thread-complete"}\n',
+                        complete_event,
+                    ]
+                )
+                stderr = iter([])
+
+                def __init__(self) -> None:
+                    self.wait_calls = 0
+
+                def poll(self) -> int | None:
+                    return None
+
+                def wait(self, timeout: float | None = None) -> int:
+                    self.wait_calls += 1
+                    if self.wait_calls == 1:
+                        raise subprocess.TimeoutExpired("codex", timeout or 0)
+                    return 0
+
+            proc = CompletedButHangingProcess()
+
+            def fake_popen(argv: list[str], **kwargs):
+                output_path = Path(argv[argv.index("-o") + 1])
+                output_path.write_text("ok after task complete", encoding="utf-8")
+                return proc
+
+            with (
+                patch("agent_backends.codex_backend.tempfile.gettempdir", return_value=str(temp_path)),
+                patch("agent_backends.codex_backend.uuid.uuid4", return_value=SimpleNamespace(hex="fixed")),
+                patch("agent_backends.codex_backend.subprocess.Popen", side_effect=fake_popen),
+                patch("agent_backends.codex_backend.terminate_process_tree") as terminate,
+            ):
+                result = backend.invoke(agent, "hello", "", context)
+
+        self.assertEqual("ok after task complete", result["output"])
+        self.assertEqual("thread-complete", result["session_id"])
+        terminate.assert_called_once_with(9877)
+
     def test_codex_backend_times_out_when_stdout_stalls(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -920,9 +997,110 @@ class McpServerCodexBackendTests(unittest.TestCase):
                 patch("agent_backends.codex_backend.terminate_process_tree") as terminate,
             ):
                 with self.assertRaisesRegex(RuntimeError, "timed out after 1 seconds"):
-                    backend.invoke(agent, "hello", "", context)
+                    backend._invoke_once(agent, "hello", "", context)
 
         terminate.assert_called_once_with(9877)
+
+    def test_codex_backend_recovers_stdout_idle_timeout_by_resuming_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            workdir = temp_path / "workspace"
+            workdir.mkdir(parents=True, exist_ok=True)
+            session_dir = temp_path / "sessions"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            session_file = session_dir / "main.txt"
+            progress: list[str] = []
+
+            agent = SimpleNamespace(
+                id="main",
+                name="Main",
+                workdir=str(workdir),
+                session_file=str(session_file),
+                backend="codex",
+                model="",
+                prompt_prefix="",
+            )
+            context = BackendContext(
+                codex_command="codex",
+                claude_command="claude",
+                opencode_command="opencode",
+                session_dir=session_dir,
+                creationflags=0,
+                hub_task_timeout_seconds=1,
+                on_progress=progress.append,
+            )
+            backend = CodexBackend()
+
+            class StallingStdout:
+                def __iter__(self):
+                    return self
+
+                def __init__(self) -> None:
+                    self.started = False
+
+                def __next__(self) -> str:
+                    if not self.started:
+                        self.started = True
+                        return '{"type":"thread.started","thread_id":"thread-timeout"}\n'
+                    time.sleep(30)
+                    raise StopIteration
+
+            class StallingProcess:
+                pid = 9879
+                stdout = StallingStdout()
+                stderr = iter([])
+
+                def poll(self) -> int | None:
+                    return None
+
+            class SuccessProcess:
+                pid = 9880
+                stdout = iter(['{"type":"thread.started","thread_id":"thread-timeout"}\n'])
+                stderr = iter([])
+
+                def poll(self) -> int | None:
+                    return 0
+
+                def wait(self, timeout: float | None = None) -> int:
+                    return 0
+
+            calls: list[list[str]] = []
+
+            def fake_popen(argv: list[str], **kwargs):
+                calls.append(argv)
+                if len(calls) == 1:
+                    return StallingProcess()
+                output_path = Path(argv[argv.index("-o") + 1])
+                output_path.write_text("ok after recovery", encoding="utf-8")
+                return SuccessProcess()
+
+            with (
+                patch("agent_backends.codex_backend.subprocess.Popen", side_effect=fake_popen),
+                patch("agent_backends.codex_backend.terminate_process_tree") as terminate,
+            ):
+                original_lang = os.environ.get("CHATBRIDGE_LANG")
+                os.environ["CHATBRIDGE_LANG"] = "en-US"
+                try:
+                    result = backend.invoke(agent, "build the app", "", context)
+                    written_session = session_file.read_text(encoding="utf-8")
+                finally:
+                    if original_lang is None:
+                        os.environ.pop("CHATBRIDGE_LANG", None)
+                    else:
+                        os.environ["CHATBRIDGE_LANG"] = original_lang
+
+        self.assertEqual("ok after recovery", result["output"])
+        self.assertEqual("thread-timeout", result["session_id"])
+        self.assertEqual("thread-timeout", written_session)
+        self.assertEqual(2, len(calls))
+        self.assertEqual(["codex", "exec", "resume"], calls[1][:3])
+        self.assertIn("thread-timeout", calls[1])
+        self.assertIn("You were interrupted unexpectedly", calls[1][-1])
+        self.assertIn("10 minutes", calls[1][-1])
+        self.assertIn("idle timeout", calls[1][-1])
+        self.assertIn("build the app", calls[1][-1])
+        self.assertTrue(any("automatically resuming" in item for item in progress))
+        terminate.assert_called_once_with(9879)
 
     def test_codex_backend_does_not_timeout_while_stdout_is_active(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -596,5 +596,10 @@
   "ui.web.tasks.lazy_output": "当前为了避免卡顿，默认不自动展示完整输出。",
   "ui.web.tasks.output_placeholder": "这里会显示该任务的完整输出或错误。",
   "ui.web.tasks.select_task_first": "先在上方选中一个任务。",
-  "ui.web.tasks.switch_to_sessions": "先切换到会话模块查看任务详情。"
+  "ui.web.tasks.switch_to_sessions": "先切换到会话模块查看任务详情。",
+  "agent.codex.progress.app_server_fallback": "Codex app-server 调用失败，已回退 exec：{error}",
+  "agent.codex.progress.interruption_recovery": "Codex 执行中断，正在自动续跑...",
+  "agent.codex.progress.transient_retry": "Codex 连接中断，正在自动重试...",
+  "agent.codex.prompt.continue": "继续",
+  "agent.codex.recovery_prompt": "刚才你突然中断了。请基于当前会话继续上一轮任务，不要从头重做，也不要重复已经完成的步骤。先检查当前工作区和运行状态，再完成剩余收尾与最终回复。如果还需要执行耗时步骤，请持续输出简短进度；超过 10 分钟没有输出会被超时终止。\\n\\n上一轮用户指令：\\n{prompt}"
 }

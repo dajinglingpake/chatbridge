@@ -8,14 +8,23 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from typing import Callable
 
 from agent_backends.base import AgentBackend, AgentLike, BackendContext
 from agent_backends.shared import build_final_prompt, resolve_session_file
 from core.platform_compat import terminate_process_tree
+from localization import Localizer
 
 PROGRESS_PUSH_INTERVAL_SECONDS = 1.0
 CODEX_EXIT_TIMEOUT_SECONDS = 10
 CODEX_TRANSIENT_RETRY_ATTEMPTS = 2
+CODEX_INTERRUPTION_RECOVERY_PROMPT_KEY = "agent.codex.recovery_prompt"
+CODEX_INTERRUPTION_RECOVERY_PROMPT_FALLBACK = (
+    "刚才你突然中断了。请基于当前会话继续上一轮任务，不要从头重做，也不要重复已经完成的步骤。"
+    "先检查当前工作区和运行状态，再完成剩余收尾与最终回复。"
+    "如果还需要执行耗时步骤，请持续输出简短进度；超过 10 分钟没有输出会被超时终止。\n\n"
+    "上一轮用户指令：\n{prompt}"
+)
 TRANSIENT_ERROR_MARKERS = (
     "stream disconnected before completion",
     "error sending request",
@@ -23,6 +32,12 @@ TRANSIENT_ERROR_MARKERS = (
     "connection reset",
     "connection aborted",
     "temporarily unavailable",
+    "codex request timed out",
+    "codex stdout idle timed out",
+)
+INTERRUPTION_RECOVERY_MARKERS = (
+    "codex request timed out",
+    "codex stdout idle timed out",
 )
 
 
@@ -213,25 +228,57 @@ class CodexBackend(AgentBackend):
         self._app_server: _CodexAppServerClient | None = None
 
     def invoke(self, agent: AgentLike, prompt: str, session_name: str, context: BackendContext) -> dict[str, str]:
+        translate = Localizer().translate
         if context.codex_transport.strip().lower() == "app-server":
             try:
                 with self._app_server_lock:
                     return self._invoke_app_server(agent, prompt, session_name, context)
             except RuntimeError as exc:
                 if context.on_progress is not None:
-                    context.on_progress(f"Codex app-server 调用失败，已回退 exec：{str(exc)[:160]}")
+                    context.on_progress(
+                        _translate(
+                            translate,
+                            "agent.codex.progress.app_server_fallback",
+                            "Codex app-server 调用失败，已回退 exec：{error}",
+                            error=str(exc)[:160],
+                        )
+                    )
         last_error: RuntimeError | None = None
+        current_prompt = prompt
         for attempt in range(CODEX_TRANSIENT_RETRY_ATTEMPTS + 1):
             try:
-                return self._invoke_once(agent, prompt, session_name, context)
+                return self._invoke_once(agent, current_prompt, session_name, context)
             except RuntimeError as exc:
                 last_error = exc
                 if self._is_cancel_requested(context):
                     raise
-                if attempt >= CODEX_TRANSIENT_RETRY_ATTEMPTS or not self._is_transient_error(str(exc)):
+                message = str(exc)
+                if attempt >= CODEX_TRANSIENT_RETRY_ATTEMPTS or not self._is_transient_error(message):
                     raise
                 if context.on_progress is not None:
-                    context.on_progress("Codex 连接中断，正在自动重试...")
+                    if self._is_interruption_timeout(message):
+                        context.on_progress(
+                            _translate(
+                                translate,
+                                "agent.codex.progress.interruption_recovery",
+                                "Codex 执行中断，正在自动续跑...",
+                            )
+                        )
+                    else:
+                        context.on_progress(
+                            _translate(
+                                translate,
+                                "agent.codex.progress.transient_retry",
+                                "Codex 连接中断，正在自动重试...",
+                            )
+                        )
+                if self._is_interruption_timeout(message):
+                    current_prompt = _translate(
+                        translate,
+                        CODEX_INTERRUPTION_RECOVERY_PROMPT_KEY,
+                        CODEX_INTERRUPTION_RECOVERY_PROMPT_FALLBACK,
+                        prompt=prompt.strip() or _translate(translate, "agent.codex.prompt.continue", "继续"),
+                    )
                 time.sleep(1)
         raise last_error or RuntimeError("Codex failed")
 
@@ -481,6 +528,8 @@ class CodexBackend(AgentBackend):
         stdout_thread.start()
         timeout_seconds = max(1, int(getattr(context, "hub_task_timeout_seconds", 600) or 600))
         last_stdout_at = time.time()
+        completed_by_event = False
+        exit_error: RuntimeError | None = None
         while True:
             if self._is_cancel_requested(context):
                 terminate_process_tree(int(getattr(proc, "pid", 0) or 0))
@@ -500,6 +549,7 @@ class CodexBackend(AgentBackend):
             last_stdout_at = time.time()
             if event.get("type") == "thread.started" and event.get("thread_id"):
                 session_id = str(event["thread_id"])
+                session_file.write_text(session_id, encoding="utf-8")
             if event.get("type") == "error" and event.get("message"):
                 error_message = str(event["message"])
             if isinstance(event.get("error"), dict) and event["error"].get("message"):
@@ -525,6 +575,9 @@ class CodexBackend(AgentBackend):
                 last_progress_at = now
                 last_progress_perf_at = time.perf_counter()
                 context.on_progress(progress)
+            if self._is_task_complete_event(event):
+                completed_by_event = True
+                break
         stdout_done_at = time.perf_counter()
         if context.on_progress is not None:
             trailing_chunk, pending_delta = self._take_stream_chunk(pending_delta, force=True)
@@ -532,7 +585,13 @@ class CodexBackend(AgentBackend):
                 last_progress_perf_at = time.perf_counter()
                 context.on_progress(trailing_chunk)
         wait_started_at = time.perf_counter()
-        completed_returncode = self._wait_for_exit(proc)
+        try:
+            completed_returncode = self._wait_for_exit(proc)
+        except RuntimeError as exc:
+            if not completed_by_event:
+                raise
+            exit_error = exc
+            completed_returncode = 0
         process_exit_at = time.perf_counter()
         stdout_thread.join(timeout=1)
         stderr_thread.join(timeout=1)
@@ -543,6 +602,8 @@ class CodexBackend(AgentBackend):
             output_path.unlink(missing_ok=True)
             raise RuntimeError(error_message or f"Codex exited with code {completed_returncode}")
         if not output_path.exists():
+            if exit_error is not None:
+                raise exit_error
             raise RuntimeError("Codex did not produce an output file")
         output = output_path.read_text(encoding="utf-8").strip()
         output_path.unlink(missing_ok=True)
@@ -556,6 +617,8 @@ class CodexBackend(AgentBackend):
             "[codex-perf] exec_finalize "
             f"pid={getattr(proc, 'pid', '-')} "
             f"returncode={completed_returncode} "
+            f"completed_by_event={int(completed_by_event)} "
+            f"forced_cleanup_after_complete={int(exit_error is not None)} "
             f"progress_to_stdout_done_ms={progress_to_stdout_done_ms} "
             f"wait_exit_ms={int((process_exit_at - wait_started_at) * 1000)} "
             f"join_threads_ms={int((threads_joined_at - process_exit_at) * 1000)} "
@@ -584,6 +647,20 @@ class CodexBackend(AgentBackend):
     def _is_transient_error(message: str) -> bool:
         lowered = str(message or "").lower()
         return any(marker in lowered for marker in TRANSIENT_ERROR_MARKERS)
+
+    @staticmethod
+    def _is_interruption_timeout(message: str) -> bool:
+        lowered = str(message or "").lower()
+        return any(marker in lowered for marker in INTERRUPTION_RECOVERY_MARKERS)
+
+    @staticmethod
+    def _is_task_complete_event(event: dict[str, object]) -> bool:
+        if str(event.get("type") or "") == "turn.completed":
+            return True
+        if str(event.get("type") or "") != "event_msg":
+            return False
+        payload = event.get("payload")
+        return isinstance(payload, dict) and str(payload.get("type") or "") == "task_complete"
 
     @staticmethod
     def _is_cancel_requested(context: BackendContext) -> bool:
@@ -675,3 +752,9 @@ class CodexBackend(AgentBackend):
         if not isinstance(total_tokens, int) or not isinstance(context_window, int) or context_window <= 0:
             return None
         return max(0, min(100, round((1 - (total_tokens / context_window)) * 100)))
+
+def _translate(translate: Callable[..., str], key: str, fallback: str, **kwargs: object) -> str:
+    value = str(translate(key, **kwargs) or "")
+    if value and value != key:
+        return value
+    return fallback.format(**kwargs)

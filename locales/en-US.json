@@ -596,5 +596,10 @@
   "ui.web.tasks.lazy_output": "Full output is not shown automatically to keep the page responsive.",
   "ui.web.tasks.output_placeholder": "The task's full output or error will appear here.",
   "ui.web.tasks.select_task_first": "Select a task above first.",
-  "ui.web.tasks.switch_to_sessions": "Switch to Sessions to inspect task details."
+  "ui.web.tasks.switch_to_sessions": "Switch to Sessions to inspect task details.",
+  "agent.codex.progress.app_server_fallback": "Codex app-server failed; falling back to exec: {error}",
+  "agent.codex.progress.interruption_recovery": "Codex execution was interrupted; automatically resuming...",
+  "agent.codex.progress.transient_retry": "Codex connection interrupted; automatically retrying...",
+  "agent.codex.prompt.continue": "continue",
+  "agent.codex.recovery_prompt": "You were interrupted unexpectedly. Continue the previous task in the current session. Do not restart from scratch or repeat steps that are already complete. First inspect the current workspace and runtime state, then finish the remaining cleanup and final response. If more long-running steps are needed, keep emitting brief progress updates; if there is no output for more than 10 minutes, the task will be killed by the idle timeout.\\n\\nPrevious user instruction:\\n{prompt}"
 }
