@@ -625,6 +625,34 @@ class QQOneBotBridgeTests(unittest.TestCase):
         self.assertIn("当前设置", sent_text)
         self.assertIn("task-qq-latest", sent_text)
 
+    def test_clear_command_clears_resolved_qq_agent_session_file(self) -> None:
+        session_dir = self.temp_path / "sessions"
+        session_dir.mkdir()
+        session_file = session_dir / "qq__qq-private-10001.txt"
+        stale_file = session_dir / "qq-private-10001.jsonl"
+        session_file.write_text("codex-session-id", encoding="utf-8")
+        stale_file.write_text("old-unused-session-id", encoding="utf-8")
+
+        bridge = FakeQQBridge(self.temp_path)
+
+        with (
+            patch("qq_onebot_bridge.SESSION_DIR", session_dir),
+            patch.object(QQOneBotBridge, "_load_agents", return_value=[SimpleNamespace(id="qq", backend="codex", session_file=str(session_dir / "qq.txt"))]),
+        ):
+            bridge.handle_event(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "user_id": 10001,
+                    "message": "/clear",
+                }
+            )
+
+        self.assertEqual("", session_file.read_text(encoding="utf-8"))
+        self.assertEqual("old-unused-session-id", stale_file.read_text(encoding="utf-8"))
+        self.assertEqual("send_private_msg", bridge.api_calls[-1][0])
+        self.assertIn("已清空当前 Agent 会话", bridge.api_calls[-1][1]["message"])
+
     def test_restart_command_schedules_qq_stack_restart(self) -> None:
         bridge = FakeQQBridge(self.temp_path)
         with patch("qq_onebot_bridge.schedule_named_action", return_value=SimpleNamespace(message="scheduled qq stack")) as mocked_schedule:

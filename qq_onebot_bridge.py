@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from agent_backends.shared import resolve_session_file
 from agent_hub import HubConfig
 from bridge_config import APP_DIR, BridgeConfig, normalize_backend
 from core.bridge_command_catalog import QQ_HELP_MESSAGE_KEYS
@@ -1297,11 +1298,19 @@ class QQOneBotBridge:
         self.agent_id = agent_id
 
     def _clear_current_agent_session(self, sender_key: str, current_session: str) -> str:
-        del sender_key
-        session_file = SESSION_DIR / f"{_safe_path_part(current_session)}.jsonl"
-        if session_file.exists():
-            session_file.write_text("", encoding="utf-8")
-        return f"Cleared current agent session: {current_session}"
+        agent_id = self._resolve_message_agent_id(sender_key)
+        agent = next((item for item in self._load_agents() if item.id == agent_id), None)
+        if agent is None:
+            return self._t("bridge.agent.not_found", agent=agent_id)
+
+        session_name = current_session or "default"
+        session_file = resolve_session_file(agent, session_name, SESSION_DIR)
+        backend = normalize_backend(getattr(agent, "backend", "") or self.config.default_backend)
+        if not session_file.exists() or not session_file.read_text(encoding="utf-8").strip():
+            return self._t("bridge.session.clear.empty", session=session_name, backend=backend)
+
+        session_file.write_text("", encoding="utf-8")
+        return self._t("bridge.session.clear", session=session_name, backend=backend)
 
     def _save_pending_tasks(self) -> None:
         self.pending_task_store.save(self.pending_tasks)
