@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from agent_backends.base import BackendContext, McpServerConfig
-from agent_backends.codex_backend import CodexBackend
+from agent_backends.codex_backend import CodexBackend, _CodexAppServerClient
 from agent_hub import AgentConfig, HubConfig, MultiCodexHub
 from core.state_models import HubTask
 
@@ -32,7 +32,208 @@ class RecordingBackend:
         self.last_prompt = prompt
         return {"output": "ok", "session_id": "mgr-session-1"}
 
+
+class RecordingCodexThreadBackend(RecordingBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.last_list_context = None
+        self.last_read_context = None
+        self.last_archived = None
+
+    def list_app_server_threads(self, context, *, limit: int, cursor: str, search_term: str, cwd: str, archived: bool | None = False) -> dict[str, object]:
+        self.last_list_context = context
+        self.last_archived = archived
+        return {
+            "threads": [
+                {
+                    "id": "thread-1",
+                    "title": "真实会话",
+                    "cwd": "I:/AI/chatbridge",
+                    "preview": "继续真实任务",
+                }
+            ],
+            "next_cursor": "",
+            "backwards_cursor": "",
+        }
+
+    def read_app_server_thread(self, context, thread_id: str) -> dict[str, object]:
+        self.last_read_context = context
+        return {
+            "id": thread_id,
+            "title": "真实会话",
+            "messages": [{"role": "reasoning", "text": "思考摘要"}],
+        }
+
 class McpServerInjectionTests(unittest.TestCase):
+    def test_codex_app_server_streams_reasoning_separately_from_final_answer(self) -> None:
+        progress: list[str] = []
+        client = _CodexAppServerClient("codex", creationflags=0, start_new_session=False, slim_exec=True)
+        client._messages.put(
+            {
+                "method": "item/reasoning/summaryTextDelta",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": "reasoning-1",
+                    "summaryIndex": 0,
+                    "delta": "先检查项目结构",
+                },
+            }
+        )
+        client._messages.put(
+            {
+                "method": "item/agentMessage/delta",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": "answer-1",
+                    "delta": "最终回答片段",
+                },
+            }
+        )
+        client._messages.put(
+            {
+                "method": "thread/tokenUsage/updated",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "tokenUsage": {
+                        "total": {"totalTokens": 25, "inputTokens": 20, "cachedInputTokens": 0, "outputTokens": 5, "reasoningOutputTokens": 0},
+                        "last": {"totalTokens": 25, "inputTokens": 20, "cachedInputTokens": 0, "outputTokens": 5, "reasoningOutputTokens": 0},
+                        "modelContextWindow": 100,
+                    },
+                },
+            }
+        )
+        client._messages.put(
+            {
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "completedAtMs": 1,
+                    "item": {"id": "answer-1", "type": "agentMessage", "text": "最终回答"},
+                },
+            }
+        )
+        client._messages.put(
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turn": {"id": "turn-1", "status": "completed", "items": []},
+                },
+            }
+        )
+
+        output, context_left_percent = client.wait_for_turn(
+            "thread-1",
+            "turn-1",
+            timeout=1,
+            on_progress=progress.append,
+            reasoning_progress_label=lambda text: f"思考：{text}",
+        )
+
+        self.assertEqual("最终回答", output)
+        self.assertEqual(75, context_left_percent)
+        self.assertEqual(["思考：先检查项目结构"], progress)
+        self.assertNotIn("最终回答片段", progress[0])
+
+    def test_codex_app_server_normalizes_threads_and_reasoning_history(self) -> None:
+        backend = CodexBackend()
+        thread = {
+            "id": "thread-1",
+            "sessionId": "thread-1",
+            "preview": "继续真实任务",
+            "cwd": "I:/AI/chatbridge",
+            "source": "vscode",
+            "modelProvider": "openai",
+            "createdAt": 1783076542,
+            "updatedAt": 1783161563,
+            "status": {"type": "notLoaded"},
+            "gitInfo": {"branch": "main", "sha": "abc123"},
+            "turns": [
+                {
+                    "id": "turn-1",
+                    "items": [
+                        {"type": "userMessage", "id": "item-user", "content": [{"type": "text", "text": "用户问题"}]},
+                        {"type": "reasoning", "id": "item-reasoning", "summary": ["先检查状态"]},
+                        {
+                            "type": "tool_call",
+                            "id": "item-tool",
+                            "callId": "call-1",
+                            "name": "shell",
+                            "status": "completed",
+                            "detail": {"type": "shell", "command": "pytest", "log": "ok"},
+                            "completedAtMs": 1783161564,
+                        },
+                        {
+                            "type": "todo",
+                            "id": "item-todo",
+                            "items": [{"text": "修复滚动", "completed": True}],
+                            "completedAtMs": 1783161565,
+                        },
+                        {
+                            "type": "compaction",
+                            "id": "item-compaction",
+                            "status": "completed",
+                            "trigger": "auto",
+                            "preTokens": 12345,
+                            "completedAtMs": 1783161566,
+                        },
+                        {"type": "agentMessage", "id": "item-answer", "text": "最终回答", "phase": "final_answer"},
+                    ],
+                }
+            ],
+        }
+
+        normalized = backend._normalize_app_server_thread(thread)
+        messages = backend._normalize_app_server_thread_messages(thread)
+
+        self.assertEqual("thread-1", normalized["id"])
+        self.assertEqual("继续真实任务", normalized["title"])
+        self.assertEqual("I:/AI/chatbridge", normalized["cwd"])
+        self.assertEqual("main", normalized["branch"])
+        self.assertEqual(["user", "reasoning", "activity", "activity", "activity", "assistant"], [message["role"] for message in messages])
+        self.assertEqual(["用户问题", "先检查状态", "shell: pytest", "[x] 修复滚动", "completed", "最终回答"], [message["text"] for message in messages])
+        self.assertEqual([1, 1, 1, 1, 1, 1], [message["turn_order"] for message in messages])
+        self.assertEqual([1, 2, 3, 4, 5, 6], [message["item_order"] for message in messages])
+        activities = [message["activity"] for message in messages if message["role"] == "activity"]
+        self.assertEqual(["codex_tool_call", "codex_todo", "codex_compaction"], [activity["event"] for activity in activities])
+        self.assertEqual(messages[2]["at"], activities[0]["at"])
+        self.assertEqual("shell", activities[0]["metadata"]["name"])
+        self.assertEqual("auto", activities[2]["metadata"]["trigger"])
+
+    def test_hub_exposes_codex_threads_through_app_server_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            workdir = temp_path / "workspace"
+            session_file = temp_path / "sessions" / "main.txt"
+            workdir.mkdir(parents=True, exist_ok=True)
+            session_file.parent.mkdir(parents=True, exist_ok=True)
+            config = HubConfig(
+                codex_command="codex.cmd",
+                claude_command="claude",
+                opencode_command="opencode",
+                agents=[AgentConfig("main", "Main", str(workdir), str(session_file), backend="codex")],
+            )
+            backend = RecordingCodexThreadBackend()
+            with (
+                patch("agent_hub.STATE_PATH", temp_path / "state" / "agent_hub_state.json"),
+                patch("agent_hub.discover_external_agent_processes", return_value=[]),
+            ):
+                hub = MultiCodexHub(config)
+                hub.backend_registry["codex"] = backend
+
+                listed = hub.list_codex_threads(limit=10, archived=True)
+                read = hub.read_codex_thread("thread-1")
+
+        self.assertEqual("thread-1", listed["threads"][0]["id"])
+        self.assertEqual("thread-1", read["id"])
+        self.assertEqual("app-server", backend.last_list_context.codex_transport)
+        self.assertIs(True, backend.last_archived)
+        self.assertEqual("codex.cmd", backend.last_read_context.codex_command)
+
     def test_wechat_task_injects_mcp_server_into_backend_context(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -79,8 +280,9 @@ class McpServerInjectionTests(unittest.TestCase):
             self.assertEqual("Main", backend.last_agent.name)
             self.assertEqual("main", backend.last_agent.id)
             self.assertTrue(backend.last_context.codex_slim_exec)
+            self.assertEqual("exec", backend.last_context.codex_transport)
 
-    def test_hub_passes_codex_slim_exec_setting_to_backend(self) -> None:
+    def test_hub_passes_codex_slim_exec_setting_to_web_backend(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             workdir = temp_path / "workspace"
@@ -107,7 +309,7 @@ class McpServerInjectionTests(unittest.TestCase):
                     agent_id="main",
                     agent_name="Main",
                     backend="codex",
-                    source="cli",
+                    source="stream-web",
                     sender_id="",
                     prompt="hello",
                     status="queued",
@@ -119,6 +321,120 @@ class McpServerInjectionTests(unittest.TestCase):
 
             self.assertFalse(backend.last_context.codex_slim_exec)
             self.assertEqual("app-server", backend.last_context.codex_transport)
+
+    def test_hub_forces_non_web_codex_tasks_to_exec_transport(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            workdir = temp_path / "workspace"
+            session_file = temp_path / "sessions" / "main.txt"
+            workdir.mkdir(parents=True, exist_ok=True)
+            session_file.parent.mkdir(parents=True, exist_ok=True)
+            config = HubConfig(
+                codex_command="codex",
+                claude_command="claude",
+                opencode_command="opencode",
+                codex_transport="app-server",
+                agents=[AgentConfig("main", "Main", str(workdir), str(session_file), backend="codex")],
+            )
+            backend = RecordingBackend()
+            with (
+                patch("agent_hub.STATE_PATH", temp_path / "state" / "agent_hub_state.json"),
+                patch("agent_hub.discover_external_agent_processes", return_value=[]),
+            ):
+                hub = MultiCodexHub(config)
+                hub.backend_registry["codex"] = backend
+                for source in ("wechat", "qq", "qq-web", "cli"):
+                    task = HubTask(
+                        id=f"task-{source}",
+                        agent_id="main",
+                        agent_name="Main",
+                        backend="codex",
+                        source=source,
+                        sender_id="sender-test",
+                        prompt="hello",
+                        status="queued",
+                        created_at="2026-04-20T20:00:00",
+                        session_name="default",
+                    )
+                    hub._invoke_backend(config.agents[0], task)
+                    self.assertEqual("exec", backend.last_context.codex_transport, source)
+
+    def test_hub_allows_desktop_codex_tasks_to_use_app_server_transport(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            workdir = temp_path / "workspace"
+            session_file = temp_path / "sessions" / "main.txt"
+            workdir.mkdir(parents=True, exist_ok=True)
+            session_file.parent.mkdir(parents=True, exist_ok=True)
+            config = HubConfig(
+                codex_command="codex",
+                claude_command="claude",
+                opencode_command="opencode",
+                codex_transport="app-server",
+                agents=[AgentConfig("main", "Main", str(workdir), str(session_file), backend="codex")],
+            )
+            backend = RecordingBackend()
+            with (
+                patch("agent_hub.STATE_PATH", temp_path / "state" / "agent_hub_state.json"),
+                patch("agent_hub.discover_external_agent_processes", return_value=[]),
+            ):
+                hub = MultiCodexHub(config)
+                hub.backend_registry["codex"] = backend
+                task = HubTask(
+                    id="task-desktop",
+                    agent_id="main",
+                    agent_name="Main",
+                    backend="codex",
+                    source="desktop",
+                    sender_id="sender-test",
+                    prompt="hello",
+                    status="queued",
+                    created_at="2026-04-20T20:00:00",
+                    session_name="default",
+                )
+
+                hub._invoke_backend(config.agents[0], task)
+
+            self.assertEqual("app-server", backend.last_context.codex_transport)
+
+    def test_hub_passes_selected_codex_thread_id_to_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            workdir = temp_path / "workspace"
+            session_file = temp_path / "sessions" / "main.txt"
+            workdir.mkdir(parents=True, exist_ok=True)
+            session_file.parent.mkdir(parents=True, exist_ok=True)
+            config = HubConfig(
+                codex_command="codex",
+                claude_command="claude",
+                opencode_command="opencode",
+                codex_transport="app-server",
+                agents=[AgentConfig("main", "Main", str(workdir), str(session_file), backend="codex")],
+            )
+            backend = RecordingBackend()
+            with (
+                patch("agent_hub.STATE_PATH", temp_path / "state" / "agent_hub_state.json"),
+                patch("agent_hub.discover_external_agent_processes", return_value=[]),
+            ):
+                hub = MultiCodexHub(config)
+                hub.backend_registry["codex"] = backend
+                task = HubTask(
+                    id="task-resume-thread-001",
+                    agent_id="main",
+                    agent_name="Main",
+                    backend="codex",
+                    source="stream-web",
+                    sender_id="",
+                    prompt="继续",
+                    status="queued",
+                    created_at="2026-04-20T20:00:00",
+                    session_name="codex-thread-1",
+                    session_id="thread-1",
+                )
+
+                hub._invoke_backend(config.agents[0], task)
+
+        self.assertEqual("thread-1", backend.last_context.codex_thread_id)
 
     def test_wechat_task_passes_bridge_state_overrides_to_mcp(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -243,6 +559,7 @@ class McpServerInjectionTests(unittest.TestCase):
             self.assertIn("group", backend.last_context.mcp_server.args)
             self.assertIn("--qq-group-id", backend.last_context.mcp_server.args)
             self.assertIn("811708184", backend.last_context.mcp_server.args)
+            self.assertEqual("exec", backend.last_context.codex_transport)
 
     def test_qq_private_non_admin_does_not_mount_history_mcp(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -281,6 +598,7 @@ class McpServerInjectionTests(unittest.TestCase):
                 hub._invoke_backend(config.agents[0], task)
 
             self.assertIsNone(backend.last_context.mcp_server)
+            self.assertEqual("exec", backend.last_context.codex_transport)
 
     def test_qq_private_admin_injects_admin_history_mcp(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -324,6 +642,7 @@ class McpServerInjectionTests(unittest.TestCase):
             self.assertIn("admin", backend.last_context.mcp_server.args)
             self.assertIn("--qq-admin-user-id", backend.last_context.mcp_server.args)
             self.assertIn("10001", backend.last_context.mcp_server.args)
+            self.assertEqual("exec", backend.last_context.codex_transport)
 
 
 class McpServerCodexBackendTests(unittest.TestCase):

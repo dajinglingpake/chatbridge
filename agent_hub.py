@@ -43,6 +43,7 @@ CONFIG_PATH = APP_DIR / "config" / "agent_hub.json"
 STATE_PATH = STATE_DIR / "agent_hub_state.json"
 SUPPORTED_BACKENDS = set(supported_backend_keys())
 WECHAT_SOURCE = "wechat"
+WEB_TASK_SOURCES = {"web", "stream-web", "mobile-web", "desktop"}
 MCP_SERVER_NAME = "operations"
 QQ_HISTORY_MCP_SERVER_NAME = "qq_history"
 MCP_SERVER_PATH = APP_DIR / "tools" / "operations_server.py"
@@ -95,6 +96,11 @@ def _bool_value(value: object, default: bool = False) -> bool:
     if text in {"0", "false", "no", "off"}:
         return False
     return default
+
+def _optional_bool_value(value: object) -> bool | None:
+    if value is None:
+        return None
+    return _bool_value(value, False)
 
 @dataclass
 class AgentConfig:
@@ -167,7 +173,7 @@ class HubConfig:
     claude_command: str = field(default_factory=lambda: resolve_command("claude"))
     opencode_command: str = field(default_factory=lambda: resolve_command("opencode"))
     codex_slim_exec: bool = True
-    codex_transport: str = "exec"
+    codex_transport: str = "app-server"
     agents: list[AgentConfig] = field(default_factory=list)
 
     @classmethod
@@ -204,8 +210,8 @@ class HubConfig:
         raw["claude_command"] = resolve_command(str(raw.get("claude_command") or "claude"))
         raw["opencode_command"] = resolve_command(str(raw.get("opencode_command") or "opencode"))
         raw["codex_slim_exec"] = bool(raw.get("codex_slim_exec", True))
-        raw_transport = str(raw.get("codex_transport") or "exec").strip().lower()
-        raw["codex_transport"] = raw_transport if raw_transport in {"exec", "app-server"} else "exec"
+        raw_transport = str(raw.get("codex_transport") or "app-server").strip().lower()
+        raw["codex_transport"] = raw_transport if raw_transport in {"exec", "app-server"} else "app-server"
         if not raw["agents"]:
             raw["agents"] = [
                 _default_agent(DEFAULT_MAIN_AGENT_ID),
@@ -510,6 +516,7 @@ class MultiCodexHub:
         bridge_event_log_path: str = "",
         context_token: str = "",
         codex_search_enabled: bool = False,
+        session_id: str = "",
     ) -> dict[str, Any]:
         started_at = time.perf_counter()
         prompt = (prompt or "").strip()
@@ -529,6 +536,7 @@ class MultiCodexHub:
             status="queued",
             created_at=now_iso(),
             session_name=session_name.strip(),
+            session_id=session_id.strip(),
             workdir=workdir.strip(),
             model=model.strip(),
             reasoning_effort=reasoning_effort.strip(),
@@ -801,10 +809,15 @@ class MultiCodexHub:
                 codex_search_enabled=bool(task.codex_search_enabled),
                 images=list(task.images),
                 codex_slim_exec=self.config.codex_slim_exec,
-                codex_transport=self.config.codex_transport,
+                codex_transport=self._codex_transport_for_task(task),
+                codex_thread_id=task.session_id.strip(),
                 hub_task_timeout_seconds=600,
             ),
         )
+
+    def _codex_transport_for_task(self, task: HubTask) -> str:
+        source = str(task.source or "").strip().lower()
+        return self.config.codex_transport if source in WEB_TASK_SOURCES else "exec"
 
     def _update_task_progress(self, task_id: str, text: str) -> None:
         progress_text = str(text or "").strip()
@@ -1007,6 +1020,7 @@ class MultiCodexHub:
                         str(payload.get("bridge_event_log_path") or ""),
                         str(payload.get("context_token") or ""),
                         _bool_value(payload.get("codex_search_enabled"), False),
+                        str(payload.get("session_id") or ""),
                     ),
                 },
             )
@@ -1043,6 +1057,22 @@ class MultiCodexHub:
                     )
                 },
             )
+        if action == "codex_threads":
+            return IpcResponseEnvelope(
+                ok=True,
+                payload=self.list_codex_threads(
+                    limit=int(payload.get("limit") or 50),
+                    cursor=str(payload.get("cursor") or ""),
+                    search_term=str(payload.get("search_term") or ""),
+                    cwd=str(payload.get("cwd") or ""),
+                    archived=_optional_bool_value(payload.get("archived")),
+                ),
+            )
+        if action == "codex_thread_read":
+            return IpcResponseEnvelope(
+                ok=True,
+                payload={"thread": self.read_codex_thread(str(payload.get("thread_id") or ""))},
+            )
         if action == "task_context_left":
             return IpcResponseEnvelope(
                 ok=True,
@@ -1078,6 +1108,46 @@ class MultiCodexHub:
                 },
             )
         raise ValueError(f"unsupported action: {action}")
+
+    def _codex_backend_context(self) -> BackendContext:
+        return BackendContext(
+            codex_command=self.config.codex_command,
+            claude_command=self.config.claude_command,
+            opencode_command=self.config.opencode_command,
+            session_dir=SESSION_DIR,
+            creationflags=creationflags(),
+            start_new_session=not IS_WINDOWS,
+            codex_slim_exec=self.config.codex_slim_exec,
+            codex_transport="app-server",
+            hub_task_timeout_seconds=600,
+        )
+
+    def list_codex_threads(
+        self,
+        *,
+        limit: int = 50,
+        cursor: str = "",
+        search_term: str = "",
+        cwd: str = "",
+        archived: bool | None = False,
+    ) -> dict[str, object]:
+        backend = self.backend_registry.get("codex")
+        if backend is None or not hasattr(backend, "list_app_server_threads"):
+            raise RuntimeError("codex app-server backend is not available")
+        return backend.list_app_server_threads(
+            self._codex_backend_context(),
+            limit=limit,
+            cursor=cursor,
+            search_term=search_term,
+            cwd=cwd,
+            archived=archived,
+        )
+
+    def read_codex_thread(self, thread_id: str) -> dict[str, object]:
+        backend = self.backend_registry.get("codex")
+        if backend is None or not hasattr(backend, "read_app_server_thread"):
+            raise RuntimeError("codex app-server backend is not available")
+        return backend.read_app_server_thread(self._codex_backend_context(), thread_id)
 
     def render_codex_status(self, agent_id: str, session_name: str, workdir: str = "") -> str:
         agent = self._find_agent(agent_id)

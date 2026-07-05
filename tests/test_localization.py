@@ -13,6 +13,10 @@ class LocalizationTests(unittest.TestCase):
         self.assertIn("Current system notices\nService lifecycle: on", rendered)
         self.assertNotIn("\\n", rendered)
 
+    def test_unknown_after_restart_status_is_localized_for_stream_ui(self) -> None:
+        self.assertEqual("Unknown after restart", Localizer("en-US").translate("bridge.task.status.unknown_after_restart"))
+        self.assertEqual("重启后未知", Localizer("zh-CN").translate("bridge.task.status.unknown_after_restart"))
+
 
     def test_media_prompt_uses_localizer(self) -> None:
         localizer = Localizer("en-US")

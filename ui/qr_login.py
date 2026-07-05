@@ -100,13 +100,13 @@ def install_qr_login_dialog(
         if on_open is not None:
             on_open()
         dialog = ui.dialog().props("persistent")
-        with dialog, ui.card().classes("cb-card cb-hero w-[30rem] max-w-full p-6"):
+        with dialog, ui.card().classes("cb-card cb-hero w-[30rem] max-w-[calc(100vw-1rem)] p-6"):
             with ui.column().classes("w-full gap-3"):
                 ui.label("WeChat Login").classes("cb-kicker")
                 ui.label(_tr(t, "ui.qr.title", "扫码登录微信")).classes("text-2xl font-black text-white")
                 status = ui.label(_tr(t, "ui.qr.loading", "正在获取二维码...")).classes("cb-chip cb-chip-warn w-fit")
-                with ui.element("div").classes("cb-panel w-full p-4 flex justify-center"):
-                    qr_image = ui.image("").classes("w-72 h-72 self-center")
+                with ui.element("div").classes("cb-panel w-full min-w-0 p-4 flex justify-center"):
+                    qr_image = ui.image("").classes("w-full max-w-72 aspect-square h-auto self-center")
                 hint = ui.label(_tr(t, "ui.qr.initial_hint", "请使用微信扫码并在手机上确认授权。")).classes("text-sm text-slate-300")
                 with ui.row().classes("gap-2 flex-wrap"):
                     retry_button = ui.button(_tr(t, "ui.web.action.reload_qr", "重新获取二维码"), icon="refresh").props("outline color=white")

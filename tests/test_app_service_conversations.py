@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from bridge_config import BridgeConfig
@@ -104,6 +105,106 @@ class AppServiceConversationTests(unittest.TestCase):
             payload = json.loads(conversations_path.read_text(encoding="utf-8"))
             self.assertNotIn("sender-a", payload)
             self.assertIn("sender-b", payload)
+
+    def test_switch_sender_current_session_updates_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            conversations_path = Path(temp_dir) / "weixin_conversations.json"
+            conversations_path.write_text(
+                json.dumps(
+                    {
+                        "qq:private:10001": {
+                            "current_session": "default",
+                            "sessions": {
+                                "default": {"backend": "codex"},
+                            },
+                        }
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                patch.object(app_service, "BRIDGE_CONVERSATIONS_PATH", conversations_path),
+                patch.object(app_service.BridgeConfig, "load", return_value=_bridge_config(default_backend="codex")),
+            ):
+                result = app_service.switch_sender_current_session("qq:private:10001", "ui-fix")
+
+            self.assertTrue(result.ok)
+            payload = json.loads(conversations_path.read_text(encoding="utf-8"))
+            binding = payload["qq:private:10001"]
+            self.assertEqual("ui-fix", binding["current_session"])
+            self.assertEqual("ui-fix", binding["last_regular_session"])
+            self.assertIn("ui-fix", binding["sessions"])
+
+    def test_cancel_hub_task_sends_cancel_request(self) -> None:
+        requests: list[tuple[str, dict[str, object]]] = []
+
+        def create_request(action: str, payload: dict[str, object]) -> str:
+            requests.append((action, payload))
+            return "request-cancel"
+
+        response = SimpleNamespace(
+            ok=True,
+            error="",
+            payload={
+                "task": {
+                    "id": "task-001",
+                    "agent_id": "main",
+                    "status": "canceled",
+                    "session_name": "focus",
+                }
+            },
+        )
+
+        with (
+            patch.object(app_service, "create_request", side_effect=create_request),
+            patch.object(app_service, "wait_for_response", return_value=response) as wait_for_response,
+        ):
+            result = app_service.cancel_hub_task(" task-001 ")
+
+        self.assertTrue(result.ok)
+        self.assertEqual([("cancel_task", {"task_id": "task-001"})], requests)
+        wait_for_response.assert_called_once_with("request-cancel", timeout_seconds=5)
+        self.assertIn("task-001", result.message)
+        self.assertIn("focus", result.message)
+
+    def test_submit_hub_task_includes_images(self) -> None:
+        requests: list[tuple[str, dict[str, object]]] = []
+
+        def create_request(action: str, payload: dict[str, object]) -> str:
+            requests.append((action, payload))
+            return "request-submit"
+
+        response = SimpleNamespace(
+            ok=True,
+            error="",
+            payload={
+                "task": {
+                    "id": "task-image-001",
+                    "agent_id": "main",
+                    "status": "queued",
+                    "session_name": "focus",
+                }
+            },
+        )
+
+        with (
+            patch.object(app_service, "create_request", side_effect=create_request),
+            patch.object(app_service, "wait_for_response", return_value=response),
+            patch.object(app_service, "broadcast_bridge_notice_by_kind", return_value=_notice_result()),
+        ):
+            result = app_service.submit_hub_task(
+                agent_id="main",
+                prompt="inspect image",
+                session_name="focus",
+                images=[" C:/tmp/a.png ", "", "C:/tmp/b.jpg"],
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual("submit_task", requests[0][0])
+        self.assertEqual(["C:/tmp/a.png", "C:/tmp/b.jpg"], requests[0][1]["images"])
 
 
 if __name__ == "__main__":

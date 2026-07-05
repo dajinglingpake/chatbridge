@@ -111,9 +111,39 @@ class AppServiceTests(unittest.TestCase):
         self.assertIn("Hub restart prepared 1 active task(s)", result.message)
         self.assertIn("Hub restarted", result.message)
 
-    def test_schedule_named_action_rejects_unknown_action(self) -> None:
-        result = schedule_named_action("restart-hub")
-        self.assertEqual(ServiceResult(ok=False, message="未知操作：restart-hub"), result)
+    def test_schedule_named_action_accepts_restart_hub(self) -> None:
+        proc = MagicMock()
+        proc.pid = 4321
+        with (
+            patch("core.app_service.subprocess.Popen", return_value=proc),
+            patch("core.app_service.get_runtime_snapshot") as mocked_snapshot,
+            patch("core.app_service.save_json"),
+            patch("core.app_service._append_action_log"),
+        ):
+            mocked_snapshot.return_value = MagicMock(hub_pid=101, bridge_pid=202)
+            result = schedule_named_action("restart-hub")
+
+        self.assertTrue(result.ok)
+
+    def test_restart_hub_action_prepares_tasks_without_notifying_weixin(self) -> None:
+        with (
+            patch("core.app_service.restart_hub", return_value=["Hub stopped", "Hub started"]) as mocked_restart,
+            patch("core.app_service.create_request", return_value="req-prepare") as mocked_create,
+            patch("core.app_service.wait_for_response") as mocked_wait,
+            patch("core.app_service.broadcast_bridge_notice_by_kind") as mocked_notify,
+        ):
+            mocked_wait.return_value = SimpleNamespace(ok=True, error="", payload={"interrupted_count": 0})
+            result = run_named_action("restart-hub")
+
+        self.assertTrue(result.ok)
+        mocked_restart.assert_called_once()
+        mocked_create.assert_called_once_with(
+            "prepare_restart",
+            {"reason": "Hub restart requested by service action: restart-hub"},
+        )
+        self.assertIn("Hub restart prepared 0 active task(s)", result.message)
+        self.assertIn("Hub started", result.message)
+        mocked_notify.assert_not_called()
 
     def test_stop_action_sends_notice_before_stopping_services(self) -> None:
         events: list[str] = []

@@ -319,11 +319,14 @@ def stop_external_agent_process(pid: int) -> str:
     return f"已结束外部 Agent 进程 PID {pid}"
 
 
-def get_managed_status(name: str, script_path: Path, pid_file: Path) -> ManagedStatus:
+def get_managed_status(name: str, script_path: Path, pid_file: Path, *, discover: bool = True) -> ManagedStatus:
     pid = _read_pid_file(pid_file)
     proc = _get_process(pid) if pid else None
     if proc and str(script_path) in _cmdline_text(proc):
         return ManagedStatus(name=name, script_path=script_path, pid_file=pid_file, running=True, pid=proc.pid)
+
+    if not discover:
+        return ManagedStatus(name=name, script_path=script_path, pid_file=pid_file, running=False, pid=None)
 
     discovered = _find_process_by_script(script_path)
     if discovered:
@@ -334,11 +337,14 @@ def get_managed_status(name: str, script_path: Path, pid_file: Path) -> ManagedS
     return ManagedStatus(name=name, script_path=script_path, pid_file=pid_file, running=False, pid=None)
 
 
-def get_onebot_runtime_status() -> ManagedStatus:
+def get_onebot_runtime_status(*, discover: bool = True) -> ManagedStatus:
     pid = _read_pid_file(ONEBOT_RUNTIME_PID_FILE)
     proc = _get_process(pid) if pid else None
     if proc and any(marker in _cmdline_text(proc).lower() for marker in ONEBOT_RUNTIME_PROCESS_MARKERS):
         return ManagedStatus(name="QQ OneBot Runtime", script_path=Path("OneBot"), pid_file=ONEBOT_RUNTIME_PID_FILE, running=True, pid=proc.pid)
+
+    if not discover:
+        return ManagedStatus(name="QQ OneBot Runtime", script_path=Path("OneBot"), pid_file=ONEBOT_RUNTIME_PID_FILE, running=False, pid=None)
 
     discovered = _find_processes_by_markers(ONEBOT_RUNTIME_PROCESS_MARKERS)
     if discovered:
@@ -794,6 +800,14 @@ def restart_bridge() -> list[str]:
     return [stop_bridge(), start_bridge(env=env)]
 
 
+def restart_hub() -> list[str]:
+    env = _managed_subprocess_env()
+    return [
+        stop_managed("Hub", HUB_SCRIPT, HUB_PID_FILE),
+        start_managed("Hub", HUB_SCRIPT, HUB_PID_FILE, HUB_OUT_LOG, HUB_ERR_LOG, env=env),
+    ]
+
+
 def restart_qq_bridge() -> list[str]:
     env = _managed_subprocess_env()
     return [stop_bridge(), stop_qq_bridge(), start_qq_bridge(env=env)]
@@ -876,12 +890,17 @@ def read_json(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def get_runtime_snapshot(*, include_agent_processes: bool = True) -> RuntimeSnapshot:
-    hub = get_managed_status("Hub", HUB_SCRIPT, HUB_PID_FILE)
-    bridge = get_managed_status("Bridge", BRIDGE_SCRIPT, BRIDGE_PID_FILE)
-    qq_bridge = get_managed_status("QQ Bridge", QQ_BRIDGE_SCRIPT, QQ_BRIDGE_PID_FILE)
-    onebot_runtime = get_onebot_runtime_status()
-    qq_logged_in, qq_user_id, qq_nickname = get_qq_login_status() if onebot_runtime.running else (False, "", "")
+def get_runtime_snapshot(
+    *,
+    include_agent_processes: bool = True,
+    include_qq_login_status: bool = True,
+    discover_missing_processes: bool = True,
+) -> RuntimeSnapshot:
+    hub = get_managed_status("Hub", HUB_SCRIPT, HUB_PID_FILE, discover=discover_missing_processes)
+    bridge = get_managed_status("Bridge", BRIDGE_SCRIPT, BRIDGE_PID_FILE, discover=discover_missing_processes)
+    qq_bridge = get_managed_status("QQ Bridge", QQ_BRIDGE_SCRIPT, QQ_BRIDGE_PID_FILE, discover=discover_missing_processes)
+    onebot_runtime = get_onebot_runtime_status(discover=discover_missing_processes)
+    qq_logged_in, qq_user_id, qq_nickname = get_qq_login_status() if include_qq_login_status and onebot_runtime.running else (False, "", "")
     return RuntimeSnapshot(
         hub_running=hub.running,
         bridge_running=bridge.running,

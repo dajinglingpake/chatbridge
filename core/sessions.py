@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Callable
 
@@ -24,6 +25,14 @@ class SessionDetail:
 
 
 @dataclass
+class SessionRowsPage:
+    rows: list[SessionRow]
+    page: int
+    total_count: int
+    total_pages: int
+    session_names: list[str]
+
+@dataclass
 class SessionAggregate:
     last_task: HubTask
     queue_size: int = 0
@@ -33,6 +42,7 @@ class SessionAggregate:
 
 
 _SESSION_ROWS_CACHE: dict[tuple, list[SessionRow]] = {}
+_SESSION_ROWS_PAGE_CACHE: dict[tuple, tuple[list[SessionRow], list[str]]] = {}
 
 
 def session_name_from_file(agent_id: str, session_file: Path) -> str:
@@ -108,12 +118,25 @@ def build_session_dir_signature(session_dir: Path) -> tuple:
     )
 
 
-def build_session_rows(hub_state: HubStateSnapshot, session_dir: Path) -> list[SessionRow]:
-    cache_key = (build_hub_signature(hub_state), build_session_dir_signature(session_dir))
-    cached_rows = _SESSION_ROWS_CACHE.get(cache_key)
-    if cached_rows is not None:
-        return cached_rows
+def _session_rows_page_cache_key(
+    hub_state: HubStateSnapshot,
+    session_dir: Path,
+    *,
+    include_session_files: bool,
+) -> tuple:
+    return (
+        id(hub_state),
+        str(getattr(hub_state, "generated_at", "") or ""),
+        include_session_files,
+        build_session_dir_signature(session_dir) if include_session_files else (),
+    )
 
+def _build_session_rows_index(
+    hub_state: HubStateSnapshot,
+    session_dir: Path,
+    *,
+    include_session_files: bool,
+) -> tuple[list[SessionRow], list[str]]:
     tasks = _hub_tasks(hub_state)
     session_names: set[str] = {"default"}
     aggregates: dict[str, SessionAggregate] = {}
@@ -133,12 +156,13 @@ def build_session_rows(hub_state: HubStateSnapshot, session_dir: Path) -> list[S
             aggregate.success_count += 1
         elif status == "failed":
             aggregate.failure_count += 1
-    if session_dir.exists():
+    if include_session_files and session_dir.exists():
         for session_file in session_dir.glob("*.txt"):
             session_names.add(session_name_from_file("", session_file))
 
+    sorted_names = sorted(session_names)
     rows: list[SessionRow] = []
-    for session_name in sorted(session_names):
+    for session_name in sorted_names:
         aggregate = aggregates.get(session_name)
         if aggregate is None:
             queue_size = 0
@@ -162,10 +186,57 @@ def build_session_rows(hub_state: HubStateSnapshot, session_dir: Path) -> list[S
                 failure_count=failure_count,
             )
         )
+    return rows, sorted_names
+
+def build_session_rows(hub_state: HubStateSnapshot, session_dir: Path) -> list[SessionRow]:
+    cache_key = (build_hub_signature(hub_state), build_session_dir_signature(session_dir))
+    cached_rows = _SESSION_ROWS_CACHE.get(cache_key)
+    if cached_rows is not None:
+        return cached_rows
+
+    rows, _sorted_names = _build_session_rows_index(hub_state, session_dir, include_session_files=True)
     _SESSION_ROWS_CACHE.clear()
     _SESSION_ROWS_CACHE[cache_key] = rows
     return rows
 
+
+def build_session_rows_page(
+    hub_state: HubStateSnapshot,
+    session_dir: Path,
+    page: int,
+    page_size: int,
+    *,
+    include_session_files: bool = True,
+) -> SessionRowsPage:
+    cache_key = _session_rows_page_cache_key(
+        hub_state,
+        session_dir,
+        include_session_files=include_session_files,
+    )
+    cached_index = _SESSION_ROWS_PAGE_CACHE.get(cache_key)
+    if cached_index is None:
+        cached_index = _build_session_rows_index(
+            hub_state,
+            session_dir,
+            include_session_files=include_session_files,
+        )
+        if len(_SESSION_ROWS_PAGE_CACHE) > 8:
+            _SESSION_ROWS_PAGE_CACHE.clear()
+        _SESSION_ROWS_PAGE_CACHE[cache_key] = cached_index
+    all_rows, sorted_names = cached_index
+    safe_page_size = max(1, int(page_size))
+    total_count = len(sorted_names)
+    total_pages = max(1, math.ceil(total_count / safe_page_size))
+    resolved_page = min(max(1, int(page)), total_pages)
+    start = (resolved_page - 1) * safe_page_size
+    rows = all_rows[start:start + safe_page_size]
+    return SessionRowsPage(
+        rows=rows,
+        page=resolved_page,
+        total_count=total_count,
+        total_pages=total_pages,
+        session_names=sorted_names,
+    )
 
 def build_session_detail(
     hub_state: HubStateSnapshot,

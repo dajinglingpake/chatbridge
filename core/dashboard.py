@@ -53,6 +53,8 @@ class PageLoadProfile:
     logs: bool = False
     external_agent_processes: bool = False
     bridge_conversations: bool = False
+    runtime_process_discovery: bool = False
+    runtime_qq_login_status: bool = False
 
 
 @dataclass
@@ -92,8 +94,12 @@ class FullCheckProgressState:
 
 
 _RUNTIME_CACHE: dict[str, RuntimeCacheEntry] = {}
+_STATE_FILE_CACHE: dict[tuple[str, str, object], tuple[tuple[int, int], object]] = {}
 CacheValueT = TypeVar("CacheValueT")
 _EXPECTED_LOG_NOISE_MARKERS = ("[bridge] poll error: the read operation timed out",)
+_RUNTIME_SNAPSHOT_CACHE_SECONDS = 2.0
+_LOG_TAIL_READ_CHUNK_BYTES = 64 * 1024
+_LOG_TAIL_MAX_BYTES = 256 * 1024
 
 
 def _page_load_profile(page_key: str) -> PageLoadProfile:
@@ -103,6 +109,8 @@ def _page_load_profile(page_key: str) -> PageLoadProfile:
         logs=normalized == "diagnostics",
         external_agent_processes=normalized == "diagnostics",
         bridge_conversations=normalized == "sessions",
+        runtime_process_discovery=normalized in {"home", "diagnostics"},
+        runtime_qq_login_status=normalized == "home",
     )
 
 
@@ -130,7 +138,7 @@ def refresh_dashboard_cache(app_dir: Path, cache_key: str) -> None:
         _write_cached_payload("checks:full", results)
         return
     if normalized == "logs":
-        snapshot = get_runtime_snapshot(include_agent_processes=False)
+        snapshot = _read_runtime_snapshot(include_agent_processes=False)
         hub_started_at = _process_started_at(snapshot.hub_pid)
         bridge_started_at = _process_started_at(snapshot.bridge_pid)
         onebot_runtime_started_at = _process_started_at(snapshot.onebot_runtime_pid)
@@ -147,6 +155,16 @@ def refresh_dashboard_cache(app_dir: Path, cache_key: str) -> None:
         return
     if normalized == "external_agent_processes":
         _write_cached_payload("external_agent_processes", discover_external_agent_processes())
+        return
+    if normalized in {"runtime", "runtime_snapshot"}:
+        _write_cached_payload(
+            "runtime_snapshot:False:True:True",
+            get_runtime_snapshot(
+                include_agent_processes=False,
+                include_qq_login_status=True,
+                discover_missing_processes=True,
+            ),
+        )
         return
     raise ValueError(f"unsupported dashboard cache key: {cache_key}")
 
@@ -183,11 +201,30 @@ def _get_progressive_full_checks(app_dir: Path, bridge_config: BridgeConfig) -> 
 
 
 def _read_cached(cache_key: str, loader: Callable[[], CacheValueT], ttl_seconds: float) -> CacheValueT:
-    del loader, ttl_seconds
-    payload = _read_cached_payload(cache_key, None)
-    if payload is None:
-        raise KeyError(cache_key)
+    now = time.monotonic()
+    cached = _RUNTIME_CACHE.get(cache_key)
+    if cached is not None and cached.is_fresh(now=now, ttl_seconds=ttl_seconds):
+        return cast(CacheValueT, cached.payload)
+    payload = loader()
+    _RUNTIME_CACHE[cache_key] = RuntimeCacheEntry(cached_at=now, payload=payload)
     return payload
+
+def _read_runtime_snapshot(
+    *,
+    include_agent_processes: bool = False,
+    include_qq_login_status: bool = True,
+    discover_missing_processes: bool = True,
+) -> RuntimeSnapshot:
+    cache_key = f"runtime_snapshot:{include_agent_processes}:{include_qq_login_status}:{discover_missing_processes}"
+    return _read_cached(
+        cache_key,
+        lambda: get_runtime_snapshot(
+            include_agent_processes=include_agent_processes,
+            include_qq_login_status=include_qq_login_status,
+            discover_missing_processes=discover_missing_processes,
+        ),
+        _RUNTIME_SNAPSHOT_CACHE_SECONDS,
+    )
 
 
 def _process_started_at(pid: int | None) -> float | None:
@@ -220,11 +257,12 @@ def tail_text(
     if not path.exists():
         return "(empty)"
     try:
-        if stale_before is not None and path.stat().st_mtime < stale_before:
+        stat = path.stat()
+        if stale_before is not None and stat.st_mtime < stale_before:
             return "(empty)"
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return "(unreadable)"
+    lines = _read_tail_lines(path, max_lines=max_lines, start_marker=start_marker, file_size=stat.st_size)
     if start_marker:
         for index in range(len(lines) - 1, -1, -1):
             if start_marker in lines[index]:
@@ -234,14 +272,60 @@ def tail_text(
         lines = _without_expected_log_noise(lines)
     return "\n".join(lines[-max_lines:]) if lines else "(empty)"
 
+def _read_tail_lines(path: Path, *, max_lines: int, start_marker: str = "", file_size: int = -1) -> list[str]:
+    if file_size == 0:
+        return []
+    safe_max_lines = max(1, int(max_lines))
+    if file_size < 0:
+        try:
+            file_size = path.stat().st_size
+        except OSError:
+            return []
+    chunks: list[bytes] = []
+    bytes_read = 0
+    remaining = file_size
+    try:
+        with path.open("rb") as handle:
+            while remaining > 0 and bytes_read < _LOG_TAIL_MAX_BYTES:
+                read_size = min(_LOG_TAIL_READ_CHUNK_BYTES, remaining, _LOG_TAIL_MAX_BYTES - bytes_read)
+                remaining -= read_size
+                handle.seek(remaining)
+                chunk = handle.read(read_size)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                bytes_read += len(chunk)
+                text = b"".join(reversed(chunks)).decode("utf-8", errors="replace")
+                lines = text.splitlines()
+                if start_marker and any(start_marker in line for line in lines):
+                    return lines
+                if len(lines) > safe_max_lines:
+                    return lines
+    except OSError:
+        return []
+    if not chunks:
+        return []
+    return b"".join(reversed(chunks)).decode("utf-8", errors="replace").splitlines()
 
-def load_dashboard_state(app_dir: Path, page_key: str = "home") -> DashboardState:
+
+def load_dashboard_state(
+    app_dir: Path,
+    page_key: str = "home",
+    load_bridge_conversations: bool | None = None,
+    include_hub_tasks: bool = True,
+    include_hub_task_text: bool = True,
+) -> DashboardState:
     profile = _page_load_profile(page_key)
-    snapshot = get_runtime_snapshot(include_agent_processes=False)
+    should_load_bridge_conversations = profile.bridge_conversations if load_bridge_conversations is None else load_bridge_conversations
+    snapshot = _read_runtime_snapshot(
+        include_agent_processes=False,
+        include_qq_login_status=profile.runtime_qq_login_status,
+        discover_missing_processes=profile.runtime_process_discovery,
+    )
     bridge_config = BridgeConfig.load()
-    hub_state = _read_hub_state(HUB_STATE_PATH, bridge_config)
+    hub_state = _read_hub_state(HUB_STATE_PATH, bridge_config, include_tasks=include_hub_tasks, include_task_text=include_hub_task_text)
     bridge_state = _read_bridge_state(BRIDGE_STATE_PATH)
-    bridge_conversations = _read_bridge_conversations(BRIDGE_CONVERSATIONS_PATH, bridge_config) if profile.bridge_conversations else {}
+    bridge_conversations = _read_bridge_conversations(BRIDGE_CONVERSATIONS_PATH, bridge_config) if should_load_bridge_conversations else {}
     checks_mode = profile.checks_mode
     checks_in_progress = False
     checks_progress_text = ""
@@ -282,16 +366,51 @@ def _coerce_float(value: object, *, default: float) -> float:
         return default
 
 
-def _read_hub_state(path: Path, bridge_config: BridgeConfig) -> HubStateSnapshot:
-    return HubStateSnapshot.from_dict(
-        read_json(path),
-        default_backend=bridge_config.default_backend,
-        now=_state_now(),
+def _file_signature(path: Path) -> tuple[int, int]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return (-1, -1)
+    return int(stat.st_mtime_ns), int(stat.st_size)
+
+def _read_cached_state_file(
+    cache_name: str,
+    path: Path,
+    variant: object,
+    loader: Callable[[], CacheValueT],
+) -> CacheValueT:
+    signature = _file_signature(path)
+    cache_key = (cache_name, str(path), variant)
+    cached = _STATE_FILE_CACHE.get(cache_key)
+    if cached is not None and cached[0] == signature:
+        return cast(CacheValueT, cached[1])
+    payload = loader()
+    _STATE_FILE_CACHE[cache_key] = (signature, payload)
+    return payload
+
+def _read_hub_state(path: Path, bridge_config: BridgeConfig, *, include_tasks: bool = True, include_task_text: bool = True) -> HubStateSnapshot:
+    default_backend = bridge_config.default_backend
+    return _read_cached_state_file(
+        "hub",
+        path,
+        (default_backend, bool(include_tasks), bool(include_task_text)),
+        lambda: HubStateSnapshot.from_dict(
+            read_json(path),
+            default_backend=default_backend,
+            now=_state_now(),
+            include_tasks=include_tasks,
+            include_task_text=include_task_text,
+        ),
     )
 
 
 def _read_bridge_state(path: Path) -> BridgeRuntimeState:
-    return BridgeRuntimeState.from_dict(read_json(path))
+    return _read_cached_state_file(
+        "bridge",
+        path,
+        "",
+        lambda: BridgeRuntimeState.from_dict(read_json(path)),
+    )
 
 
 def _read_bridge_conversations(path: Path, bridge_config: BridgeConfig) -> dict[str, WeixinConversationBinding]:

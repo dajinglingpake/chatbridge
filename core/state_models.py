@@ -180,7 +180,7 @@ class HubTask:
     context_left_percent: int | None = None
 
     @classmethod
-    def from_dict(cls, raw: object, *, default_backend: str) -> "HubTask | None":
+    def from_dict(cls, raw: object, *, default_backend: str, include_text: bool = True) -> "HubTask | None":
         if not isinstance(raw, dict):
             return None
         task_id = str(raw.get("id") or "").strip()
@@ -188,6 +188,10 @@ class HubTask:
         created_at = str(raw.get("created_at") or "").strip()
         if not task_id:
             return None
+        prompt = str(raw.get("prompt") or "") if include_text else ""
+        output = str(raw.get("output") or "") if include_text else ""
+        error = str(raw.get("error") or "") if include_text else ""
+        progress_text = str(raw.get("progress_text") or "") if include_text else ""
         return cls(
             id=task_id,
             agent_id=agent_id or "main",
@@ -195,13 +199,13 @@ class HubTask:
             backend=str(raw.get("backend") or default_backend).strip() or default_backend,
             source=str(raw.get("source") or "desktop").strip() or "desktop",
             sender_id=str(raw.get("sender_id") or "").strip(),
-            prompt=str(raw.get("prompt") or ""),
+            prompt=prompt,
             status=str(raw.get("status") or "queued").strip() or "queued",
             created_at=created_at,
             started_at=str(raw.get("started_at") or "").strip(),
             finished_at=str(raw.get("finished_at") or "").strip(),
-            output=str(raw.get("output") or ""),
-            error=str(raw.get("error") or ""),
+            output=output,
+            error=error,
             session_id=str(raw.get("session_id") or "").strip(),
             session_name=str(raw.get("session_name") or "").strip(),
             workdir=str(raw.get("workdir") or "").strip(),
@@ -214,7 +218,7 @@ class HubTask:
             bridge_event_log_path=str(raw.get("bridge_event_log_path") or "").strip(),
             context_token=str(raw.get("context_token") or "").strip(),
             codex_search_enabled=_bool_value(raw.get("codex_search_enabled")),
-            progress_text=str(raw.get("progress_text") or ""),
+            progress_text=progress_text,
             progress_at=str(raw.get("progress_at") or "").strip(),
             progress_seq=int(raw.get("progress_seq") or 0),
             context_left_percent=_optional_percent(raw.get("context_left_percent")),
@@ -269,7 +273,15 @@ class HubStateSnapshot:
     external_agent_processes: list[ExternalAgentProcessState] = field(default_factory=list)
 
     @classmethod
-    def from_dict(cls, raw: object, *, default_backend: str, now: str) -> "HubStateSnapshot":
+    def from_dict(
+        cls,
+        raw: object,
+        *,
+        default_backend: str,
+        now: str,
+        include_tasks: bool = True,
+        include_task_text: bool = True,
+    ) -> "HubStateSnapshot":
         if not isinstance(raw, dict):
             return cls()
         agents = [
@@ -280,8 +292,8 @@ class HubStateSnapshot:
         tasks = [
             task
             for item in (raw.get("tasks") or [])
-            if (task := HubTask.from_dict(item, default_backend=default_backend)) is not None
-        ]
+            if (task := HubTask.from_dict(item, default_backend=default_backend, include_text=include_task_text)) is not None
+        ] if include_tasks else []
         external_agent_processes = [
             process
             for item in (raw.get("external_agent_processes") or [])

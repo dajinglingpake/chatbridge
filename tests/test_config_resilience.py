@@ -58,6 +58,7 @@ class ConfigResilienceTests(unittest.TestCase):
             self.assertEqual("main", saved["agents"][0]["id"])
             self.assertEqual("qq", saved["agents"][1]["id"])
             self.assertEqual("qq-group", saved["agents"][2]["id"])
+            self.assertEqual("app-server", saved["codex_transport"])
 
     def test_resolve_ilink_base_url_uses_active_account(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

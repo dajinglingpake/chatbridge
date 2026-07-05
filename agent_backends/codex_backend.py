@@ -7,11 +7,12 @@ import tempfile
 import threading
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from agent_backends.base import AgentBackend, AgentLike, BackendContext
-from agent_backends.shared import build_final_prompt, resolve_session_file
+from agent_backends.shared import build_final_prompt, collect_text_fragments, resolve_session_file
 from core.platform_compat import terminate_process_tree
 from localization import Localizer
 
@@ -113,10 +114,12 @@ class _CodexAppServerClient:
         *,
         timeout: float,
         on_progress: Callable[[str], None] | None,
+        reasoning_progress_label: Callable[[str], str] | None = None,
     ) -> tuple[str, int | None]:
         deadline = time.time() + timeout
         output = ""
-        pending_delta = ""
+        pending_answer_delta = ""
+        pending_reasoning_delta = ""
         last_progress = ""
         last_progress_at = 0.0
         context_left_percent: int | None = None
@@ -126,19 +129,35 @@ class _CodexAppServerClient:
             params = message.get("params") if isinstance(message.get("params"), dict) else {}
             if str(params.get("threadId") or "") not in {"", thread_id}:
                 continue
-            if str(params.get("turnId") or "") not in {"", turn_id}:
+            message_turn_id = str(params.get("turnId") or "")
+            turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+            if not message_turn_id and isinstance(turn, dict):
+                message_turn_id = str(turn.get("id") or "")
+            if message_turn_id not in {"", turn_id}:
                 continue
             item = params.get("item") if isinstance(params.get("item"), dict) else {}
             if method == "item/completed" and item.get("type") == "agentMessage":
-                text = str(item.get("text") or "").strip()
+                text = self._extract_agent_message_text(item)
                 if text:
                     output = text
-            if method.endswith("/delta"):
+            if method == "item/agentMessage/delta":
                 delta = self._extract_delta(message)
                 if delta:
-                    pending_delta += delta
+                    pending_answer_delta += delta
                     if on_progress is not None and time.time() - last_progress_at >= PROGRESS_PUSH_INTERVAL_SECONDS:
-                        progress = pending_delta.strip()
+                        progress = pending_answer_delta.strip()
+                        if progress and progress != last_progress:
+                            on_progress(progress)
+                            last_progress = progress
+                            last_progress_at = time.time()
+            if method in {"item/reasoning/summaryTextDelta", "item/reasoning/textDelta"}:
+                delta = self._extract_delta(message)
+                if delta:
+                    pending_reasoning_delta += delta
+                    if on_progress is not None and time.time() - last_progress_at >= PROGRESS_PUSH_INTERVAL_SECONDS:
+                        progress = pending_reasoning_delta.strip()
+                        if progress and reasoning_progress_label is not None:
+                            progress = reasoning_progress_label(progress)
                         if progress and progress != last_progress:
                             on_progress(progress)
                             last_progress = progress
@@ -147,11 +166,49 @@ class _CodexAppServerClient:
             if next_context_left is not None:
                 context_left_percent = next_context_left
             if method == "turn/completed":
-                error = ((params.get("turn") if isinstance(params.get("turn"), dict) else {}) or {}).get("error")
+                error = turn.get("error") if isinstance(turn, dict) else None
                 if error:
-                    raise RuntimeError(str(error))
+                    raise RuntimeError(self._extract_error_message(error))
+                status = str(turn.get("status") or "") if isinstance(turn, dict) else ""
+                if status in {"failed", "interrupted"}:
+                    raise RuntimeError(f"Codex app-server turn {status}")
+                if not output.strip() and pending_answer_delta.strip():
+                    output = pending_answer_delta.strip()
                 return output, context_left_percent
         raise RuntimeError(f"timed out waiting for app-server turn: {turn_id}")
+
+    def list_threads(
+        self,
+        *,
+        limit: int = 50,
+        cursor: str = "",
+        search_term: str = "",
+        cwd: str = "",
+        archived: bool | None = False,
+    ) -> dict[str, Any]:
+        params: dict[str, object] = {
+            "limit": max(1, min(200, int(limit or 50))),
+            "sortKey": "updated_at",
+            "sortDirection": "desc",
+            "useStateDbOnly": True,
+            "sourceKinds": [],
+        }
+        if cursor.strip():
+            params["cursor"] = cursor.strip()
+        if search_term.strip():
+            params["searchTerm"] = search_term.strip()
+        if cwd.strip():
+            params["cwd"] = cwd.strip()
+        if archived is not None:
+            params["archived"] = bool(archived)
+        return self.request("thread/list", params, timeout=60)
+
+    def read_thread(self, thread_id: str, *, include_turns: bool = True) -> dict[str, Any]:
+        return self.request(
+            "thread/read",
+            {"threadId": thread_id.strip(), "includeTurns": bool(include_turns)},
+            timeout=60,
+        )
 
     def _send(self, method: str, params: dict[str, object], *, expect_response: bool) -> int | None:
         with self._lock:
@@ -212,11 +269,35 @@ class _CodexAppServerClient:
         return raw if isinstance(raw, str) else ""
 
     @staticmethod
+    def _extract_agent_message_text(item: dict[str, Any]) -> str:
+        raw = item.get("text")
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+        return "\n".join(fragment.strip() for fragment in collect_text_fragments(item) if fragment.strip()).strip()
+
+    @staticmethod
+    def _extract_error_message(error: object) -> str:
+        if isinstance(error, dict):
+            for key in ("message", "additionalDetails"):
+                raw = error.get(key)
+                if isinstance(raw, str) and raw.strip():
+                    return raw.strip()
+        return str(error)
+
+    @staticmethod
     def _extract_context_left_percent(message: dict[str, Any]) -> int | None:
         params = message.get("params") if isinstance(message.get("params"), dict) else {}
         raw_percent = params.get("contextLeftPercent")
         if isinstance(raw_percent, int):
             return max(0, min(100, raw_percent))
+        token_usage = params.get("tokenUsage")
+        if isinstance(token_usage, dict):
+            total = token_usage.get("total")
+            context_window = token_usage.get("modelContextWindow")
+            if isinstance(total, dict) and isinstance(context_window, int) and context_window > 0:
+                total_tokens = total.get("totalTokens")
+                if isinstance(total_tokens, int):
+                    return max(0, min(100, round((1 - (total_tokens / context_window)) * 100)))
         return None
 
 
@@ -230,19 +311,8 @@ class CodexBackend(AgentBackend):
     def invoke(self, agent: AgentLike, prompt: str, session_name: str, context: BackendContext) -> dict[str, str]:
         translate = Localizer().translate
         if context.codex_transport.strip().lower() == "app-server":
-            try:
-                with self._app_server_lock:
-                    return self._invoke_app_server(agent, prompt, session_name, context)
-            except RuntimeError as exc:
-                if context.on_progress is not None:
-                    context.on_progress(
-                        _translate(
-                            translate,
-                            "agent.codex.progress.app_server_fallback",
-                            "Codex app-server 调用失败，已回退 exec：{error}",
-                            error=str(exc)[:160],
-                        )
-                    )
+            with self._app_server_lock:
+                return self._invoke_app_server(agent, prompt, session_name, context)
         last_error: RuntimeError | None = None
         current_prompt = prompt
         for attempt in range(CODEX_TRANSIENT_RETRY_ATTEMPTS + 1):
@@ -287,7 +357,7 @@ class CodexBackend(AgentBackend):
         workdir.mkdir(parents=True, exist_ok=True)
         session_file = resolve_session_file(agent, session_name, context.session_dir)
         session_file.parent.mkdir(parents=True, exist_ok=True)
-        existing_session = session_file.read_text(encoding="utf-8").strip() if session_file.exists() else ""
+        existing_session = context.codex_thread_id.strip() or (session_file.read_text(encoding="utf-8").strip() if session_file.exists() else "")
         final_prompt = build_final_prompt(agent, prompt)
         client = self._get_app_server(context)
         thread_params = self._app_server_thread_params(agent, workdir, context)
@@ -321,6 +391,12 @@ class CodexBackend(AgentBackend):
             turn_id,
             timeout=max(60, int(getattr(context, "hub_task_timeout_seconds", 0) or 0), 60 * 30),
             on_progress=context.on_progress,
+            reasoning_progress_label=lambda text: _translate(
+                Localizer().translate,
+                "agent.codex.progress.reasoning",
+                "思考：{text}",
+                text=text,
+            ),
         )
         if not output.strip():
             raise RuntimeError("Codex app-server returned an empty result")
@@ -629,6 +705,298 @@ class CodexBackend(AgentBackend):
         if context_left_percent is not None:
             result["context_left_percent"] = str(context_left_percent)
         return result
+
+    def list_app_server_threads(
+        self,
+        context: BackendContext,
+        *,
+        limit: int = 50,
+        cursor: str = "",
+        search_term: str = "",
+        cwd: str = "",
+        archived: bool | None = False,
+    ) -> dict[str, object]:
+        with self._app_server_lock:
+            payload = self._get_app_server(context).list_threads(
+                limit=limit,
+                cursor=cursor,
+                search_term=search_term,
+                cwd=cwd,
+                archived=archived,
+            )
+        data = payload.get("data") if isinstance(payload.get("data"), list) else []
+        threads = [self._normalize_app_server_thread(item) for item in data if isinstance(item, dict)]
+        if archived is not None:
+            for thread in threads:
+                thread["archived"] = bool(archived)
+        return {
+            "threads": threads,
+            "next_cursor": str(payload.get("nextCursor") or ""),
+            "backwards_cursor": str(payload.get("backwardsCursor") or ""),
+        }
+
+    def read_app_server_thread(self, context: BackendContext, thread_id: str) -> dict[str, object]:
+        cleaned_thread_id = thread_id.strip()
+        if not cleaned_thread_id:
+            raise ValueError("thread_id is required")
+        with self._app_server_lock:
+            payload = self._get_app_server(context).read_thread(cleaned_thread_id, include_turns=True)
+        thread = payload.get("thread") if isinstance(payload.get("thread"), dict) else {}
+        normalized = self._normalize_app_server_thread(thread)
+        normalized["messages"] = self._normalize_app_server_thread_messages(thread)
+        return normalized
+
+    @classmethod
+    def _normalize_app_server_thread(cls, thread: dict[str, Any]) -> dict[str, object]:
+        thread_id = str(thread.get("id") or thread.get("sessionId") or "").strip()
+        cwd = str(thread.get("cwd") or "").strip()
+        git_info = thread.get("gitInfo") if isinstance(thread.get("gitInfo"), dict) else {}
+        status = thread.get("status") if isinstance(thread.get("status"), dict) else {}
+        preview = str(thread.get("preview") or "").strip()
+        name = str(thread.get("name") or "").strip()
+        title = name or preview or (Path(cwd).name if cwd else thread_id)
+        return {
+            "id": thread_id,
+            "session_id": str(thread.get("sessionId") or thread_id).strip(),
+            "title": title,
+            "preview": preview,
+            "cwd": cwd,
+            "source": str(thread.get("source") or thread.get("threadSource") or "").strip(),
+            "model_provider": str(thread.get("modelProvider") or "").strip(),
+            "created_at": cls._format_app_server_timestamp(thread.get("createdAt")),
+            "updated_at": cls._format_app_server_timestamp(thread.get("updatedAt")),
+            "recency_at": cls._format_app_server_timestamp(thread.get("recencyAt")),
+            "status": str(status.get("type") or thread.get("status") or "").strip(),
+            "branch": str(git_info.get("branch") or "").strip(),
+            "sha": str(git_info.get("sha") or "").strip(),
+            "path": str(thread.get("path") or "").strip(),
+        }
+
+    @classmethod
+    def _normalize_app_server_thread_messages(cls, thread: dict[str, Any]) -> list[dict[str, object]]:
+        messages: list[dict[str, object]] = []
+        turns = thread.get("turns") if isinstance(thread.get("turns"), list) else []
+        for turn_index, turn in enumerate(turns, start=1):
+            if not isinstance(turn, dict):
+                continue
+            turn_id = str(turn.get("id") or "").strip()
+            items = turn.get("items") if isinstance(turn.get("items"), list) else []
+            for item_index, item in enumerate(items, start=1):
+                if not isinstance(item, dict):
+                    continue
+                message = cls._normalize_app_server_item(item, turn_id=turn_id, turn_order=turn_index, item_order=item_index)
+                if message is not None:
+                    messages.append(message)
+        return messages
+
+    @classmethod
+    def _normalize_app_server_item(
+        cls,
+        item: dict[str, Any],
+        *,
+        turn_id: str,
+        turn_order: int = 0,
+        item_order: int = 0,
+    ) -> dict[str, object] | None:
+        item_type = str(item.get("type") or "").strip()
+        item_id = str(item.get("id") or "").strip()
+        if item_type == "userMessage":
+            content = item.get("content") if isinstance(item.get("content"), list) else []
+            text = "\n".join(
+                str(part.get("text") or "").strip()
+                for part in content
+                if isinstance(part, dict) and str(part.get("text") or "").strip()
+            ).strip()
+            role = "user"
+        elif item_type == "agentMessage":
+            text = str(item.get("text") or "").strip()
+            role = "assistant"
+        elif item_type == "reasoning":
+            summary = item.get("summary") if isinstance(item.get("summary"), list) else []
+            text = "\n".join(str(part).strip() for part in summary if str(part).strip()).strip()
+            role = "reasoning"
+        else:
+            return cls._normalize_app_server_activity_item(
+                item,
+                turn_id=turn_id,
+                item_type=item_type,
+                item_id=item_id,
+                turn_order=turn_order,
+                item_order=item_order,
+            )
+        if not text:
+            return None
+        return {
+            "id": item_id,
+            "turn_id": turn_id,
+            "role": role,
+            "phase": str(item.get("phase") or "").strip(),
+            "at": cls._app_server_item_timestamp(item),
+            "turn_order": turn_order,
+            "item_order": item_order,
+            "text": text,
+        }
+
+    @classmethod
+    def _normalize_app_server_activity_item(
+        cls,
+        item: dict[str, Any],
+        *,
+        turn_id: str,
+        item_type: str,
+        item_id: str,
+        turn_order: int = 0,
+        item_order: int = 0,
+    ) -> dict[str, object] | None:
+        activity = cls._app_server_activity_payload(item, item_type=item_type, item_id=item_id)
+        if not activity:
+            return None
+        return {
+            "id": item_id,
+            "turn_id": turn_id,
+            "role": "activity",
+            "phase": str(item.get("phase") or "").strip(),
+            "at": str(activity.get("at") or cls._app_server_item_timestamp(item)),
+            "turn_order": turn_order,
+            "item_order": item_order,
+            "text": str(activity.get("detail") or activity.get("event") or item_type).strip(),
+            "activity": activity,
+        }
+
+    @classmethod
+    def _app_server_activity_payload(cls, item: dict[str, Any], *, item_type: str, item_id: str) -> dict[str, object]:
+        normalized_type = item_type.replace("-", "_").replace(".", "_")
+        event = {
+            "toolCall": "codex_tool_call",
+            "tool_call": "codex_tool_call",
+            "function_call": "codex_tool_call",
+            "todo": "codex_todo",
+            "todo_list": "codex_todo",
+            "activity_log": "codex_activity",
+            "activityLog": "codex_activity",
+            "compaction": "codex_compaction",
+            "error": "codex_error",
+        }.get(item_type) or {
+            "toolcall": "codex_tool_call",
+            "tool_call": "codex_tool_call",
+            "todo": "codex_todo",
+            "todo_list": "codex_todo",
+            "activity_log": "codex_activity",
+            "activitylog": "codex_activity",
+            "compaction": "codex_compaction",
+            "error": "codex_error",
+        }.get(normalized_type.lower(), "codex_item")
+        activity_type = "error" if event == "codex_error" else "info"
+        detail = cls._app_server_activity_detail(item, item_type=item_type)
+        metadata = cls._app_server_activity_metadata(item, item_type=item_type, item_id=item_id)
+        if not detail and event == "codex_item" and not metadata:
+            return {}
+        return {
+            "event": event,
+            "type": activity_type,
+            "at": cls._app_server_item_timestamp(item),
+            "detail": detail or item_type or "Codex item",
+            "metadata": metadata,
+        }
+
+    @classmethod
+    def _app_server_activity_detail(cls, item: dict[str, Any], *, item_type: str) -> str:
+        detail = item.get("detail")
+        normalized_item_type = item_type.replace("-", "_").replace(".", "_").lower()
+        if isinstance(detail, dict) and normalized_item_type in {"toolcall", "tool_call", "function_call"}:
+            detail_type = str(detail.get("type") or item.get("name") or "").strip()
+            for key in ("command", "description", "text", "log", "message"):
+                value = detail.get(key)
+                if isinstance(value, str) and value.strip():
+                    return f"{detail_type}: {value.strip()}" if detail_type else value.strip()
+            if detail_type:
+                return detail_type
+        for key in ("message", "text", "summary", "label", "name", "title", "status", "error"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        if isinstance(detail, dict):
+            detail_type = str(detail.get("type") or "").strip()
+            for key in ("command", "description", "text", "log", "message"):
+                value = detail.get(key)
+                if isinstance(value, str) and value.strip():
+                    return f"{detail_type}: {value.strip()}" if detail_type else value.strip()
+            if detail_type:
+                return detail_type
+        for key in ("items", "todos"):
+            value = item.get(key)
+            if isinstance(value, list):
+                lines = []
+                for entry in value[:8]:
+                    if isinstance(entry, dict):
+                        text = str(entry.get("text") or entry.get("content") or entry.get("title") or "").strip()
+                        if text:
+                            prefix = "[x]" if bool(entry.get("completed")) else "[ ]"
+                            lines.append(f"{prefix} {text}")
+                    elif str(entry).strip():
+                        lines.append(str(entry).strip())
+                if lines:
+                    return "\n".join(lines)
+        compact = cls._compact_app_server_value(
+            {
+                key: value
+                for key, value in item.items()
+                if key not in {"id", "type", "turn_id", "turnId"}
+            },
+            limit=500,
+        )
+        return compact if compact != "{}" else item_type
+
+    @classmethod
+    def _app_server_activity_metadata(cls, item: dict[str, Any], *, item_type: str, item_id: str) -> dict[str, str]:
+        metadata: dict[str, str] = {"item_type": item_type}
+        if item_id:
+            metadata["item_id"] = item_id
+        for key in ("callId", "name", "status", "phase", "trigger", "preTokens"):
+            value = item.get(key)
+            if value is not None and str(value).strip():
+                metadata[key] = str(value).strip()
+        raw_metadata = item.get("metadata")
+        if isinstance(raw_metadata, dict):
+            for key, value in raw_metadata.items():
+                cleaned_key = str(key or "").strip()
+                if cleaned_key and value is not None:
+                    metadata[f"metadata.{cleaned_key}"] = cls._compact_app_server_value(value, limit=220)
+        detail = item.get("detail")
+        if isinstance(detail, dict):
+            for key, value in detail.items():
+                cleaned_key = str(key or "").strip()
+                if cleaned_key and value is not None and cleaned_key not in {"log"}:
+                    metadata[f"detail.{cleaned_key}"] = cls._compact_app_server_value(value, limit=220)
+        return metadata
+
+    @classmethod
+    def _app_server_item_timestamp(cls, item: dict[str, Any]) -> str:
+        for key in ("timestamp", "createdAt", "updatedAt", "completedAt", "completedAtMs"):
+            value = item.get(key)
+            if value not in (None, ""):
+                return cls._format_app_server_timestamp(value)
+        return ""
+
+    @staticmethod
+    def _compact_app_server_value(value: object, *, limit: int = 800) -> str:
+        try:
+            text = json.dumps(value, ensure_ascii=False, default=str, sort_keys=True)
+        except (TypeError, ValueError):
+            text = str(value)
+        compact = " ".join(text.split())
+        if len(compact) <= limit:
+            return compact
+        return f"{compact[: max(0, limit - 1)]}..."
+
+    @staticmethod
+    def _format_app_server_timestamp(value: object) -> str:
+        if isinstance(value, (int, float)) and value > 0:
+            try:
+                return datetime.fromtimestamp(float(value)).isoformat(timespec="seconds")
+            except (OSError, OverflowError, ValueError):
+                return str(value)
+        return str(value or "").strip()
 
     def _wait_for_exit(self, proc: subprocess.Popen) -> int:
         try:

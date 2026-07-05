@@ -25,6 +25,20 @@ SESSIONS_PAGE = PageDefinition(
     description="会话列表、最近任务和默认会话预览。",
 )
 
+MOBILE_PAGE = PageDefinition(
+    key="mobile",
+    title="手机入口",
+    anchor="mobile",
+    description="扫码打开手机端 UI。",
+)
+
+STREAM_PAGE = PageDefinition(
+    key="stream",
+    title="实时对话",
+    anchor="stream",
+    description="查看最近任务状态、进度和输出。",
+)
+
 DIAGNOSTICS_PAGE = PageDefinition(
     key="diagnostics",
     title="诊断与日志",
@@ -35,5 +49,7 @@ DIAGNOSTICS_PAGE = PageDefinition(
 PRIMARY_PAGES: tuple[PageDefinition, ...] = (
     HOME_PAGE,
     SESSIONS_PAGE,
+    MOBILE_PAGE,
+    STREAM_PAGE,
     DIAGNOSTICS_PAGE,
 )

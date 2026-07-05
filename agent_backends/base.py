@@ -42,6 +42,7 @@ class BackendContext:
     images: list[str] | None = None
     codex_slim_exec: bool = True
     codex_transport: str = "exec"
+    codex_thread_id: str = ""
     hub_task_timeout_seconds: int = 600
 
 

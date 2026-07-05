@@ -9,11 +9,14 @@ from unittest.mock import patch
 
 from runtime_stack import (
     _filter_child_process_matches,
+    get_managed_status,
+    get_runtime_snapshot,
     _managed_subprocess_env,
     _onebot_runtime_env,
     _taskkill,
     discover_external_agent_processes,
     restart_all,
+    restart_hub,
     restart_qq_bridge,
     restart_qq_stack,
     start_all,
@@ -80,6 +83,39 @@ class RuntimeStackTests(unittest.TestCase):
         filtered = _filter_child_process_matches([parent, child])
 
         self.assertEqual([101], [proc.pid for proc in filtered])
+
+    def test_get_managed_status_can_skip_missing_process_discovery(self) -> None:
+        pid_file = self.root / "bridge.pid"
+
+        with (
+            patch("runtime_stack._read_pid_file", return_value=None),
+            patch("runtime_stack._find_process_by_script", side_effect=AssertionError("process scan should be skipped")),
+            patch("runtime_stack._clear_pid_file") as mocked_clear,
+        ):
+            status = get_managed_status("Bridge", self.root / "weixin_hub_bridge.py", pid_file, discover=False)
+
+        self.assertFalse(status.running)
+        mocked_clear.assert_not_called()
+
+    def test_runtime_snapshot_can_skip_qq_login_probe(self) -> None:
+        managed = SimpleNamespace(running=False, pid=None)
+        onebot = SimpleNamespace(running=True, pid=303)
+
+        with (
+            patch("runtime_stack.get_managed_status", return_value=managed) as mocked_status,
+            patch("runtime_stack.get_onebot_runtime_status", return_value=onebot) as mocked_onebot,
+            patch("runtime_stack.get_qq_login_status", side_effect=AssertionError("QQ login probe should be skipped")),
+        ):
+            snapshot = get_runtime_snapshot(
+                include_agent_processes=False,
+                include_qq_login_status=False,
+                discover_missing_processes=False,
+            )
+
+        self.assertFalse(snapshot.qq_logged_in)
+        self.assertEqual("", snapshot.qq_user_id)
+        self.assertEqual([False, False, False], [call.kwargs["discover"] for call in mocked_status.call_args_list])
+        mocked_onebot.assert_called_once_with(discover=False)
 
     def test_start_managed_passes_proxy_env_to_child_process(self) -> None:
         pid_file = self.root / "agent.pid"
@@ -179,6 +215,26 @@ class RuntimeStackTests(unittest.TestCase):
         mocked_start_qq_bridge.assert_called_once_with(env={"A": "B"})
         mocked_stop_onebot.assert_not_called()
         mocked_start_onebot.assert_not_called()
+
+    def test_restart_hub_does_not_touch_bridges_or_onebot(self) -> None:
+        with (
+            patch("runtime_stack.stop_managed", return_value="Hub stopped") as mocked_stop_hub,
+            patch("runtime_stack.start_managed", return_value="Hub started") as mocked_start_hub,
+            patch("runtime_stack.stop_bridge") as mocked_stop_bridge,
+            patch("runtime_stack.stop_qq_bridge") as mocked_stop_qq_bridge,
+            patch("runtime_stack.stop_onebot_runtime") as mocked_stop_onebot,
+            patch("runtime_stack._managed_subprocess_env", return_value={"A": "B"}),
+        ):
+            messages = restart_hub()
+
+        self.assertEqual(["Hub stopped", "Hub started"], messages)
+        self.assertEqual(["Hub"], [call.args[0] for call in mocked_stop_hub.call_args_list])
+        self.assertEqual(["Hub"], [call.args[0] for call in mocked_start_hub.call_args_list])
+        mocked_stop_bridge.assert_not_called()
+        mocked_stop_qq_bridge.assert_not_called()
+        mocked_stop_onebot.assert_not_called()
+        mocked_start_hub.assert_called_once()
+        self.assertEqual({"A": "B"}, mocked_start_hub.call_args.kwargs["env"])
 
     def test_managed_subprocess_env_copies_proxy_from_running_process(self) -> None:
         fake_proc = SimpleNamespace(pid=123)

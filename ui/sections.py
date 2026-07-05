@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
+import re
+from datetime import datetime
 from typing import Callable, Protocol
+from urllib.parse import quote, unquote
 
 try:
     from typing import Self
@@ -8,7 +12,7 @@ except ImportError:  # Python 3.10 compatibility
     from typing_extensions import Self
 
 from agent_backends import supported_backend_options
-from core.navigation import DIAGNOSTICS_PAGE, HOME_PAGE, SESSIONS_PAGE
+from core.navigation import DIAGNOSTICS_PAGE, HOME_PAGE, MOBILE_PAGE, SESSIONS_PAGE, STREAM_PAGE
 from core.view_models import WebConsoleViewModel
 
 
@@ -27,6 +31,7 @@ class UIElementLike(Protocol):
     def __exit__(self, exc_type, exc, tb) -> bool | None: ...
     def classes(self, value: str) -> Self: ...
     def props(self, value: str) -> Self: ...
+    def style(self, value: str) -> Self: ...
     def set_enabled(self, value: bool) -> Self: ...
     def set_source(self, value: str) -> Self: ...
     def on_value_change(self, handler: Callable[[UIEventLike], None]) -> Self: ...
@@ -37,10 +42,12 @@ class UIElementLike(Protocol):
 
 
 class UIFactoryLike(Protocol):
+    def add_body_html(self, html: str) -> None: ...
     def column(self) -> UIElementLike: ...
     def row(self) -> UIElementLike: ...
     def card(self) -> UIElementLike: ...
     def label(self, text: str = "") -> UIElementLike: ...
+    def markdown(self, content: str) -> UIElementLike: ...
     def code(self, content: str) -> UIElementLike: ...
     def element(self, tag: str) -> UIElementLike: ...
     def button(self, text: str, on_click=None, **kwargs) -> UIElementLike: ...
@@ -51,6 +58,7 @@ class UIFactoryLike(Protocol):
     def textarea(self, *, label: str = "", placeholder: str = "") -> UIElementLike: ...
     def select(self, options, *, value=None, label: str = "", on_change=None) -> UIElementLike: ...
     def input(self, *, label: str = "", placeholder: str = "") -> UIElementLike: ...
+    def image(self, source: str) -> UIElementLike: ...
     def switch(self, text: str, *, value: bool = False) -> UIElementLike: ...
     def table(self, *, columns, rows, row_key: str) -> UIElementLike: ...
     def dialog(self) -> UIElementLike: ...
@@ -65,7 +73,7 @@ def _tr(t: Translator, key: str, fallback: str, **kwargs: object) -> str:
 def _render_page_intro(ui: UIFactoryLike, title: str, description: str, kicker: str) -> None:
     with ui.column().classes("gap-1 mb-1"):
         ui.label(kicker).classes("cb-kicker")
-        ui.label(title).classes("cb-page-title text-slate-900")
+        ui.label(title).classes("cb-page-title cb-ink")
         ui.label(description).classes("text-sm cb-muted max-w-3xl")
 
 
@@ -88,9 +96,13 @@ def _panel(ui: UIFactoryLike, classes: str = "") -> UIElementLike:
     return ui.element("div").classes(f"cb-panel w-full p-4 {classes}".strip())
 
 
+def _dialog_card(ui: UIFactoryLike, classes: str = "") -> UIElementLike:
+    return ui.card().classes(f"cb-card w-[28rem] max-w-[calc(100vw-1rem)] p-5 {classes}".strip())
+
+
 def _render_disclosure_code(ui: UIFactoryLike, title: str, content: str) -> None:
     with ui.element("details").classes("cb-disclosure cb-panel w-full p-4"):
-        with ui.element("summary").classes("flex items-center justify-between gap-3 font-semibold text-slate-900"):
+        with ui.element("summary").classes("flex items-center justify-between gap-3 font-semibold cb-ink"):
             ui.label(title)
         _render_code_block(ui, content, "mt-3 max-h-96 overflow-auto")
 
@@ -160,7 +172,7 @@ def _render_session_summary_cards(ui: UIFactoryLike, model: WebConsoleViewModel,
             with _panel(ui, panel_classes):
                 with ui.row().classes("w-full items-start justify-between gap-3 flex-wrap"):
                     with ui.column().classes("gap-1 grow"):
-                        ui.label(row.name).classes("text-lg font-bold text-slate-900 break-all")
+                        ui.label(row.name).classes("text-lg font-bold cb-ink break-all")
                         _render_meta_line(ui, _tr(t, "ui.web.meta.status", "状态: {value}", value=row.status))
                     ui.button(
                         _tr(t, "ui.web.action.view_session", "查看会话"),
@@ -173,9 +185,9 @@ def _render_session_summary_cards(ui: UIFactoryLike, model: WebConsoleViewModel,
                         (_tr(t, "ui.table.success", "成功"), row.success_count),
                         (_tr(t, "ui.table.failure", "失败"), row.failure_count),
                     ):
-                        with ui.element("div").classes("border border-[var(--cb-border)] rounded-[6px] bg-white w-auto min-w-[5.5rem] px-3 py-2"):
+                        with ui.element("div").classes("cb-panel w-auto min-w-[5.5rem] px-3 py-2"):
                             ui.label(label).classes("cb-stat-label")
-                            ui.label(str(value)).classes("text-base font-bold text-slate-900")
+                            ui.label(str(value)).classes("text-base font-bold cb-ink")
 
 
 def _render_task_summary_cards(ui: UIFactoryLike, model: WebConsoleViewModel, t: Translator, on_select_task) -> None:
@@ -184,7 +196,7 @@ def _render_task_summary_cards(ui: UIFactoryLike, model: WebConsoleViewModel, t:
             with _panel(ui):
                 with ui.row().classes("w-full items-start justify-between gap-3 flex-wrap"):
                     with ui.column().classes("gap-1 grow"):
-                        ui.label(f"{task.agent_name} / {task.status}").classes("text-base font-bold text-slate-900")
+                        ui.label(f"{task.agent_name} / {task.status}").classes("text-base font-bold cb-ink")
                         _render_meta_line(
                             ui,
                             _tr(
@@ -196,7 +208,7 @@ def _render_task_summary_cards(ui: UIFactoryLike, model: WebConsoleViewModel, t:
                                 session=task.session_name or _tr(t, "ui.web.value.uncategorized", "(未归类)"),
                             ),
                         )
-                        ui.label(task.prompt_summary).classes("text-sm text-slate-800")
+                        ui.label(task.prompt_summary).classes("text-sm cb-ink")
                         ui.label(task.result_summary).classes("text-sm cb-muted")
                     ui.button(
                         _tr(t, "ui.web.action.view_task", "查看任务"),
@@ -259,7 +271,7 @@ def render_home_section(
                     with ui.row().classes("w-full items-start justify-between gap-3 flex-wrap"):
                         with ui.column().classes("gap-2 grow"):
                             ui.label(_tr(t, "ui.web.home.system_status", "系统状态")).classes("cb-kicker")
-                            ui.label(model.home.summary_text).classes("text-base font-bold text-slate-900")
+                            ui.label(model.home.summary_text).classes("text-base font-bold cb-ink")
                             ui.label(
                                 model.home.primary_hint
                             ).classes("text-sm cb-muted")
@@ -274,6 +286,7 @@ def render_home_section(
                         ui.button(_tr(t, "ui.primary.stop.label", "停止服务"), on_click=lambda: on_run_action("stop"), icon="stop")
                         ui.button(_tr(t, "ui.web.action.restart", "重启服务"), on_click=lambda: on_run_action("restart-qq-stack"), icon="restart_alt")
                         ui.button(_tr(t, "ui.web.action.restart_onebot_runtime", "重启 QQ OneBot"), on_click=lambda: on_run_action("restart-onebot-runtime"), icon="restart_alt").props("outline")
+                    ui.button(_tr(t, "ui.web.action.restart_hub", "只重启 Hub"), on_click=lambda: on_run_action("restart-hub"), icon="sync").props("outline")
                     ui.button(_tr(t, "ui.web.action.emergency_stop", "紧急停止"), on_click=lambda: on_run_action("emergency-stop"), color="negative", icon="warning")
 
         with _responsive_grid(ui, "grid-cols-1 xl:grid-cols-2"):
@@ -362,7 +375,7 @@ def _render_repair_suggestions(ui: UIFactoryLike, model: WebConsoleViewModel, t:
                 chip_class, level_text = _severity_variant(item.label, t)
                 with ui.row().classes("gap-2 items-center flex-wrap"):
                     ui.label(level_text).classes(chip_class)
-                    ui.label(item.label).classes("font-semibold text-slate-900")
+                    ui.label(item.label).classes("font-semibold cb-ink")
                 _render_code_block(ui, item.command)
                 if item.runnable:
                     ui.button(_tr(t, "ui.web.action.run_repair", "执行修复"), on_click=lambda cmd=item.command, label=item.label: on_run_repair_command(cmd, label), icon="build")
@@ -375,15 +388,19 @@ def render_sessions_section(
     model: WebConsoleViewModel,
     t: Translator,
     on_select_session,
+    on_load_session_rows,
     on_set_session_page,
+    on_load_session_files,
     on_load_session_detail,
     on_select_task,
+    on_load_task_list,
     on_set_task_page,
     on_load_task_detail,
     on_set_task_filters,
     on_find_task_by_id,
     on_open_weixin_binding,
     on_open_weixin_binding_task,
+    on_load_weixin_bindings,
     on_switch_weixin_binding_backend,
     on_reset_weixin_binding,
 ) -> None:
@@ -392,21 +409,28 @@ def render_sessions_section(
         with _responsive_grid(ui, "grid-cols-1 xl:grid-cols-2"):
             with ui.card().classes("cb-card w-full p-5"):
                 _render_card_title(ui, _tr(t, "ui.web.sessions.overview", "会话概览"))
-                if model.session_rows:
-                    _render_session_summary_cards(ui, model, t, on_select_session)
+                if not model.session_rows_loaded:
+                    ui.label(_tr(t, "ui.web.sessions.lazy_rows", "点击“加载会话列表”后再读取最近任务并生成会话概览。")).classes("text-sm cb-muted")
+                    ui.button(_tr(t, "ui.web.action.load_session_rows", "加载会话列表"), on_click=on_load_session_rows, icon="download").props("outline")
                 else:
-                    ui.label(_tr(t, "ui.web.sessions.empty", "当前没有会话记录。")).classes("text-sm cb-muted")
-                _render_pagination(
-                    ui,
-                    t,
-                    model.session_page,
-                    model.session_total_pages,
-                    model.session_total_count,
-                    "ui.web.unit.session",
-                    "条会话",
-                    lambda: on_set_session_page(model.session_page - 1),
-                    lambda: on_set_session_page(model.session_page + 1),
-                )
+                    if not model.session_files_loaded:
+                        ui.label(_tr(t, "ui.web.sessions.lazy_files", "当前只显示最近任务涉及的会话；点击后再读取历史会话文件。")).classes("text-sm cb-muted")
+                        ui.button(_tr(t, "ui.web.action.load_session_files", "加载历史会话"), on_click=on_load_session_files, icon="download").props("outline")
+                    if model.session_rows:
+                        _render_session_summary_cards(ui, model, t, on_select_session)
+                    else:
+                        ui.label(_tr(t, "ui.web.sessions.empty", "当前没有会话记录。")).classes("text-sm cb-muted")
+                    _render_pagination(
+                        ui,
+                        t,
+                        model.session_page,
+                        model.session_total_pages,
+                        model.session_total_count,
+                        "ui.web.unit.session",
+                        "条会话",
+                        lambda: on_set_session_page(model.session_page - 1),
+                        lambda: on_set_session_page(model.session_page + 1),
+                    )
             with ui.card().classes("cb-card w-full p-5"):
                 _render_card_title(ui, _tr(t, "ui.web.sessions.detail_title", "会话详情: {session}", session=model.selected_session_name or _tr(t, "ui.web.value.unselected", "(未选择)")))
                 ui.button(_tr(t, "ui.web.action.load_session_detail", "加载会话详情"), on_click=on_load_session_detail, icon="download").props("outline")
@@ -421,73 +445,80 @@ def render_sessions_section(
 
         with ui.card().classes("cb-card w-full p-5"):
             _render_card_title(ui, _tr(t, "ui.web.tasks.recent", "最近任务"))
-            if model.selected_session_name:
-                ui.label(_tr(t, "ui.web.tasks.filtered_by_session", "当前按会话过滤: {session}", session=model.selected_session_name)).classes("text-sm cb-muted")
-            if model.task_filtered_count != model.task_total_count:
-                ui.label(_tr(t, "ui.web.tasks.filtered_count", "当前显示 {filtered} / {total} 条任务", filtered=model.task_filtered_count, total=model.task_total_count)).classes("text-sm cb-muted")
-            with ui.row().classes("w-full gap-2 flex-wrap"):
-                status_filter = ui.select(
-                    _task_status_filter_options(t, model.task_status_options),
-                    value=model.selected_task_status,
-                    label=_tr(t, "ui.table.status", "状态"),
-                ).classes("min-w-[12rem]")
-                agent_filter = ui.select(
-                    {"": _tr(t, "ui.web.filter.all_agent", "全部 Agent"), **{item: item for item in model.task_agent_options}},
-                    value=model.selected_task_agent,
-                    label=_tr(t, "ui.web.field.agent", "Agent"),
-                ).classes("min-w-[14rem]")
-                backend_filter = ui.select(
-                    {"": _tr(t, "ui.web.filter.all_backend", "全部后端"), **{item: item for item in model.task_backend_options}},
-                    value=model.selected_task_backend,
-                    label=_tr(t, "ui.web.field.backend", "后端"),
-                ).classes("min-w-[12rem]")
-                ui.button(
-                    _tr(t, "ui.web.action.apply_filter", "应用筛选"),
-                    on_click=lambda: on_set_task_filters(
-                        status_filter.value or "",
-                        agent_filter.value or "",
-                        backend_filter.value or "",
-                    ),
-                    icon="filter_alt",
-                ).props("outline")
-                ui.button(_tr(t, "ui.web.action.clear_filter", "清空筛选"), on_click=lambda: on_set_task_filters("", "", ""), icon="filter_alt_off").props("flat")
-            with ui.row().classes("w-full gap-2 flex-wrap"):
-                task_lookup = ui.input(label=_tr(t, "ui.web.field.lookup_task", "按 task_id 快速定位"), placeholder="task-xxxxxxxxxx").classes("w-full sm:min-w-[18rem] sm:w-auto")
-                ui.button(_tr(t, "ui.web.action.locate_task", "定位任务"), on_click=lambda: on_find_task_by_id(task_lookup.value or ""), icon="search").props("outline")
-            _render_task_summary_cards(ui, model, t, on_select_task)
-            _render_pagination(
-                ui,
-                t,
-                model.task_page,
-                model.task_total_pages,
-                model.task_filtered_count or model.task_total_count,
-                "ui.web.unit.task",
-                "条任务",
-                lambda: on_set_task_page(model.task_page - 1),
-                lambda: on_set_task_page(model.task_page + 1),
-            )
-            if not model.tasks:
-                ui.label(_tr(t, "ui.web.tasks.empty", "当前筛选条件下没有任务。")).classes("text-sm cb-muted")
-            ui.separator()
-            ui.label(_tr(t, "ui.web.tasks.detail_title", "任务详情: {task}", task=model.selected_task_id or _tr(t, "ui.web.value.unselected", "(未选择)"))).classes("cb-section-title")
-            ui.button(_tr(t, "ui.web.action.load_task_detail", "加载任务详情"), on_click=on_load_task_detail, icon="download").props("outline")
-            _render_detail_tabs(
-                ui,
-                t,
-                [
-                    ("task_detail", _tr(t, "ui.web.tab.task_detail", "任务详情"), "\n".join(model.task_detail_lines)),
-                    ("task_output", _tr(t, "ui.web.tab.task_output", "完整输出 / 错误"), "\n".join(model.task_result_lines)),
-                ],
-                "max-h-80 overflow-auto",
-            )
+            if not model.task_list_loaded:
+                ui.label(_tr(t, "ui.web.tasks.lazy_list", "点击“加载任务列表”后再读取最近任务和筛选项。")).classes("text-sm cb-muted")
+                ui.button(_tr(t, "ui.web.action.load_task_list", "加载任务列表"), on_click=on_load_task_list, icon="download").props("outline")
+            else:
+                if model.selected_session_name:
+                    ui.label(_tr(t, "ui.web.tasks.filtered_by_session", "当前按会话过滤: {session}", session=model.selected_session_name)).classes("text-sm cb-muted")
+                if model.task_filtered_count != model.task_total_count:
+                    ui.label(_tr(t, "ui.web.tasks.filtered_count", "当前显示 {filtered} / {total} 条任务", filtered=model.task_filtered_count, total=model.task_total_count)).classes("text-sm cb-muted")
+                with ui.row().classes("w-full gap-2 flex-wrap"):
+                    status_filter = ui.select(
+                        _task_status_filter_options(t, model.task_status_options),
+                        value=model.selected_task_status,
+                        label=_tr(t, "ui.table.status", "状态"),
+                    ).classes("min-w-[12rem]")
+                    agent_filter = ui.select(
+                        {"": _tr(t, "ui.web.filter.all_agent", "全部 Agent"), **{item: item for item in model.task_agent_options}},
+                        value=model.selected_task_agent,
+                        label=_tr(t, "ui.web.field.agent", "Agent"),
+                    ).classes("min-w-[14rem]")
+                    backend_filter = ui.select(
+                        {"": _tr(t, "ui.web.filter.all_backend", "全部后端"), **{item: item for item in model.task_backend_options}},
+                        value=model.selected_task_backend,
+                        label=_tr(t, "ui.web.field.backend", "后端"),
+                    ).classes("min-w-[12rem]")
+                    ui.button(
+                        _tr(t, "ui.web.action.apply_filter", "应用筛选"),
+                        on_click=lambda: on_set_task_filters(
+                            status_filter.value or "",
+                            agent_filter.value or "",
+                            backend_filter.value or "",
+                        ),
+                        icon="filter_alt",
+                    ).props("outline")
+                    ui.button(_tr(t, "ui.web.action.clear_filter", "清空筛选"), on_click=lambda: on_set_task_filters("", "", ""), icon="filter_alt_off").props("flat")
+                with ui.row().classes("w-full gap-2 flex-wrap"):
+                    task_lookup = ui.input(label=_tr(t, "ui.web.field.lookup_task", "按 task_id 快速定位"), placeholder="task-xxxxxxxxxx").classes("w-full sm:min-w-[18rem] sm:w-auto")
+                    ui.button(_tr(t, "ui.web.action.locate_task", "定位任务"), on_click=lambda: on_find_task_by_id(task_lookup.value or ""), icon="search").props("outline")
+                _render_task_summary_cards(ui, model, t, on_select_task)
+                _render_pagination(
+                    ui,
+                    t,
+                    model.task_page,
+                    model.task_total_pages,
+                    model.task_filtered_count or model.task_total_count,
+                    "ui.web.unit.task",
+                    "条任务",
+                    lambda: on_set_task_page(model.task_page - 1),
+                    lambda: on_set_task_page(model.task_page + 1),
+                )
+                if not model.tasks:
+                    ui.label(_tr(t, "ui.web.tasks.empty", "当前筛选条件下没有任务。")).classes("text-sm cb-muted")
+                ui.separator()
+                ui.label(_tr(t, "ui.web.tasks.detail_title", "任务详情: {task}", task=model.selected_task_id or _tr(t, "ui.web.value.unselected", "(未选择)"))).classes("cb-section-title")
+                ui.button(_tr(t, "ui.web.action.load_task_detail", "加载任务详情"), on_click=on_load_task_detail, icon="download").props("outline")
+                _render_detail_tabs(
+                    ui,
+                    t,
+                    [
+                        ("task_detail", _tr(t, "ui.web.tab.task_detail", "任务详情"), "\n".join(model.task_detail_lines)),
+                        ("task_output", _tr(t, "ui.web.tab.task_output", "完整输出 / 错误"), "\n".join(model.task_result_lines)),
+                    ],
+                    "max-h-80 overflow-auto",
+                )
         with ui.card().classes("cb-card w-full p-5"):
             _render_card_title(ui, _tr(t, "ui.web.bindings.title", "微信会话绑定"))
-            if model.weixin_conversations:
+            if not model.weixin_bindings_loaded:
+                ui.label(_tr(t, "ui.web.bindings.lazy_list", "点击“加载微信会话绑定”后再读取发送方会话状态。")).classes("text-sm cb-muted")
+                ui.button(_tr(t, "ui.web.action.load_weixin_bindings", "加载微信会话绑定"), on_click=on_load_weixin_bindings, icon="download").props("outline")
+            elif model.weixin_conversations:
                 for item in model.weixin_conversations:
                     with _panel(ui):
-                        with ui.dialog() as reset_dialog, ui.card().classes("min-w-[28rem]"):
+                        with ui.dialog() as reset_dialog, _dialog_card(ui):
                             ui.label(_tr(t, "ui.web.bindings.reset_title", "确认重置微信会话")).classes("text-lg font-semibold")
-                            ui.label(_tr(t, "ui.web.bindings.reset_body", "这会删除该发送方的会话状态，并在 Bridge 运行中时自动重启使其生效。")).classes("text-sm text-slate-600")
+                            ui.label(_tr(t, "ui.web.bindings.reset_body", "这会删除该发送方的会话状态，并在 Bridge 运行中时自动重启使其生效。")).classes("text-sm cb-muted")
                             with ui.row().classes("justify-end gap-2 w-full"):
                                 ui.button(_tr(t, "ui.button.cancel", "取消"), on_click=reset_dialog.close).props("flat")
                                 ui.button(
@@ -499,12 +530,12 @@ def render_sessions_section(
                                     ),
                                 )
                         with ui.row().classes("w-full items-center justify-between gap-3 flex-wrap"):
-                            with ui.column().classes("gap-1"):
-                                ui.label(_tr(t, "ui.web.bindings.sender", "发送方: {sender}", sender=item.sender_id)).classes("font-semibold")
-                                ui.label(_tr(t, "ui.web.bindings.current", "Agent: {agent} | 当前会话: {session} | 当前后端: {backend}", agent=item.agent_id, session=item.current_session, backend=item.current_backend)).classes("text-sm text-slate-700")
-                                ui.label(_tr(t, "ui.web.bindings.count", "会话数: {count} | 最近更新: {updated_at}", count=item.session_count, updated_at=item.updated_at)).classes("text-sm cb-muted")
+                            with ui.column().classes("gap-1 min-w-0 flex-1"):
+                                ui.label(_tr(t, "ui.web.bindings.sender", "发送方: {sender}", sender=item.sender_id)).classes("font-semibold break-all")
+                                ui.label(_tr(t, "ui.web.bindings.current", "Agent: {agent} | 当前会话: {session} | 当前后端: {backend}", agent=item.agent_id, session=item.current_session, backend=item.current_backend)).classes("text-sm cb-ink break-all")
+                                ui.label(_tr(t, "ui.web.bindings.count", "会话数: {count} | 最近更新: {updated_at}", count=item.session_count, updated_at=item.updated_at)).classes("text-sm cb-muted break-all")
                                 if item.latest_task_id:
-                                    ui.label(_tr(t, "ui.web.bindings.latest_task", "最近任务: {task} [{status}]", task=item.latest_task_id, status=item.latest_task_status)).classes("text-sm cb-muted")
+                                    ui.label(_tr(t, "ui.web.bindings.latest_task", "最近任务: {task} [{status}]", task=item.latest_task_id, status=item.latest_task_status)).classes("text-sm cb-muted break-all")
                             with ui.column().classes("items-stretch lg:items-end gap-2 w-full lg:w-auto lg:min-w-[15rem]"):
                                 backend_select = ui.select(
                                     supported_backend_options(),
@@ -531,6 +562,1064 @@ def render_sessions_section(
             else:
                 ui.label(_tr(t, "ui.web.bindings.empty", "当前还没有微信会话绑定记录。")).classes("cb-muted")
                 ui.label(_tr(t, "ui.web.bindings.empty_detail", "当 Bridge 收到消息后，这里会显示发送方当前使用的 Agent、会话和后端。")).classes("text-sm cb-muted")
+
+
+def render_mobile_section(
+    ui: UIFactoryLike,
+    t: Translator,
+    mobile_url: str,
+    qr_data_url: str,
+    on_copy_mobile_url,
+    on_open_mobile_url,
+) -> None:
+    with ui.element("section").props(f"id={MOBILE_PAGE.anchor}").classes("w-full"):
+        _render_page_intro(ui, _tr(t, "ui.tab.mobile", MOBILE_PAGE.title), _tr(t, "ui.page.mobile.description", MOBILE_PAGE.description), "Mobile")
+        with _responsive_grid(ui, "grid-cols-1 lg:grid-cols-[minmax(18rem,24rem)_1fr]").classes("cb-mobile-qr-panel"):
+            with ui.card().classes("cb-card w-full p-5"):
+                _render_card_title(
+                    ui,
+                    _tr(t, "ui.web.mobile.qr_title", "扫码打开手机看板"),
+                    _tr(t, "ui.web.mobile.qr_detail", "手机与电脑在同一 WiFi 下时，用相机或扫码工具对准二维码即可打开。"),
+                )
+                with ui.element("div").classes("w-full flex justify-center py-2"):
+                    ui.image(qr_data_url).classes("w-64 h-64 rounded-[8px] border border-[var(--cb-border)] bg-white p-2")
+                with ui.row().classes("gap-2 flex-wrap justify-center"):
+                    ui.button(_tr(t, "ui.web.action.copy_mobile_url", "复制地址"), on_click=on_copy_mobile_url, icon="content_copy").props("outline")
+                    ui.button(_tr(t, "ui.web.action.open_mobile_url", "打开手机页"), on_click=on_open_mobile_url, icon="open_in_new")
+            with ui.card().classes("cb-card w-full p-5"):
+                _render_card_title(
+                    ui,
+                    _tr(t, "ui.web.mobile.access_title", "局域网访问地址"),
+                    _tr(t, "ui.web.mobile.access_detail", "这个地址包含访问 token，请只在可信局域网内使用。"),
+                )
+                _render_code_block(ui, mobile_url, "text-sm")
+                with _responsive_grid(ui, "grid-cols-1 md:grid-cols-2"):
+                    with _panel(ui):
+                        ui.label(_tr(t, "ui.web.mobile.step_scan", "1. 用手机扫码")).classes("font-semibold cb-ink")
+                        ui.label(_tr(t, "ui.web.mobile.step_scan_detail", "看到链接提示后点开，会进入 ChatBridge Mobile。")).classes("text-sm cb-muted")
+                    with _panel(ui):
+                        ui.label(_tr(t, "ui.web.mobile.step_home", "2. 添加到主屏幕")).classes("font-semibold cb-ink")
+                        ui.label(_tr(t, "ui.web.mobile.step_home_detail", "浏览器打开后可添加到主屏幕，之后像 App 一样进入。")).classes("text-sm cb-muted")
+                ui.label(_tr(t, "ui.web.mobile.tcp_note", "当前是局域网 HTTP over TCP 访问，不需要域名，也没有使用 NATFRP HTTP 隧道。")).classes("text-sm cb-muted")
+
+
+def _stream_text(value: object, *, limit: int = 1800) -> str:
+    text = str(value or "").strip("\r\n")
+    return text if len(text) <= limit else f"{text[: limit - 1]}..."
+
+
+_STREAM_INLINE_CODE_RE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
+_STREAM_FENCED_CODE_RE = re.compile(
+    r"^[ \t]{0,3}(?P<fence>`{3,}|~{3,})[^\n]*\n.*?^[ \t]{0,3}(?P=fence)[ \t]*$",
+    re.DOTALL | re.MULTILINE,
+)
+_STREAM_INDENTED_CODE_LINE_RE = re.compile(r"^(?: {4}|\t)")
+_STREAM_LINE_SUFFIX_RE = re.compile(r"(#L\d+(?:-L?\d+)?|:\d+(?::\d+)?(?:-\d+(?::\d+)?)?|\(\d+(?:,\d+)?(?:-\d+(?:,\d+)?)?\))$")
+_STREAM_FILE_EXTENSIONS = {
+    "astro",
+    "bash",
+    "c",
+    "cc",
+    "cjs",
+    "cpp",
+    "cs",
+    "css",
+    "cts",
+    "cxx",
+    "env",
+    "fish",
+    "go",
+    "gql",
+    "gradle",
+    "graphql",
+    "h",
+    "hpp",
+    "htm",
+    "html",
+    "ini",
+    "java",
+    "js",
+    "json",
+    "jsonc",
+    "jsx",
+    "kt",
+    "kts",
+    "less",
+    "lock",
+    "lua",
+    "md",
+    "mdx",
+    "mjs",
+    "mts",
+    "php",
+    "proto",
+    "py",
+    "rb",
+    "rs",
+    "sass",
+    "scss",
+    "sh",
+    "sql",
+    "svelte",
+    "swift",
+    "toml",
+    "ts",
+    "tsx",
+    "txt",
+    "vue",
+    "xml",
+    "yaml",
+    "yml",
+    "zsh",
+}
+
+
+def _stream_markdown(value: str, t: Translator) -> str:
+    copy_title = _tr(t, "ui.web.mobile.copy_file_path", "复制文件路径")
+    text = str(value or "")
+    parts: list[str] = []
+    cursor = 0
+    for match in _STREAM_FENCED_CODE_RE.finditer(text):
+        if match.start() > cursor:
+            parts.append(_stream_markdown_text_segment(text[cursor:match.start()], copy_title))
+        parts.append(match.group(0))
+        cursor = match.end()
+    if cursor < len(text):
+        parts.append(_stream_markdown_text_segment(text[cursor:], copy_title))
+    return "".join(parts)
+
+def _stream_markdown_text_segment(value: str, copy_title: str) -> str:
+    parts: list[str] = []
+    text_lines: list[str] = []
+
+    def flush_text_lines() -> None:
+        if not text_lines:
+            return
+        parts.append(_stream_markdown_inline_segment("".join(text_lines), copy_title))
+        text_lines.clear()
+
+    for line in value.splitlines(keepends=True):
+        if _STREAM_INDENTED_CODE_LINE_RE.match(line):
+            flush_text_lines()
+            parts.append(line)
+        else:
+            text_lines.append(line)
+    flush_text_lines()
+    return "".join(parts)
+
+
+def _stream_markdown_inline_segment(value: str, copy_title: str) -> str:
+    parts: list[str] = []
+    cursor = 0
+    for match in _STREAM_INLINE_CODE_RE.finditer(value):
+        if match.start() > cursor:
+            parts.append(_stream_rewrite_markdown_links(value[cursor:match.start()], copy_title))
+        parts.append(_stream_file_link_replacement(match, copy_title))
+        cursor = match.end()
+    if cursor < len(value):
+        parts.append(_stream_rewrite_markdown_links(value[cursor:], copy_title))
+    return "".join(parts)
+
+
+def _stream_rewrite_markdown_links(value: str, copy_title: str) -> str:
+    parts: list[str] = []
+    cursor = 0
+    while cursor < len(value):
+        start = value.find("[", cursor)
+        if start < 0:
+            parts.append(value[cursor:])
+            break
+        if start > 0 and value[start - 1] == "!":
+            parts.append(value[cursor:start + 1])
+            cursor = start + 1
+            continue
+        label_end = _stream_find_markdown_label_end(value, start)
+        if label_end < 0 or label_end + 1 >= len(value) or value[label_end + 1] != "(":
+            parts.append(value[cursor:start + 1])
+            cursor = start + 1
+            continue
+        parsed = _stream_parse_markdown_link_destination(value, label_end + 2)
+        if parsed is None:
+            parts.append(value[cursor:start + 1])
+            cursor = start + 1
+            continue
+        destination, end = parsed
+        href = _stream_markdown_href_candidate(destination)
+        if href and _stream_is_file_href_candidate(href, allow_spaces=True):
+            parts.append(value[cursor:start])
+            parts.append(_stream_markdown_file_link_replacement(value[start + 1:label_end], href, copy_title))
+            cursor = end + 1
+            continue
+        parts.append(value[cursor:end + 1])
+        cursor = end + 1
+    return "".join(parts)
+
+
+def _stream_find_markdown_label_end(value: str, start: int) -> int:
+    depth = 0
+    cursor = start + 1
+    while cursor < len(value):
+        char = value[cursor]
+        if char == "\\":
+            cursor += 2
+            continue
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            if depth == 0:
+                return cursor
+            depth -= 1
+        cursor += 1
+    return -1
+
+def _stream_parse_markdown_link_destination(value: str, start: int) -> tuple[str, int] | None:
+    if start >= len(value):
+        return None
+    if value[start] == "<":
+        end_angle = value.find(">", start + 1)
+        if end_angle < 0:
+            return None
+        cursor = end_angle + 1
+        while cursor < len(value) and value[cursor].isspace():
+            cursor += 1
+        if cursor < len(value) and value[cursor] in {"'", '"'}:
+            quote_char = value[cursor]
+            cursor += 1
+            while cursor < len(value) and value[cursor] != quote_char:
+                cursor += 1
+            if cursor >= len(value):
+                return None
+            cursor += 1
+            while cursor < len(value) and value[cursor].isspace():
+                cursor += 1
+        if cursor >= len(value) or value[cursor] != ")":
+            return None
+        return value[start:end_angle + 1], cursor
+    depth = 0
+    cursor = start
+    while cursor < len(value):
+        char = value[cursor]
+        if char == "\n":
+            return None
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            if depth == 0:
+                return value[start:cursor], cursor
+            depth -= 1
+        cursor += 1
+    return None
+
+
+def _stream_markdown_href_candidate(value: str) -> str:
+    href = str(value or "").strip()
+    if href.startswith("<") and href.endswith(">"):
+        return unquote(href[1:-1].strip())
+    decoded = unquote(href)
+    if _stream_is_file_href_candidate(decoded, allow_spaces=True):
+        return decoded
+    title_match = re.match(r"(?P<href>.+?)\s+(['\"])[^'\"]*\2$", decoded)
+    if title_match:
+        return title_match.group("href").strip()
+    return decoded
+
+
+def _stream_markdown_file_link_replacement(label: str, href: str, copy_title: str) -> str:
+    encoded_href = f"#chatbridge-file={quote(href, safe='')}"
+    title = copy_title.replace('"', "'")
+    return f"[{label}]({encoded_href} \"{title}\")"
+
+
+def _stream_file_link_replacement(match: re.Match[str], copy_title: str) -> str:
+    token = match.group(1)
+    if not _stream_is_file_path_candidate(token):
+        return match.group(0)
+    href = f"#chatbridge-file={quote(token, safe='')}"
+    title = copy_title.replace('"', "'")
+    return f"[`{token}`]({href} \"{title}\")"
+
+
+def _stream_is_file_href_candidate(value: str, *, allow_spaces: bool = False) -> bool:
+    href = str(value or "").strip()
+    if not href:
+        return False
+    if href.lower().startswith("file://"):
+        return True
+    return _stream_is_file_path_candidate(href, allow_spaces=allow_spaces)
+
+
+def _stream_is_file_path_candidate(value: str, *, allow_spaces: bool = False) -> bool:
+    token = str(value or "").strip()
+    if not token or len(token) > 260 or "\n" in token:
+        return False
+    if any(char in token for char in "<>"):
+        return False
+    lowered = token.lower()
+    if lowered.startswith(("http://", "https://", "mailto:", "data:", "chatbridge-file://")):
+        return False
+    if not allow_spaces and any(char.isspace() for char in token):
+        return False
+    normalized = token.replace("\\", "/").strip("'\"`")
+    without_line = _STREAM_LINE_SUFFIX_RE.sub("", normalized)
+    basename = without_line.rstrip("/").rsplit("/", 1)[-1]
+    if "." not in basename:
+        return False
+    stem, extension = basename.rsplit(".", 1)
+    if not stem:
+        return False
+    extension = extension.lower()
+    if extension not in _STREAM_FILE_EXTENSIONS:
+        return False
+    if re.match(r"^[A-Za-z]:/", without_line):
+        return True
+    if without_line.startswith(("/", "./", "../", "~/")):
+        return True
+    if "/" in without_line:
+        first_segment = without_line.split("/", 1)[0]
+        return "." not in first_segment
+    return "." in basename and extension in _STREAM_FILE_EXTENSIONS
+
+
+def _stream_status_class(status: str) -> str:
+    if status == "succeeded":
+        return "cb-chip cb-chip-ok"
+    if status == "failed":
+        return "cb-chip cb-chip-danger"
+    return "cb-chip cb-chip-warn"
+
+
+def _stream_summary(task: dict[str, object], *, limit: int = 120) -> str:
+    for key in ("summary", "progress_text", "output", "error", "prompt"):
+        text = _stream_text(task.get(key), limit=limit)
+        if text:
+            return text
+    return ""
+
+
+def _stream_task_body(task: dict[str, object], t: Translator) -> tuple[str, str]:
+    error = _stream_text(task.get("error"))
+    if error:
+        return _tr(t, "ui.web.mobile.stream_error", "错误"), error
+    progress = _stream_text(task.get("progress_text"))
+    if progress:
+        return _tr(t, "ui.web.mobile.stream_progress", "进度"), progress
+    output = _stream_text(task.get("output"))
+    if output:
+        return _tr(t, "ui.web.mobile.stream_output", "输出"), output
+    return _tr(t, "ui.web.mobile.stream_prompt", "输入"), _stream_text(task.get("prompt"))
+
+
+def _stream_time_sort_key(value: object) -> tuple[int, float, str]:
+    text = str(value or "").strip()
+    if not text:
+        return (1, 0.0, "")
+    normalized = text.replace("Z", "+00:00")
+    try:
+        return (0, datetime.fromisoformat(normalized).timestamp(), text)
+    except ValueError:
+        pass
+    for fmt in ("%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M", "%Y/%m/%d"):
+        try:
+            return (0, datetime.strptime(text, fmt).timestamp(), text)
+        except ValueError:
+            continue
+    return (1, 0.0, text)
+
+
+def _stream_task_sort_key(task: dict[str, object]) -> tuple[tuple[int, float, str], str, str, str]:
+    stream_order = task.get("stream_order")
+    try:
+        parsed_order = int(stream_order)
+    except (TypeError, ValueError):
+        parsed_order = 0
+    created_at = _stream_time_sort_key(task.get("created_at"))
+    task_id = str(task.get("id") or "")
+    if parsed_order > 0:
+        return (created_at, "0", f"{parsed_order:08d}", task_id)
+    return (created_at, "1", "", task_id)
+
+
+def _stream_session_order(sessions: dict[str, list[dict[str, object]]], session_names: list[str]) -> list[str]:
+    return sorted(
+        session_names,
+        key=lambda session_name: max((_stream_task_sort_key(task) for task in sessions.get(session_name, [])), default=((1, 0.0, ""), "", "", "")),
+        reverse=True,
+    )
+
+
+def _stream_image_items(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item or "").strip() for item in value if str(item or "").strip()]
+
+
+def _stream_image_previews(value: object) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    previews: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        source = str(item.get("source") or "").strip()
+        label = str(item.get("label") or "").strip()
+        if source or label:
+            previews.append({"source": source, "label": label})
+    return previews
+
+
+def _stream_activity_items(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    items: list[dict[str, object]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        event = str(item.get("event") or "").strip()
+        activity_type = str(item.get("type") or "system").strip() or "system"
+        at = str(item.get("at") or "").strip()
+        detail = str(item.get("detail") or "").strip()
+        raw_metadata = item.get("metadata")
+        metadata = {
+            str(key): str(value).strip()
+            for key, value in raw_metadata.items()
+            if isinstance(raw_metadata, dict) and str(key).strip() and str(value).strip()
+        } if isinstance(raw_metadata, dict) else {}
+        if event and at:
+            items.append({"event": event, "type": activity_type, "at": at, "detail": detail, "metadata": metadata})
+    return items
+
+
+def _stream_activity_type_class(activity_type: str) -> str:
+    if activity_type == "success":
+        return "cb-stream-activity-item cb-stream-activity-success"
+    if activity_type == "error":
+        return "cb-stream-activity-item cb-stream-activity-error"
+    if activity_type == "info":
+        return "cb-stream-activity-item cb-stream-activity-info"
+    return "cb-stream-activity-item cb-stream-activity-system"
+
+
+def _stream_activity_message(item: dict[str, object], t: Translator) -> str:
+    event = str(item.get("event") or "")
+    return {
+        "accepted": _tr(t, "ui.web.mobile.activity_accepted", "已接收任务"),
+        "running": _tr(t, "ui.web.mobile.activity_running", "开始运行"),
+        "progress": _tr(t, "ui.web.mobile.activity_progress", "收到进度"),
+        "succeeded": _tr(t, "ui.web.mobile.activity_succeeded", "任务完成"),
+        "failed": _tr(t, "ui.web.mobile.activity_failed", "任务失败"),
+        "canceled": _tr(t, "ui.web.mobile.activity_canceled", "任务已取消"),
+        "unknown_after_restart": _tr(t, "ui.web.mobile.activity_restart_interrupted", "重启后状态未知"),
+        "codex_tool_call": _tr(t, "ui.web.mobile.activity_codex_tool_call", "工具调用"),
+        "codex_todo": _tr(t, "ui.web.mobile.activity_codex_todo", "待办更新"),
+        "codex_activity": _tr(t, "ui.web.mobile.activity_codex_activity", "Codex 活动"),
+        "codex_compaction": _tr(t, "ui.web.mobile.activity_codex_compaction", "上下文压缩"),
+        "codex_error": _tr(t, "ui.web.mobile.activity_codex_error", "Codex 错误"),
+        "codex_item": _tr(t, "ui.web.mobile.activity_codex_item", "Codex 事件"),
+    }.get(event, event or _tr(t, "ui.web.mobile.activity_event", "任务事件"))
+
+
+def _stream_activity_metadata_text(metadata: dict[str, object]) -> str:
+    return json.dumps(metadata, ensure_ascii=False, indent=2, default=str)
+
+
+def _stream_has_codex_activity(items: list[dict[str, object]]) -> bool:
+    return any(str(item.get("event") or "").startswith("codex_") for item in items)
+
+def _stream_image_is_previewable(value: str) -> bool:
+    return value.lower().startswith(("data:image/", "http://", "https://"))
+
+
+def _stream_attachment_label(value: str) -> str:
+    cleaned = value.replace("\\", "/").rstrip("/")
+    return cleaned.rsplit("/", 1)[-1] or value
+
+
+def _stream_lightbox_props(source: str, label: str, t: Translator) -> str:
+    encoded_source = quote(source, safe="")
+    encoded_label = quote(label, safe="")
+    preview_title = quote(_tr(t, "ui.web.mobile.open_image_preview", "打开图片预览"), safe="")
+    return f"data-lightbox-src={encoded_source} data-lightbox-label={encoded_label} title={preview_title} role=button tabindex=0"
+
+
+def _stream_context_left_percent(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        percent = int(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0, min(100, percent))
+
+def _stream_session_task_count(mobile_state: dict[str, object], session_name: str) -> int:
+    counts = mobile_state.get("session_task_counts")
+    if not isinstance(counts, dict):
+        return 0
+    value = counts.get(session_name)
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+def _stream_footer_time(task: dict[str, object], status: str) -> str:
+    if status in {"running", "queued"}:
+        return str(task.get("started_at") or task.get("created_at") or "").strip()
+    return str(task.get("finished_at") or task.get("progress_at") or task.get("created_at") or "").strip()
+
+
+def _parse_stream_time(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _stream_duration_text(task: dict[str, object], t: Translator) -> str:
+    started_at = _parse_stream_time(task.get("started_at") or task.get("created_at"))
+    finished_at = _parse_stream_time(task.get("finished_at") or task.get("progress_at"))
+    if started_at is None or finished_at is None or finished_at < started_at:
+        return ""
+    return _stream_duration_seconds_text(max(0, int((finished_at - started_at).total_seconds())), t)
+
+def _stream_duration_seconds_text(total_seconds: int, t: Translator) -> str:
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return _tr(t, "ui.web.mobile.stream_duration_hours", "{hours} 小时 {minutes} 分", hours=hours, minutes=minutes)
+    if minutes:
+        return _tr(t, "ui.web.mobile.stream_duration_minutes", "{minutes} 分 {seconds} 秒", minutes=minutes, seconds=seconds)
+    return _tr(t, "ui.web.mobile.stream_duration_seconds", "{seconds} 秒", seconds=seconds)
+
+
+def _stream_live_elapsed_text(task: dict[str, object], t: Translator) -> str:
+    started_at = _parse_stream_time(task.get("started_at") or task.get("created_at"))
+    if started_at is None:
+        return ""
+    now = datetime.now(started_at.tzinfo) if started_at.tzinfo else datetime.now()
+    if now < started_at:
+        return _stream_duration_seconds_text(0, t)
+    return _stream_duration_seconds_text(max(0, int((now - started_at).total_seconds())), t)
+
+def _stream_footer_label(task: dict[str, object], status: str, t: Translator) -> str:
+    status_text = _tr(t, f"bridge.task.status.{status}", status)
+    duration_text = _stream_duration_text(task, t)
+    if duration_text and status not in {"running", "queued"}:
+        return _tr(
+            t,
+            "ui.web.mobile.stream_turn_footer_duration",
+            "耗时 {duration}",
+            duration=duration_text,
+        )
+    time_text = _stream_footer_time(task, status)
+    if not time_text:
+        return status_text
+    return _tr(
+        t,
+        "ui.web.mobile.stream_turn_footer",
+        "{time}",
+        time=time_text,
+    )
+
+
+def _stream_footer_time_label(task: dict[str, object], status: str, t: Translator) -> str:
+    status_text = _tr(t, f"bridge.task.status.{status}", status)
+    time_text = _stream_footer_time(task, status)
+    if not time_text:
+        return status_text
+    return _tr(
+        t,
+        "ui.web.mobile.stream_turn_footer",
+        "{time}",
+        time=time_text,
+    )
+
+
+def _render_stream_footer_label(ui: UIFactoryLike, primary: str, alternate: str = "") -> None:
+    alternate_text = alternate if alternate and alternate != primary else ""
+    props = "data-footer-toggle=1 role=button tabindex=0" if alternate_text else ""
+    with ui.element("span").props(props).classes("cb-stream-footer-label-wrap"):
+        if alternate_text:
+            sizer_text = primary if len(primary) >= len(alternate_text) else alternate_text
+            ui.label(sizer_text).classes("cb-stream-footer-label-sizer")
+            ui.label(primary).classes("cb-stream-footer-label cb-stream-footer-label-main")
+            ui.label(alternate_text).classes("cb-stream-footer-label cb-stream-footer-label-alt")
+        else:
+            ui.label(primary).classes("cb-stream-footer-label")
+
+
+def _prepare_stream_render_context(mobile_state: dict[str, object], selected_session_name: str) -> dict[str, object]:
+    tasks = mobile_state.get("tasks") if isinstance(mobile_state.get("tasks"), list) else []
+    visible_tasks = [task for task in tasks if isinstance(task, dict)]
+    agents = mobile_state.get("agents") if isinstance(mobile_state.get("agents"), list) else []
+    selected_codex_thread = mobile_state.get("selected_codex_thread") if isinstance(mobile_state.get("selected_codex_thread"), dict) else {}
+    default_agent_item = next((agent for agent in agents if isinstance(agent, dict)), {})
+    sessions: dict[str, list[dict[str, object]]] = {}
+    session_order: list[str] = []
+    for task in visible_tasks:
+        session_name = str(task.get("session_name") or "default")
+        if session_name not in sessions:
+            sessions[session_name] = []
+            session_order.append(session_name)
+        sessions[session_name].append(task)
+    session_order = _stream_session_order(sessions, session_order)
+    selected_session = selected_session_name.strip()
+    active_session = selected_session or (session_order[0] if session_order else "default")
+    session_tasks = sorted(sessions.get(active_session, []), key=_stream_task_sort_key)
+    has_running_session_task = any(str(task.get("status") or "").strip() == "running" for task in session_tasks)
+    queued_composer_tasks = [
+        task
+        for task in session_tasks
+        if has_running_session_task and str(task.get("status") or "").strip() == "queued"
+    ]
+    stream_tasks = [
+        task
+        for task in session_tasks
+        if not (has_running_session_task and str(task.get("status") or "").strip() == "queued")
+    ]
+    session_total_count = _stream_session_task_count(mobile_state, active_session)
+    displayed_session_count = len(session_tasks)
+    has_older_session_tasks = session_total_count > displayed_session_count
+    latest_task = session_tasks[-1] if session_tasks else None
+    latest_task_id = str(latest_task.get("id") or "").strip() if isinstance(latest_task, dict) else ""
+    latest_active_task = next(
+        (
+            task
+            for task in reversed(session_tasks)
+            if str(task.get("status") or "").strip() == ("running" if has_running_session_task else "queued")
+            and str(task.get("id") or "").strip()
+        ),
+        None,
+    )
+    latest_active_task_id = str(latest_active_task.get("id") or "").strip() if isinstance(latest_active_task, dict) else ""
+    status_task = latest_active_task if isinstance(latest_active_task, dict) else latest_task
+    default_agent = str(status_task.get("agent_id") or default_agent_item.get("id") or "main") if isinstance(status_task, dict) else str(default_agent_item.get("id") or "main")
+    default_backend = str(status_task.get("backend") or default_agent_item.get("backend") or "") if isinstance(status_task, dict) else str(default_agent_item.get("backend") or "")
+    context_left_percent = _stream_context_left_percent(status_task.get("context_left_percent")) if isinstance(status_task, dict) else None
+
+    return {
+        "active_session": active_session,
+        "session_tasks": session_tasks,
+        "stream_tasks": stream_tasks,
+        "queued_composer_tasks": queued_composer_tasks,
+        "has_older_session_tasks": has_older_session_tasks,
+        "displayed_session_count": displayed_session_count,
+        "session_total_count": session_total_count,
+        "is_loading": bool(selected_codex_thread.get("loading")) and not session_tasks,
+        "latest_task_id": latest_task_id,
+        "latest_active_task_id": latest_active_task_id,
+        "default_agent": default_agent,
+        "default_backend": default_backend,
+        "context_left_percent": context_left_percent,
+    }
+
+def render_mobile_stream_shell(
+    ui: UIFactoryLike,
+    active_session: str,
+    render_messages,
+    render_composer,
+) -> None:
+    encoded_active_session = quote(active_session, safe="")
+    with ui.element("section").props(f"id={STREAM_PAGE.anchor} data-stream-key={encoded_active_session}").classes("cb-agent-panel w-full"):
+        render_messages()
+        _render_mobile_stream_scroll_button(ui)
+        render_composer()
+
+def render_mobile_stream_messages_section(
+    ui: UIFactoryLike,
+    t: Translator,
+    mobile_state: dict[str, object],
+    selected_session_name: str,
+    on_copy_text,
+    on_cancel_task,
+    on_load_older,
+) -> None:
+    context = _prepare_stream_render_context(mobile_state, selected_session_name)
+    _render_mobile_stream_messages(ui, t, context, on_copy_text, on_cancel_task, on_load_older)
+
+def _render_mobile_stream_messages(
+    ui: UIFactoryLike,
+    t: Translator,
+    context: dict[str, object],
+    on_copy_text,
+    on_cancel_task,
+    on_load_older,
+) -> None:
+    active_session = str(context.get("active_session") or "default")
+    stream_tasks = [task for task in context.get("stream_tasks", []) if isinstance(task, dict)]
+    has_older_session_tasks = bool(context.get("has_older_session_tasks"))
+    displayed_session_count = int(context.get("displayed_session_count") or 0)
+    session_total_count = int(context.get("session_total_count") or 0)
+    latest_task_id = str(context.get("latest_task_id") or "")
+
+    with ui.element("div").classes("cb-agent-stream cb-chat-scroll"):
+        with ui.column().classes("cb-agent-stream-content"):
+            if has_older_session_tasks:
+                load_older_label = _tr(
+                    t,
+                    "ui.web.mobile.load_older",
+                    "加载更早消息 ({shown}/{total})",
+                    shown=displayed_session_count,
+                    total=session_total_count,
+                )
+                with ui.element("div").props("data-load-older-ready=1").classes("cb-stream-load-older-wrap"):
+                    ui.button(
+                        load_older_label,
+                        on_click=lambda session_name=active_session: on_load_older(session_name),
+                        icon="expand_less",
+                    ).props("flat dense data-load-older-ready=1").classes("cb-stream-load-older-button").on(
+                        "click",
+                        js_handler=f"""
+                        () => {{
+                            const scroller = document.querySelector('.cb-agent-stream');
+                            if (!scroller) return;
+                            window.__cbStreamLoadOlderAnchor = {{
+                                key: {active_session!r},
+                                scrollHeight: scroller.scrollHeight,
+                                scrollTop: scroller.scrollTop,
+                            }};
+                        }}
+                        """,
+                    )
+            if not stream_tasks:
+                with ui.element("div").classes("cb-stream-empty-state"):
+                    with ui.column().classes("items-center gap-2"):
+                        if bool(context.get("is_loading")):
+                            ui.label(_tr(t, "ui.web.mobile.stream_loading", "正在加载会话。")).classes("cb-stream-empty-text")
+                            ui.label(_tr(t, "ui.web.mobile.stream_loading_hint", "消息会在读取完成后自动出现。")).classes("cb-stream-empty-text")
+                        else:
+                            ui.label(_tr(t, "ui.web.mobile.stream_empty", "暂无任务输出。")).classes("cb-stream-empty-text")
+                            ui.label(_tr(t, "ui.web.mobile.stream_empty_hint", "当前会话还没有实时输出。")).classes("cb-stream-empty-text")
+            else:
+                for task in stream_tasks:
+                    status = str(task.get("status") or "queued")
+                    prompt_text = _stream_text(task.get("prompt"), limit=6000)
+                    image_items = _stream_image_items(task.get("images"))
+                    image_previews = _stream_image_previews(task.get("image_previews"))
+                    error_text = _stream_text(task.get("error"), limit=8000)
+                    progress_text = _stream_text(task.get("progress_text"), limit=4000)
+                    output_text = _stream_text(task.get("output"), limit=20000)
+                    activity_items = _stream_activity_items(task.get("activity_items"))
+                    has_codex_activity = _stream_has_codex_activity(activity_items)
+                    task_id = str(task.get("id") or "").strip()
+                    should_show_activity = bool(activity_items) and (
+                        has_codex_activity
+                        or task_id == latest_task_id
+                        or status in {"running", "queued"}
+                    )
+                    summary_text = _stream_text(task.get("summary"), limit=4000)
+                    assistant_text = error_text or output_text or progress_text or ("" if has_codex_activity else summary_text)
+                    if not assistant_text and status in {"running", "queued"}:
+                        assistant_text = _tr(t, "ui.web.mobile.stream_working", "正在处理")
+                    turn_classes = "cb-stream-turn cb-stream-turn-with-footer" if assistant_text or should_show_activity else "cb-stream-turn"
+                    with ui.element("div").classes(turn_classes):
+                        if prompt_text:
+                            with ui.element("div").classes("cb-stream-message cb-stream-user"):
+                                with ui.element("div").classes("cb-stream-user-content"):
+                                    with ui.element("div").classes("cb-stream-user-bubble"):
+                                        if image_items:
+                                            with ui.element("div").classes("cb-stream-attachments"):
+                                                for index, image_item in enumerate(image_items):
+                                                    preview = image_previews[index] if index < len(image_previews) else {}
+                                                    preview_source = preview.get("source") or image_item
+                                                    preview_label = preview.get("label") or _stream_attachment_label(image_item)
+                                                    if _stream_image_is_previewable(preview_source) or preview_source.startswith("/mobile-upload/"):
+                                                        ui.image(preview_source).props(_stream_lightbox_props(preview_source, preview_label, t)).classes("cb-stream-image-attachment cb-stream-image-lightbox-trigger")
+                                                    else:
+                                                        with ui.element("div").classes("cb-stream-file-attachment"):
+                                                            ui.label(_tr(t, "ui.web.mobile.stream_image_attachment", "图片")).classes("cb-stream-file-kind")
+                                                            ui.label(preview_label).classes("cb-stream-file-name")
+                                        ui.label(prompt_text).classes("cb-stream-body")
+                                    with ui.element("div").classes("cb-stream-user-footer"):
+                                        created_at = str(task.get("created_at") or "").strip()
+                                        if created_at:
+                                            ui.label(created_at).classes("cb-stream-footer-label")
+                                        ui.button(
+                                            "",
+                                            on_click=lambda value=prompt_text: on_copy_text(value),
+                                            icon="content_copy",
+                                            color=None,
+                                        ).props("flat dense round").classes("cb-stream-copy-button")
+                        if assistant_text or should_show_activity:
+                            with ui.element("div").classes("cb-stream-message cb-stream-assistant"):
+                                with ui.element("div").classes("cb-stream-assistant-content"):
+                                    if progress_text and (output_text or error_text):
+                                        with ui.element("div").classes("cb-stream-tool-block cb-stream-progress"):
+                                            ui.label(_tr(t, "ui.web.mobile.stream_progress", "进度")).classes("cb-stream-tool-label")
+                                            ui.markdown(_stream_markdown(progress_text, t)).classes("cb-stream-tool-body cb-stream-markdown")
+                                    if should_show_activity:
+                                        with ui.element("div").classes("cb-stream-activity-log"):
+                                            for item in activity_items:
+                                                metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+                                                detail = str(item.get("detail") or "")
+                                                at = str(item.get("at") or "")
+                                                display_metadata = dict(metadata)
+                                                if detail:
+                                                    display_metadata = {"detail": detail, **display_metadata}
+                                                if at:
+                                                    display_metadata = {"at": at, **display_metadata}
+                                                with ui.element("details").props("data-activity-details=1").classes(_stream_activity_type_class(str(item.get("type") or ""))):
+                                                    with ui.element("summary").classes("cb-stream-activity-summary"):
+                                                        ui.element("span").classes("cb-stream-activity-icon")
+                                                        with ui.element("div").classes("cb-stream-activity-copy"):
+                                                            ui.label(_stream_activity_message(item, t)).classes("cb-stream-activity-message")
+                                                            if display_metadata:
+                                                                with ui.element("div").classes("cb-stream-activity-details-row"):
+                                                                    ui.label(_tr(t, "ui.web.mobile.activity_details", "详情")).classes("cb-stream-activity-details-label")
+                                                                    ui.element("span").classes("cb-stream-activity-chevron")
+                                                    if display_metadata:
+                                                        with ui.element("div").classes("cb-stream-activity-metadata"):
+                                                            ui.label(_stream_activity_metadata_text(display_metadata)).classes("cb-stream-activity-metadata-text")
+                                    body_classes = "cb-stream-body"
+                                    if status == "failed" and error_text:
+                                        body_classes = f"{body_classes} cb-stream-error"
+                                    elif progress_text and not output_text:
+                                        body_classes = f"{body_classes} cb-stream-progress"
+                                    if assistant_text:
+                                        ui.markdown(_stream_markdown(assistant_text, t)).classes(f"{body_classes} cb-stream-markdown")
+                                        with ui.element("div").classes("cb-stream-turn-footer"):
+                                            if status in {"running", "queued"}:
+                                                task_id = str(task.get("id") or "").strip()
+                                                started_at = str(task.get("started_at") or task.get("created_at") or "").strip()
+                                                with ui.element("span").props("aria-hidden=true").classes("cb-stream-working-loader"):
+                                                    for dot_index in range(6):
+                                                        ui.element("span").classes(f"cb-stream-working-loader-dot cb-stream-working-loader-dot-{dot_index}")
+                                                if started_at:
+                                                    ui.label(_stream_live_elapsed_text(task, t)).props(f"data-started-at={started_at}").classes("cb-stream-live-elapsed")
+                                                if task_id:
+                                                    stop_label = _tr(t, "ui.web.mobile.cancel_task", "停止任务")
+                                                    ui.button(
+                                                        "",
+                                                        on_click=lambda task_id=task_id: on_cancel_task(task_id),
+                                                        icon="stop",
+                                                    ).props(f'flat dense round title="{stop_label}" aria-label="{stop_label}" data-task-id={task_id}').classes("cb-stream-stop-button")
+                                            else:
+                                                ui.button(
+                                                    "",
+                                                    on_click=lambda value=assistant_text: on_copy_text(value),
+                                                    icon="content_copy",
+                                                    color=None,
+                                                ).props("flat dense round").classes("cb-stream-copy-button")
+                                                _render_stream_footer_label(
+                                                    ui,
+                                                    _stream_footer_label(task, status, t),
+                                                    _stream_footer_time_label(task, status, t),
+                                                )
+
+def _render_mobile_stream_scroll_button(ui: UIFactoryLike) -> None:
+    ui.button("", icon="keyboard_arrow_down", color=None).props("round unelevated").classes("cb-scroll-bottom-button").on(
+        "click",
+        js_handler="""
+        () => {
+            const scroller = document.querySelector('.cb-agent-stream');
+            if (!scroller) return;
+            const decodeStreamKey = (value) => {
+                try {
+                    return decodeURIComponent(value || '');
+                } catch {
+                    return value || '';
+                }
+            };
+            const renderedActiveKey = decodeStreamKey(document.querySelector('.cb-agent-panel')?.dataset?.streamKey || '').trim();
+            const activeKey = window.__cbStreamActiveKey || window.__cbStreamDesiredActiveKey || renderedActiveKey;
+            window.__cbStreamScrollStateByKey = window.__cbStreamScrollStateByKey || {};
+            window.__cbStreamScrollStateByKey[activeKey] = {
+                delta: 0,
+                nearBottom: true,
+                userScrolledAway: false,
+            };
+            window.__cbStreamScrollDelta = 0;
+            window.__cbStreamWasNearBottom = true;
+            window.__cbStreamUserScrolledAway = false;
+            window.__cbStreamProgrammaticScrollUntil = Date.now() + 250;
+            scroller.scrollTop = scroller.scrollHeight;
+            document.querySelector('.cb-scroll-bottom-button')?.classList.remove('cb-scroll-bottom-button-visible');
+        }
+        """,
+    )
+
+def render_mobile_stream_composer_section(
+    ui: UIFactoryLike,
+    t: Translator,
+    mobile_state: dict[str, object],
+    selected_session_name: str,
+    pending_image_attachments: list[dict[str, str]],
+    on_send_message,
+    on_cancel_task,
+    on_upload_image,
+    on_remove_image,
+    on_new_session=None,
+) -> None:
+    context = _prepare_stream_render_context(mobile_state, selected_session_name)
+    _render_mobile_stream_composer(
+        ui,
+        t,
+        context,
+        pending_image_attachments,
+        on_send_message,
+        on_cancel_task,
+        on_upload_image,
+        on_remove_image,
+    )
+
+def _render_mobile_stream_composer(
+    ui: UIFactoryLike,
+    t: Translator,
+    context: dict[str, object],
+    pending_image_attachments: list[dict[str, str]],
+    on_send_message,
+    on_cancel_task,
+    on_upload_image,
+    on_remove_image,
+) -> None:
+    active_session = str(context.get("active_session") or "default")
+    queued_composer_tasks = [task for task in context.get("queued_composer_tasks", []) if isinstance(task, dict)]
+    latest_active_task_id = str(context.get("latest_active_task_id") or "")
+    default_agent = str(context.get("default_agent") or "main")
+    default_backend = str(context.get("default_backend") or "")
+    context_left_percent = context.get("context_left_percent")
+
+    def submit_composer(input_box: UIElementLike, session: str, agent: str, backend: str) -> None:
+        prompt = str(input_box.value or "")
+        if not session.strip():
+            return
+        if not prompt.strip():
+            on_send_message(prompt, session, agent, backend)
+            return
+        submitted = on_send_message(prompt, session, agent, backend)
+        if submitted is not False:
+            input_box.set_value("")
+
+    composer_zone_classes = "cb-composer-zone" if active_session else "cb-composer-zone hidden"
+    with ui.element("div").classes(composer_zone_classes):
+        with ui.element("div").classes("cb-composer-inner"):
+            with ui.element("div").classes("cb-composer-box"):
+                if queued_composer_tasks:
+                    with ui.element("div").classes("cb-composer-queue-track"):
+                        for queued_task in queued_composer_tasks:
+                            queued_prompt = _stream_text(queued_task.get("prompt"), limit=220)
+                            queued_task_id = str(queued_task.get("id") or "").strip()
+                            with ui.element("div").props(f"data-task-id={queued_task_id}").classes("cb-composer-queue-item"):
+                                ui.label(queued_prompt or _tr(t, "ui.web.mobile.stream_prompt", "输入")).classes("cb-composer-queue-text")
+                                with ui.row().classes("cb-composer-queue-actions"):
+                                    if queued_task_id:
+                                        stop_label = _tr(t, "ui.web.mobile.cancel_task", "停止任务")
+                                        ui.button(
+                                            "",
+                                            on_click=lambda task_id=queued_task_id: on_cancel_task(task_id),
+                                            icon="close",
+                                            color=None,
+                                        ).props(f'flat dense round title="{stop_label}" aria-label="{stop_label}" data-task-id={queued_task_id}').classes("cb-composer-queue-cancel")
+                with ui.element("div").classes("cb-composer-upload-panel cb-composer-upload-panel-hidden"):
+                    ui.label(_tr(t, "ui.web.mobile.add_image_title", "添加图片附件")).classes("cb-composer-upload-title")
+                    ui.upload(
+                        multiple=True,
+                        max_files=8,
+                        max_file_size=12 * 1024 * 1024,
+                        auto_upload=True,
+                        label=_tr(t, "ui.web.mobile.add_image_upload", "选择图片"),
+                        on_upload=lambda event, session=active_session: on_upload_image(session, event),
+                    ).props("accept=image/* flat bordered").classes("w-full cb-composer-upload")
+                if pending_image_attachments:
+                    with ui.element("div").classes("cb-composer-attachment-tray"):
+                        for attachment in pending_image_attachments:
+                            image_path = str(attachment.get("path") or "")
+                            image_source = str(attachment.get("source") or "")
+                            image_label = str(attachment.get("label") or _tr(t, "ui.web.mobile.stream_image_attachment", "图片"))
+                            with ui.element("div").classes("cb-composer-attachment-pill"):
+                                if image_source:
+                                    ui.image(image_source).classes("cb-composer-attachment-thumb")
+                                ui.label(image_label).classes("cb-composer-attachment-name")
+                                ui.button(
+                                    "",
+                                    on_click=lambda path=image_path, session=active_session: on_remove_image(session, path),
+                                    icon="close",
+                                    color=None,
+                                ).props("flat dense round").classes("cb-composer-attachment-remove")
+                message_input = ui.textarea(
+                    placeholder=_tr(t, "ui.web.mobile.stream_composer_placeholder", "输入要发给当前会话的内容"),
+                ).props("autogrow borderless").classes("w-full cb-composer-input")
+                with ui.row().classes("w-full justify-between items-center gap-2 cb-composer-actions"):
+                    add_label = _tr(t, "ui.web.mobile.add_image_title", "添加图片附件")
+                    ui.button("", icon="add").props(f'flat dense round title="{add_label}" aria-label="{add_label}"').classes("cb-composer-tool-button cb-composer-upload-button").on(
+                        "click",
+                        js_handler="""
+                        () => {
+                            const panel = document.querySelector('.cb-composer-upload-panel');
+                            const button = document.querySelector('.cb-composer-upload-button');
+                            if (!panel || !button) return;
+                            const hidden = panel.classList.toggle('cb-composer-upload-panel-hidden');
+                            window.__cbComposerUploadOpen = !hidden;
+                            const icon = button.querySelector('.q-icon, i');
+                            if (icon) icon.textContent = hidden ? 'add' : 'close';
+                            window.requestAnimationFrame(() => {
+                                const composerZone = document.querySelector('.cb-composer-zone');
+                                const height = composerZone ? Math.ceil(composerZone.getBoundingClientRect().height) : 0;
+                                document.documentElement.style.setProperty('--cb-composer-height', `${height}px`);
+                            });
+                        }
+                        """,
+                    )
+                    with ui.row().classes("items-center gap-2 cb-composer-right-actions"):
+                        if context_left_percent is not None:
+                            meter_label = _tr(t, "ui.web.mobile.context_left", "上下文 {percent}%", percent=context_left_percent)
+                            with ui.element("div").props(f"data-context-left={context_left_percent}").classes("cb-context-meter"):
+                                with ui.element("span").classes("cb-context-meter-track"):
+                                    ui.element("span").classes("cb-context-meter-fill").style(f"width: {context_left_percent}%")
+                                ui.label(meter_label).classes("cb-context-meter-label")
+                        if latest_active_task_id:
+                            stop_label = _tr(t, "ui.web.mobile.cancel_task", "停止任务")
+                            ui.button(
+                                "",
+                                on_click=lambda task_id=latest_active_task_id: on_cancel_task(task_id),
+                                icon="stop",
+                            ).props(f'unelevated round color=negative title="{stop_label}" aria-label="{stop_label}" data-task-id={latest_active_task_id}').classes("cb-composer-stop-button cb-composer-cancel-button")
+                        send_label = (
+                            _tr(t, "ui.web.mobile.queue_message", "排队发送")
+                            if latest_active_task_id
+                            else _tr(t, "ui.web.mobile.send_message", "发送消息")
+                        )
+                        send_icon = "keyboard_return" if latest_active_task_id else "arrow_upward"
+                        ui.button(
+                            "",
+                            on_click=lambda input_box=message_input, session=active_session, agent=default_agent, backend=default_backend: submit_composer(input_box, session, agent, backend),
+                            icon=send_icon,
+                            color=None,
+                        ).props(f'unelevated round title="{send_label}" aria-label="{send_label}" data-composer-mode=send {"disable" if not active_session else ""}').classes("cb-composer-send-button cb-composer-send-disabled")
+
+def render_mobile_stream_section(
+    ui: UIFactoryLike,
+    t: Translator,
+    mobile_state: dict[str, object],
+    selected_session_name: str,
+    pending_image_attachments: list[dict[str, str]],
+    on_select_session,
+    on_send_message,
+    on_copy_text,
+    on_cancel_task,
+    on_load_older,
+    on_upload_image,
+    on_remove_image,
+    on_new_session=None,
+) -> None:
+    context = _prepare_stream_render_context(mobile_state, selected_session_name)
+    active_session = str(context.get("active_session") or "default")
+    render_mobile_stream_shell(
+        ui,
+        active_session,
+        lambda: _render_mobile_stream_messages(ui, t, context, on_copy_text, on_cancel_task, on_load_older),
+        lambda: _render_mobile_stream_composer(
+            ui,
+            t,
+            context,
+            pending_image_attachments,
+            on_send_message,
+            on_cancel_task,
+            on_upload_image,
+            on_remove_image,
+        ),
+    )
 
 
 def render_diagnostics_section(
@@ -591,11 +1680,16 @@ def render_diagnostics_section(
             with ui.card().classes("cb-card w-full p-5"):
                 with ui.row().classes("items-center justify-between gap-2"):
                     _render_card_title(ui, _tr(t, "ui.card.activity", "运行日志"))
-                    ui.button(_tr(t, "ui.web.action.refresh_logs", "刷新日志"), on_click=on_refresh_logs, icon="refresh").props("outline")
-                for title, content in model.log_sections:
-                    ui.label(title).classes("font-semibold text-slate-700")
-                    _render_code_block(ui, content, "max-h-60 overflow-auto")
-                    ui.separator()
+                    log_action_key = "ui.web.action.refresh_logs" if model.logs_loaded else "ui.web.action.load_logs"
+                    log_action_fallback = "刷新日志" if model.logs_loaded else "加载日志"
+                    ui.button(_tr(t, log_action_key, log_action_fallback), on_click=on_refresh_logs, icon="refresh").props("outline")
+                if not model.logs_loaded:
+                    ui.label(_tr(t, "ui.web.logs.lazy_list", "点击“加载日志”后再读取并渲染运行日志。")).classes("text-sm cb-muted")
+                else:
+                    for title, content in model.log_sections:
+                        ui.label(title).classes("font-semibold cb-ink")
+                        _render_code_block(ui, content, "max-h-60 overflow-auto")
+                        ui.separator()
         _render_repair_suggestions(ui, model, t, on_run_repair_command)
         with ui.card().classes("cb-card w-full p-5"):
             _render_card_title(ui, _tr(t, "ui.web.agents.title", "Agent 管理"))
@@ -679,9 +1773,9 @@ def render_diagnostics_section(
             selected_agent.on_value_change(lambda event: fill_agent_form(event.value or ""))
             fill_agent_form("")
 
-            with ui.dialog() as delete_dialog, ui.card().classes("min-w-[28rem]"):
+            with ui.dialog() as delete_dialog, _dialog_card(ui):
                 ui.label(_tr(t, "ui.web.agents.delete_title", "确认删除 Agent")).classes("text-lg font-semibold")
-                ui.label(_tr(t, "ui.web.agents.delete_body", "删除后会移除该 Agent 配置和任务记录。若该 Agent 正被微信桥使用，Hub 会拒绝删除。")).classes("text-sm text-slate-600")
+                ui.label(_tr(t, "ui.web.agents.delete_body", "删除后会移除该 Agent 配置和任务记录。若该 Agent 正被微信桥使用，Hub 会拒绝删除。")).classes("text-sm cb-muted")
                 with ui.row().classes("justify-end gap-2 w-full"):
                     ui.button(_tr(t, "ui.button.cancel", "取消"), on_click=delete_dialog.close).props("flat")
                     ui.button(
@@ -722,9 +1816,9 @@ def render_diagnostics_section(
             if model.external_agent_processes:
                 for item in model.external_agent_processes:
                     with _panel(ui):
-                        with ui.dialog() as terminate_dialog, ui.card().classes("min-w-[28rem]"):
+                        with ui.dialog() as terminate_dialog, _dialog_card(ui):
                             ui.label(_tr(t, "ui.web.external.terminate_title", "确认结束外部 Agent 进程")).classes("text-lg font-semibold")
-                            ui.label(_tr(t, "ui.web.external.terminate_body", "PID {pid} 将被直接结束。这个操作只影响外部终端里手动启动的 Agent 进程。", pid=item.pid)).classes("text-sm text-slate-600")
+                            ui.label(_tr(t, "ui.web.external.terminate_body", "PID {pid} 将被直接结束。这个操作只影响外部终端里手动启动的 Agent 进程。", pid=item.pid)).classes("text-sm cb-muted")
                             _render_code_block(ui, item.command_line)
                             with ui.row().classes("justify-end gap-2 w-full"):
                                 ui.button(_tr(t, "ui.button.cancel", "取消"), on_click=terminate_dialog.close).props("flat")
@@ -737,9 +1831,9 @@ def render_diagnostics_section(
                                     ),
                                 )
                         ui.label(f"PID {item.pid} | {item.backend} | {item.managed_label}").classes("font-semibold")
-                        ui.label(_tr(t, "ui.web.external.process_name", "进程名: {name}", name=item.name)).classes("text-sm text-slate-700")
+                        ui.label(_tr(t, "ui.web.external.process_name", "进程名: {name}", name=item.name)).classes("text-sm cb-ink")
                         if item.session_hint:
-                            ui.label(_tr(t, "ui.web.external.session_hint", "会话标识: {hint}", hint=item.session_hint)).classes("text-sm text-slate-700")
+                            ui.label(_tr(t, "ui.web.external.session_hint", "会话标识: {hint}", hint=item.session_hint)).classes("text-sm cb-ink")
                         _render_code_block(ui, item.command_line, "max-h-36 overflow-auto")
                         with ui.row().classes("gap-2 flex-wrap"):
                             if item.session_hint:

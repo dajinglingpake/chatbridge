@@ -10,7 +10,7 @@ from core.accounts import build_account_options
 from core.actions import RepairCommand, build_repair_command_models
 from core.app_state import build_badge, build_summary_text, decide_primary_action, infer_bridge_mode
 from core.dashboard import DashboardState, load_dashboard_state
-from core.sessions import SessionRow, build_session_detail, build_session_rows
+from core.sessions import SessionRow, build_session_detail, build_session_rows_page
 from core.state_models import CheckSnapshot, HubStateSnapshot, HubTask, RuntimeSnapshot
 
 
@@ -171,17 +171,21 @@ class WebConsoleViewModel:
     checks: list[CheckViewModel]
     checks_in_progress: bool
     checks_progress_text: str
+    logs_loaded: bool
     log_sections: list[tuple[str, str]]
     tasks: list[TaskViewModel]
     session_rows: list[SessionRow]
     session_page: int
     session_total_count: int
     session_total_pages: int
+    session_rows_loaded: bool
     selected_session_name: str
     selected_task_id: str
     selected_task_status: str
     selected_task_agent: str
     selected_task_backend: str
+    session_files_loaded: bool
+    task_list_loaded: bool
     task_status_options: list[str]
     task_agent_options: list[str]
     task_backend_options: list[str]
@@ -198,6 +202,7 @@ class WebConsoleViewModel:
     agent_total_count: int
     agent_total_pages: int
     external_agent_processes: list[ExternalAgentProcessViewModel]
+    weixin_bindings_loaded: bool
     weixin_conversations: list[WeixinConversationBindingViewModel]
     account_options: list[AccountOptionViewModel]
     agent_options: list[AgentOptionViewModel]
@@ -245,6 +250,90 @@ def paginate_items(items: list[ItemT], page: int, page_size: int) -> tuple[list[
     end = start + normalized_page_size
     return items[start:end], normalized_page, total_pages
 
+
+def _task_matches_filters(
+    task: HubTask,
+    *,
+    session_name: str,
+    status: str,
+    agent: str,
+    backend: str,
+) -> bool:
+    return (
+        (not session_name or (task.session_name or "default") == session_name)
+        and (not status or task.status == status)
+        and (not agent or (task.agent_name or task.agent_id) == agent)
+        and (not backend or task.backend == backend)
+    )
+
+
+def collect_task_filter_options(tasks: list[HubTask]) -> tuple[list[str], list[str], list[str]]:
+    statuses: set[str] = set()
+    agents: set[str] = set()
+    backends: set[str] = set()
+    for task in tasks:
+        if task.status:
+            statuses.add(task.status)
+        agent = task.agent_name or task.agent_id
+        if agent:
+            agents.add(agent)
+        if task.backend:
+            backends.add(task.backend)
+    return sorted(statuses), sorted(agents), sorted(backends)
+
+
+def paginate_filtered_tasks(
+    tasks: list[HubTask],
+    *,
+    page: int,
+    page_size: int,
+    session_name: str,
+    status: str,
+    agent: str,
+    backend: str,
+) -> tuple[list[HubTask], int, int, int]:
+    normalized_page_size = max(1, int(page_size))
+    requested_page = max(1, int(page))
+    requested_start = (requested_page - 1) * normalized_page_size
+    requested_end = requested_start + normalized_page_size
+    filters_active = bool(session_name or status or agent or backend)
+    matched_count = 0
+    fallback_items: list[HubTask] = []
+    requested_items: list[HubTask] = []
+    last_page_items: list[HubTask] = []
+
+    for index, task in enumerate(tasks):
+        if not filters_active:
+            if requested_start <= index < requested_end:
+                requested_items.append(task)
+            continue
+        if len(fallback_items) < normalized_page_size:
+            fallback_items.append(task)
+        if not _task_matches_filters(
+            task,
+            session_name=session_name,
+            status=status,
+            agent=agent,
+            backend=backend,
+        ):
+            continue
+        if requested_start <= matched_count < requested_end:
+            requested_items.append(task)
+        last_page_items.append(task)
+        if len(last_page_items) > normalized_page_size:
+            del last_page_items[0]
+        matched_count += 1
+
+    use_filters = filters_active and matched_count > 0
+    total_count = matched_count if use_filters else len(tasks)
+    total_pages = max(1, math.ceil(total_count / normalized_page_size)) if total_count else 1
+    normalized_page = min(requested_page, total_pages)
+    if not use_filters:
+        start = (normalized_page - 1) * normalized_page_size
+        return tasks[start : start + normalized_page_size], normalized_page, total_pages, matched_count
+    if requested_page == normalized_page:
+        return requested_items, normalized_page, total_pages, matched_count
+    return last_page_items, normalized_page, total_pages, matched_count
 
 def build_home_view_model(
     snapshot: RuntimeSnapshot,
@@ -346,14 +435,28 @@ def build_web_console_view_model(
     agent_page: int = 1,
     checks_page: int = 1,
     load_session_detail: bool = False,
+    load_session_rows: bool = False,
+    load_session_files: bool = False,
+    load_task_list: bool = False,
     load_task_detail: bool = False,
+    load_weixin_bindings: bool = False,
+    load_logs: bool = False,
     selected_session_name: str = "",
     selected_task_id: str = "",
     selected_task_status: str = "",
     selected_task_agent: str = "",
     selected_task_backend: str = "",
 ) -> WebConsoleViewModel:
-    dashboard = load_dashboard_state(app_dir, page_key=page_key)
+    normalized_page_key = (page_key or "home").strip().lower()
+    include_hub_task_text = normalized_page_key == "sessions" and (load_session_detail or load_task_detail)
+    include_hub_tasks = normalized_page_key == "sessions" and (load_session_rows or load_session_detail or load_task_list or load_weixin_bindings)
+    dashboard = load_dashboard_state(
+        app_dir,
+        page_key=page_key,
+        load_bridge_conversations=load_weixin_bindings if (page_key or "").strip().lower() == "sessions" else None,
+        include_hub_tasks=include_hub_tasks,
+        include_hub_task_text=include_hub_task_text,
+    )
     return build_web_console_view_model_from_dashboard(
         dashboard,
         app_dir,
@@ -364,7 +467,12 @@ def build_web_console_view_model(
         agent_page=agent_page,
         checks_page=checks_page,
         load_session_detail=load_session_detail,
+        load_session_rows=load_session_rows,
+        load_session_files=load_session_files,
+        load_task_list=load_task_list,
         load_task_detail=load_task_detail,
+        load_weixin_bindings=load_weixin_bindings,
+        load_logs=load_logs,
         selected_session_name=selected_session_name,
         selected_task_id=selected_task_id,
         selected_task_status=selected_task_status,
@@ -383,7 +491,12 @@ def build_web_console_view_model_from_dashboard(
     agent_page: int = 1,
     checks_page: int = 1,
     load_session_detail: bool = False,
+    load_session_rows: bool = False,
+    load_session_files: bool = False,
+    load_task_list: bool = False,
     load_task_detail: bool = False,
+    load_weixin_bindings: bool = False,
+    load_logs: bool = False,
     selected_session_name: str = "",
     selected_task_id: str = "",
     selected_task_status: str = "",
@@ -400,12 +513,18 @@ def build_web_console_view_model_from_dashboard(
     session_detail = SessionDetailViewModel(rows=[], detail_text="", conversation_text="")
     session_total_count = 0
     session_total_pages = 1
-    if normalized_page_key == "sessions":
-        all_session_rows = build_session_rows(hub_state, session_dir)
-        available_session_names = {row.name for row in all_session_rows}
+    if normalized_page_key == "sessions" and load_session_rows:
+        session_rows_page = build_session_rows_page(
+            hub_state,
+            session_dir,
+            session_page,
+            10,
+            include_session_files=load_session_files,
+        )
+        available_session_names = set(session_rows_page.session_names)
         resolved_session_name = selected_session_name if selected_session_name in available_session_names else ""
-        if not resolved_session_name and all_session_rows:
-            resolved_session_name = all_session_rows[0].name
+        if not resolved_session_name and session_rows_page.session_names:
+            resolved_session_name = session_rows_page.session_names[0]
         if load_session_detail and resolved_session_name:
             session_detail = build_session_detail_view_model(hub_state, session_dir, resolved_session_name, t=t)
         else:
@@ -414,8 +533,20 @@ def build_web_console_view_model_from_dashboard(
                 detail_text=_t(t, "ui.web.sessions.lazy_detail", "点击“加载会话详情”后再读取会话文件和最近对话。"),
                 conversation_text=_t(t, "ui.web.sessions.lazy_preview", "当前为了避免切页卡顿，默认不自动加载会话详情和会话预览。"),
             )
-        session_total_count = len(all_session_rows)
-        session_rows, session_page, session_total_pages = paginate_items(all_session_rows, session_page, 10)
+        session_rows = session_rows_page.rows
+        session_page = session_rows_page.page
+        session_total_count = session_rows_page.total_count
+        session_total_pages = session_rows_page.total_pages
+    elif normalized_page_key == "sessions":
+        resolved_session_name = selected_session_name.strip()
+        if load_session_detail and resolved_session_name:
+            session_detail = build_session_detail_view_model(hub_state, session_dir, resolved_session_name, t=t)
+        else:
+            session_detail = SessionDetailViewModel(
+                rows=[],
+                detail_text=_t(t, "ui.web.sessions.lazy_detail", "点击“加载会话详情”后再读取会话文件和最近对话。"),
+                conversation_text=_t(t, "ui.web.sessions.lazy_preview", "当前为了避免切页卡顿，默认不自动加载会话详情和会话预览。"),
+            )
     bridge_config = dashboard.bridge_config
     account_selection = build_account_selection_view_model(t, bridge_config)
 
@@ -468,7 +599,7 @@ def build_web_console_view_model_from_dashboard(
     external_agent_processes.sort(key=lambda item: (item.backend, item.session_hint or "~", item.pid))
 
     weixin_conversations: list[WeixinConversationBindingViewModel] = []
-    if normalized_page_key == "sessions":
+    if normalized_page_key == "sessions" and load_weixin_bindings:
         latest_task_by_sender: dict[str, HubTask] = {}
         for task in hub_state.tasks:
             sender_id = task.sender_id.strip()
@@ -497,7 +628,7 @@ def build_web_console_view_model_from_dashboard(
                 )
             )
 
-    raw_tasks = list(hub_state.tasks)
+    raw_tasks = hub_state.tasks if load_task_list else []
     task_status_options: list[str] = []
     task_agent_options: list[str] = []
     task_backend_options: list[str] = []
@@ -511,29 +642,23 @@ def build_web_console_view_model_from_dashboard(
     task_total_pages = 1
     task_detail_lines = [_t(t, "ui.web.tasks.switch_to_sessions", "先切换到会话模块查看任务详情。")] if normalized_page_key != "sessions" else [_t(t, "ui.web.tasks.select_task_first", "先在上方选中一个任务。")]
     task_result_lines = [_t(t, "ui.web.tasks.output_placeholder", "这里会显示该任务的完整输出或错误。")]
-    if normalized_page_key == "sessions":
-        task_status_options = sorted({task.status for task in raw_tasks if task.status})
-        task_agent_options = sorted({(task.agent_name or task.agent_id) for task in raw_tasks if (task.agent_name or task.agent_id)})
-        task_backend_options = sorted({task.backend for task in raw_tasks if task.backend})
+    if normalized_page_key == "sessions" and load_task_list:
+        task_status_options, task_agent_options, task_backend_options = collect_task_filter_options(raw_tasks)
 
         resolved_task_status = selected_task_status if selected_task_status in task_status_options else ""
         resolved_task_agent = selected_task_agent if selected_task_agent in task_agent_options else ""
         resolved_task_backend = selected_task_backend if selected_task_backend in task_backend_options else ""
 
         total_task_count = len(raw_tasks)
-        filtered_raw_tasks = [
-            task
-            for task in raw_tasks
-            if (not resolved_session_name or (task.session_name or "default") == resolved_session_name)
-            and (not resolved_task_status or task.status == resolved_task_status)
-            and (not resolved_task_agent or (task.agent_name or task.agent_id) == resolved_task_agent)
-            and (not resolved_task_backend or task.backend == resolved_task_backend)
-        ]
-        filtered_task_count = len(filtered_raw_tasks)
-        if not filtered_raw_tasks:
-            filtered_raw_tasks = raw_tasks
-
-        paged_raw_tasks, task_page, task_total_pages = paginate_items(filtered_raw_tasks, task_page, 8)
+        paged_raw_tasks, task_page, task_total_pages, filtered_task_count = paginate_filtered_tasks(
+            raw_tasks,
+            page=task_page,
+            page_size=8,
+            session_name=resolved_session_name,
+            status=resolved_task_status,
+            agent=resolved_task_agent,
+            backend=resolved_task_backend,
+        )
         for task in paged_raw_tasks:
             tasks.append(
                 TaskViewModel(
@@ -551,7 +676,7 @@ def build_web_console_view_model_from_dashboard(
         resolved_task_id = selected_task_id if selected_task_id in available_task_ids else ""
         if not resolved_task_id and tasks:
             resolved_task_id = tasks[0].task_id
-        selected_task = next((task for task in filtered_raw_tasks if task.id == resolved_task_id), None)
+        selected_task = next((task for task in paged_raw_tasks if task.id == resolved_task_id), None)
         if selected_task is not None and load_task_detail:
             task_detail_lines = [
                 _t(t, "ui.web.task_detail.id", "任务 ID: {value}", value=selected_task.id),
@@ -571,6 +696,9 @@ def build_web_console_view_model_from_dashboard(
         elif selected_task is not None:
             task_detail_lines = [_t(t, "ui.web.tasks.lazy_detail", "点击“加载任务详情”后再读取完整输入和输出。")]
             task_result_lines = [_t(t, "ui.web.tasks.lazy_output", "当前为了避免卡顿，默认不自动展示完整输出。")]
+    elif normalized_page_key == "sessions":
+        task_detail_lines = [_t(t, "ui.web.tasks.lazy_list", "点击“加载任务列表”后再读取最近任务和筛选项。")]
+        task_result_lines = [_t(t, "ui.web.tasks.lazy_list_output", "当前为了避免切页卡顿，默认不自动加载任务列表。")]
 
     all_checks: list[CheckViewModel] = []
     for check in checks_map.values():
@@ -595,7 +723,7 @@ def build_web_console_view_model_from_dashboard(
         ("QQ OneBot Runtime stderr", dashboard.logs.get("onebot_runtime_err", "(empty)")),
         ("QQ Bridge stdout", dashboard.logs.get("qq_bridge_out", "(empty)")),
         ("QQ Bridge stderr", dashboard.logs.get("qq_bridge_err", "(empty)")),
-    ] if normalized_page_key == "diagnostics" else []
+    ] if normalized_page_key == "diagnostics" and load_logs else []
 
     return WebConsoleViewModel(
         home=build_home_view_model(
@@ -614,17 +742,21 @@ def build_web_console_view_model_from_dashboard(
         checks=checks,
         checks_in_progress=dashboard.checks_in_progress,
         checks_progress_text=_checks_progress_label(t, dashboard.checks_progress_text),
+        logs_loaded=bool(load_logs and normalized_page_key == "diagnostics"),
         log_sections=log_sections,
         tasks=tasks,
         session_rows=session_rows,
         session_page=session_page,
         session_total_count=session_total_count,
         session_total_pages=session_total_pages,
+        session_rows_loaded=bool(load_session_rows and normalized_page_key == "sessions"),
         selected_session_name=resolved_session_name,
         selected_task_id=resolved_task_id,
         selected_task_status=resolved_task_status,
         selected_task_agent=resolved_task_agent,
         selected_task_backend=resolved_task_backend,
+        session_files_loaded=bool(load_session_files and normalized_page_key == "sessions"),
+        task_list_loaded=bool(load_task_list and normalized_page_key == "sessions"),
         task_status_options=task_status_options,
         task_agent_options=task_agent_options,
         task_backend_options=task_backend_options,
@@ -641,6 +773,7 @@ def build_web_console_view_model_from_dashboard(
         agent_total_count=agent_total_count,
         agent_total_pages=agent_total_pages,
         external_agent_processes=external_agent_processes,
+        weixin_bindings_loaded=bool(load_weixin_bindings and normalized_page_key == "sessions"),
         weixin_conversations=weixin_conversations,
         account_options=account_selection.options,
         agent_options=agent_options,

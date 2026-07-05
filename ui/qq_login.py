@@ -46,13 +46,13 @@ def install_qq_login_dialog(
 ) -> Callable[[], None]:
     def open_qq_login_dialog() -> None:
         dialog = ui.dialog().props("persistent")
-        with dialog, ui.card().classes("cb-card cb-hero w-[30rem] max-w-full p-6"):
+        with dialog, ui.card().classes("cb-card cb-hero w-[30rem] max-w-[calc(100vw-1rem)] p-6"):
             with ui.column().classes("w-full gap-3"):
                 ui.label("QQ Login").classes("cb-kicker")
                 ui.label(_tr(t, "ui.qq_login.title", "扫码登录 QQ")).classes("text-2xl font-black text-white")
                 status = ui.label(_tr(t, "ui.qq_login.preparing", "正在准备 QQ 登录组件...")).classes("cb-chip cb-chip-warn w-fit")
-                with ui.element("div").classes("cb-panel w-full p-4 flex justify-center"):
-                    qr_image = ui.image("").classes("w-72 h-72 self-center")
+                with ui.element("div").classes("cb-panel w-full min-w-0 p-4 flex justify-center"):
+                    qr_image = ui.image("").classes("w-full max-w-72 aspect-square h-auto self-center")
                     placeholder = ui.label(_tr(t, "ui.qq_login.waiting_qr", "正在获取二维码...")).classes("text-sm text-slate-300 self-center")
                 detail = ui.label(_tr(t, "ui.qq_login.scan_hint", "请使用手机 QQ 扫码并确认登录。")).classes("text-sm text-slate-300")
                 with ui.row().classes("gap-2 flex-wrap"):

@@ -21,6 +21,7 @@ from runtime_stack import (
     get_runtime_snapshot,
     restart_all,
     restart_bridge,
+    restart_hub,
     restart_onebot_runtime,
     restart_qq_bridge,
     restart_qq_stack,
@@ -63,12 +64,14 @@ WEIXIN_NOTICE_ACTIONS = {
 }
 SELF_DISRUPTIVE_ACTIONS = {
     "restart",
+    "restart-hub",
     "restart-qq-stack",
     "stop",
     "emergency-stop",
 }
 HUB_RESTART_ACTIONS = {
     "restart",
+    "restart-hub",
     "restart-qq-stack",
 }
 ACTION_RUNNER_ENV = "CHATBRIDGE_SERVICE_ACTION_RUNNER"
@@ -120,6 +123,7 @@ def run_named_action(action: str) -> ServiceResult:
         "stop": stop_all,
         "restart": restart_all,
         "restart-bridge": restart_bridge,
+        "restart-hub": restart_hub,
         "start-onebot-runtime": lambda: [start_onebot_runtime()],
         "stop-onebot-runtime": lambda: [stop_onebot_runtime()],
         "restart-onebot-runtime": restart_onebot_runtime,
@@ -179,7 +183,7 @@ def _broadcast_pre_stop_notice(action: str):
 
 def schedule_named_action(action: str, *, delay_seconds: float = 1.0) -> ServiceResult:
     cleaned_action = action.strip()
-    if cleaned_action not in {"start", "start-weixin", "stop", "restart", "restart-bridge", "start-onebot-runtime", "stop-onebot-runtime", "restart-onebot-runtime", "start-qq-bridge", "stop-qq-bridge", "restart-qq-bridge", "restart-qq-stack", "prepare-qq-login", "emergency-stop"}:
+    if cleaned_action not in {"start", "start-weixin", "stop", "restart", "restart-bridge", "restart-hub", "start-onebot-runtime", "stop-onebot-runtime", "restart-onebot-runtime", "start-qq-bridge", "stop-qq-bridge", "restart-qq-bridge", "restart-qq-stack", "prepare-qq-login", "emergency-stop"}:
         return ServiceResult(ok=False, message=f"未知操作：{cleaned_action or action}")
 
     safe_delay = max(0.0, float(delay_seconds))
@@ -310,6 +314,8 @@ def submit_hub_task(
     sender_id: str = "",
     workdir: str = "",
     model: str = "",
+    images: list[str] | None = None,
+    session_id: str = "",
 ) -> ServiceResult:
     cleaned_prompt = prompt.strip()
     if not cleaned_prompt:
@@ -326,6 +332,8 @@ def submit_hub_task(
             "backend": backend.strip(),
             "workdir": workdir.strip(),
             "model": model.strip(),
+            "session_id": session_id.strip(),
+            "images": [str(item).strip() for item in (images or []) if str(item).strip()],
         },
     )
     try:
@@ -347,6 +355,61 @@ def submit_hub_task(
     notice = broadcast_bridge_notice_by_kind("task", "提交任务", message, channel="wechat")
     return ServiceResult(ok=False, message=f"{message} | {notice.summary}")
 
+
+def cancel_hub_task(task_id: str) -> ServiceResult:
+    cleaned_task_id = task_id.strip()
+    if not cleaned_task_id:
+        return ServiceResult(ok=False, message="取消失败：task_id 不能为空")
+
+    request_id = create_request("cancel_task", {"task_id": cleaned_task_id})
+    try:
+        response = wait_for_response(request_id, timeout_seconds=5)
+    except TimeoutError:
+        return ServiceResult(ok=False, message="取消失败：Hub 响应超时")
+
+    if response.ok:
+        task = _parse_hub_task(response.payload.get("task"))
+        session_name = task.session_name if task is not None else ""
+        suffix = f" | 会话：{session_name}" if session_name else ""
+        return ServiceResult(ok=True, message=f"已请求停止任务：{cleaned_task_id}{suffix}")
+    return ServiceResult(ok=False, message=f"取消失败：{response.error or 'unknown error'}")
+
+
+def list_codex_threads(
+    *,
+    limit: int = 50,
+    cursor: str = "",
+    search_term: str = "",
+    cwd: str = "",
+    archived: bool | None = False,
+    timeout_seconds: float = 8,
+) -> dict[str, object]:
+    request_id = create_request(
+        "codex_threads",
+        {
+            "limit": max(1, min(200, int(limit or 50))),
+            "cursor": cursor.strip(),
+            "search_term": search_term.strip(),
+            "cwd": cwd.strip(),
+            "archived": archived,
+        },
+    )
+    response = wait_for_response(request_id, timeout_seconds=timeout_seconds)
+    if not response.ok:
+        raise RuntimeError(response.error or "codex_threads failed")
+    return dict(response.payload)
+
+
+def read_codex_thread(thread_id: str, *, timeout_seconds: float = 8) -> dict[str, object]:
+    cleaned_thread_id = thread_id.strip()
+    if not cleaned_thread_id:
+        raise ValueError("thread_id is required")
+    request_id = create_request("codex_thread_read", {"thread_id": cleaned_thread_id})
+    response = wait_for_response(request_id, timeout_seconds=timeout_seconds)
+    if not response.ok:
+        raise RuntimeError(response.error or "codex_thread_read failed")
+    thread = response.payload.get("thread")
+    return thread if isinstance(thread, dict) else {}
 
 def switch_active_account(account_id: str, restart_if_running: bool = True) -> ServiceResult:
     cleaned_account_id = account_id.strip()
@@ -556,6 +619,31 @@ def reset_weixin_conversation(sender_id: str) -> ServiceResult:
     notice = broadcast_bridge_notice_by_kind("config", "重置微信会话", message, channel="wechat")
     return ServiceResult(ok=True, message=f"{message} | {notice.summary}")
 
+
+def switch_sender_current_session(sender_id: str, session_name: str) -> ServiceResult:
+    cleaned_sender_id = sender_id.strip()
+    cleaned_session_name = session_name.strip() or "default"
+    if not cleaned_sender_id:
+        return ServiceResult(ok=False, message="切换失败：sender_id 不能为空")
+
+    config = BridgeConfig.load()
+    conversation_path = _conversation_path_for_config(BRIDGE_CONVERSATIONS_PATH, config)
+    bindings = _read_conversation_bindings(conversation_path, config)
+    binding = bindings.get(cleaned_sender_id)
+    if binding is None:
+        binding = WeixinConversationBinding.create(default_backend=normalize_backend(config.default_backend), now=_state_now())
+    binding.ensure_session(
+        cleaned_session_name,
+        default_backend=config.default_backend,
+        now=_state_now(),
+        normalize_backend=normalize_backend,
+    )
+    bindings[cleaned_sender_id] = binding
+    _save_conversation_bindings(conversation_path, bindings)
+    return ServiceResult(
+        ok=True,
+        message=f"已将发送方 {cleaned_sender_id} 的当前会话切到 {cleaned_session_name}",
+    )
 
 def _read_conversations_file(path: Path) -> JsonObject:
     data = load_json(path, {}, expect_type=dict)
