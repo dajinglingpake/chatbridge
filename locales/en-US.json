@@ -601,6 +601,7 @@
   "ui.web.mobile.codex_thread_archived": "Archived",
   "ui.web.mobile.codex_threads_empty": "No Codex threads found.",
   "ui.web.mobile.codex_threads_error": "Failed to load Codex threads: {error}",
+  "ui.web.mobile.retry_codex_threads": "Reload Codex threads",
   "ui.web.mobile.codex_workspace_count": "{count} threads",
   "ui.web.mobile.codex_workspace_unknown": "No workspace",
   "ui.web.mobile.new_session_action": "Create and open",

@@ -1865,6 +1865,7 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("_sidebar_codex_threads()", body)
         self.assertIn("ui.web.mobile.load_more_sessions", body)
         self.assertIn("ui.web.mobile.load_codex_threads", body)
+        self.assertIn("ui.web.mobile.retry_codex_threads", body)
         self.assertIn("ui.web.mobile.load_more_codex_threads", body)
         self.assertNotIn('include_codex_threads=bool(state.get("stream_sidebar_codex_loaded"))', body)
         self.assertNotIn("build_mobile_state_snapshot()", body)

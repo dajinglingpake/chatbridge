@@ -2991,6 +2991,11 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             elif codex_threads_error:
                 with ui.element("div").classes("cb-panel w-full p-3"):
                     ui.label(t("ui.web.mobile.codex_threads_error", "Codex 会话读取失败：{error}", error=codex_threads_error)).classes("text-sm cb-muted")
+                    ui.button(
+                        t("ui.web.mobile.retry_codex_threads", "重新加载 Codex 会话"),
+                        on_click=_load_sidebar_codex_threads,
+                        icon="refresh",
+                    ).props("outline dense").classes("w-full mt-2")
             elif not codex_threads and codex_threads_done:
                 with ui.element("div").classes("cb-panel w-full p-3"):
                     ui.label(t("ui.web.mobile.codex_threads_empty", "没有发现 Codex 会话。")).classes("text-sm cb-muted")
