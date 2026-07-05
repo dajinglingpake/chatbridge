@@ -814,7 +814,7 @@ class StreamComposerTests(unittest.TestCase):
         self.assertEqual(0, len(buttons))
         self.assertEqual([], new_session_calls)
 
-    def test_load_older_button_is_marked_for_auto_history_loading(self) -> None:
+    def test_older_history_uses_hidden_auto_loader_not_visible_button(self) -> None:
         ui = FakeUI()
         mobile_state = {
             "counts": {"running": 0, "queued": 0},
@@ -852,25 +852,77 @@ class StreamComposerTests(unittest.TestCase):
             _noop,
         )
 
-        load_older_buttons = [
-            item for item in ui.elements if "cb-stream-load-older-button" in item.class_text
+        load_older_buttons = [item for item in ui.elements if "cb-stream-load-older-button" in item.class_text]
+        load_older_wrappers = [item for item in ui.elements if "cb-stream-load-older-wrap" in item.class_text]
+        auto_load_triggers = [
+            item for item in ui.elements if "cb-stream-auto-load-older-trigger" in item.class_text
         ]
-        load_older_wrappers = [
-            item for item in ui.elements if "cb-stream-load-older-wrap" in item.class_text
+
+        self.assertEqual([], load_older_buttons)
+        self.assertEqual([], load_older_wrappers)
+        self.assertEqual(1, len(auto_load_triggers))
+        self.assertIn("data-load-older-ready=1", auto_load_triggers[0].props_text)
+        self.assertIn("data-stream-auto-load-older=1", auto_load_triggers[0].props_text)
+        self.assertIn("hidden", auto_load_triggers[0].class_text.split())
+
+    def test_older_history_button_appears_after_auto_history_limit(self) -> None:
+        ui = FakeUI()
+        tasks = [
+            {
+                "id": f"task-{index:02d}",
+                "agent_id": "qq",
+                "agent_name": "QQ",
+                "backend": "codex",
+                "session_name": "focus",
+                "status": "succeeded",
+                "created_at": f"2026-07-04T05:{index:02d}:00",
+                "prompt": f"prompt {index}",
+                "output": f"answer {index}",
+                "summary": f"answer {index}",
+            }
+            for index in range(60)
+        ]
+        mobile_state = {
+            "counts": {"running": 0, "queued": 0},
+            "updated_at": "2026-07-04T05:20:00",
+            "agents": [{"id": "qq", "name": "QQ", "backend": "codex"}],
+            "tasks": tasks,
+            "session_task_counts": {"focus": 61},
+        }
+
+        render_mobile_stream_section(
+            ui,
+            _translator,
+            mobile_state,
+            "focus",
+            [],
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+        )
+
+        load_older_buttons = [item for item in ui.elements if "cb-stream-load-older-button" in item.class_text]
+        auto_load_triggers = [
+            item for item in ui.elements if "cb-stream-auto-load-older-trigger" in item.class_text
         ]
 
         self.assertEqual(1, len(load_older_buttons))
-        self.assertEqual(1, len(load_older_wrappers))
+        self.assertEqual([], auto_load_triggers)
         self.assertIn("data-load-older-ready=1", load_older_buttons[0].props_text)
-        self.assertIn("data-load-older-ready=1", load_older_wrappers[0].props_text)
 
     def test_stream_initial_history_window_stays_small(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")
 
         self.assertIn("STREAM_HISTORY_PAGE_SIZE = 20", source)
         self.assertIn("limits[cleaned_session_name] = _stream_session_task_limit(cleaned_session_name) + STREAM_HISTORY_PAGE_SIZE", source)
+        sections_source = Path("ui/sections.py").read_text(encoding="utf-8")
+        self.assertIn("STREAM_AUTO_HISTORY_LIMIT = 60", sections_source)
 
-    def test_latest_task_activity_log_is_rendered_from_activity_items(self) -> None:
+    def test_latest_task_activity_log_hides_routine_lifecycle_items(self) -> None:
         ui = FakeUI()
         mobile_state = {
             "counts": {"running": 0, "queued": 0},
@@ -957,30 +1009,25 @@ class StreamComposerTests(unittest.TestCase):
         metadata_texts = [item for item in ui.elements if "cb-stream-activity-metadata-text" in item.class_text.split()]
         activity_messages = [item.text for item in ui.elements if "cb-stream-activity-message" in item.class_text.split()]
 
-        self.assertEqual(1, len(activity_logs))
-        self.assertEqual(3, len(activity_items))
-        self.assertEqual(3, len(activity_details))
-        self.assertEqual(3, len(activity_icons))
-        self.assertEqual(3, len(activity_detail_rows))
-        self.assertEqual(3, len(activity_detail_labels))
-        self.assertEqual(3, len(activity_chevrons))
+        self.assertEqual([], activity_logs)
+        self.assertEqual([], activity_items)
+        self.assertEqual([], activity_details)
+        self.assertEqual([], activity_icons)
+        self.assertEqual([], activity_detail_rows)
+        self.assertEqual([], activity_detail_labels)
+        self.assertEqual([], activity_chevrons)
         self.assertEqual([], activity_dots)
         self.assertEqual([], activity_inline_details)
         self.assertEqual([], activity_inline_times)
         self.assertEqual([], metadata_rows)
-        self.assertEqual(3, len(metadata_texts))
-        self.assertIn("工具调用", activity_messages)
+        self.assertEqual([], metadata_texts)
+        self.assertNotIn("已接收任务", activity_messages)
+        self.assertNotIn("任务完成", activity_messages)
+        self.assertNotIn("工具调用", activity_messages)
         metadata_payload = "\n".join(item.text for item in metadata_texts)
-        at_052000 = "2026-07-04T05:20:00"
-        at_052100 = "2026-07-04T05:21:00"
-        at_052030 = "2026-07-04T05:20:30"
-        self.assertIn('"task_id": "task-activity"', metadata_payload)
-        self.assertIn('"agent": "qq"', metadata_payload)
-        self.assertIn('"backend": "codex"', metadata_payload)
-        self.assertIn(f'"at": "{at_052000}"', metadata_payload)
-        self.assertIn(f'"at": "{at_052100}"', metadata_payload)
-        self.assertIn(f'"at": "{at_052030}"', metadata_payload)
-        self.assertIn('"name": "shell"', metadata_payload)
+        self.assertNotIn('"task_id": "task-activity"', metadata_payload)
+        self.assertNotIn('"status": "succeeded"', metadata_payload)
+        self.assertNotIn('"name": "shell"', metadata_payload)
 
     def test_canceled_task_error_text_is_not_rendered_as_failure_red(self) -> None:
         ui = FakeUI()
@@ -1011,7 +1058,7 @@ class StreamComposerTests(unittest.TestCase):
         self.assertTrue(any("cb-stream-markdown" in item for item in markdown_classes))
         self.assertFalse(any("cb-stream-error" in item for item in markdown_classes))
 
-    def test_codex_activity_log_is_rendered_even_when_turn_is_historical(self) -> None:
+    def test_codex_activity_log_is_hidden_even_when_turn_is_historical(self) -> None:
         ui = FakeUI()
         mobile_state = {
             "counts": {"running": 0, "queued": 0},
@@ -1085,9 +1132,9 @@ class StreamComposerTests(unittest.TestCase):
             if "cb-stream-body" in item.class_text.split()
         ]
 
-        self.assertEqual(1, len(activity_logs))
-        self.assertIn("工具调用", activity_messages)
-        self.assertIn('"at": "2026-07-04T05:20:01"', "\n".join(metadata_texts))
+        self.assertEqual([], activity_logs)
+        self.assertNotIn("工具调用", activity_messages)
+        self.assertNotIn('"at": "2026-07-04T05:20:01"', "\n".join(metadata_texts))
         self.assertIn("2026-07-04T05:21:00", footer_labels)
         self.assertNotIn("shell: pytest", body_texts)
         self.assertEqual(["next prompt", "next answer"], body_texts)
@@ -1709,9 +1756,11 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("const setupLiveTypewriter = () => {", source)
         self.assertIn("document.querySelectorAll('[data-stream-live=\"1\"][data-stream-text-key]')", source)
         self.assertIn("const storedFullText = element.dataset.streamFullText || '';", source)
+        self.assertIn("window.queueMicrotask || ((callback) => Promise.resolve().then(callback))", source)
         self.assertIn("fullText.startsWith(currentText)", source)
         self.assertIn("animateLiveText(element, key, fullText", source)
         self.assertIn("new MutationObserver(scheduleLiveTextSync)", source)
+        self.assertNotIn("window.requestAnimationFrame(syncLiveText)", source)
 
     def test_stream_timer_reuses_computed_signature_during_refresh(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")
@@ -1748,6 +1797,7 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn('state["stream_force_bottom_session"] = ""', older_body)
         self.assertIn('state["stream_preserve_top_session"] = cleaned_session_name', older_body)
         self.assertIn("window.__cbStreamLoadOlderAnchor = {", older_body)
+        self.assertIn("stickToBottom: Math.max(0, scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight) <= 120", older_body)
         self.assertIn("stream_messages_view.refresh()", older_body)
         self.assertIn("scroll_stream_to_bottom(cleaned_session_name, preserve_top=True)", older_body)
         self.assertNotIn("stream_panel_view.refresh()", older_body)
@@ -1945,6 +1995,21 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("window.__cbStreamLoadOlderAnchor = {", source)
         self.assertIn("scroller.scrollHeight - Number(loadOlderAnchor.scrollHeight) + Number(loadOlderAnchor.scrollTop)", source)
         self.assertIn("window.__cbStreamLoadOlderAnchor = {", sections_source)
+        self.assertIn("const maybeLoadOlder = (scroller) => {", source)
+        self.assertIn("document.querySelector('[data-stream-auto-load-older=\"1\"]')", source)
+        self.assertIn("window.__cbStreamAutoLoadOlderUntil = now + 1500;", source)
+        self.assertIn("window.__cbStreamAutoLoadOlderTimer", source)
+        self.assertIn("Math.max(100, nextAllowedAt - now + 20)", source)
+        self.assertIn("stickToBottom: readDelta(scroller) <= nearBottomLimit", source)
+        self.assertIn("if (loadOlderAnchor.stickToBottom === true)", source)
+        self.assertIn("maybeLoadOlder(scroller);\n                        revealPositionedStream();\n                        return;", source)
+        sections_source = Path("ui/sections.py").read_text(encoding="utf-8")
+        self.assertIn("stickToBottom: Math.max(0, scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight) <= 120", sections_source)
+        self.assertIn("maybeLoadOlder(scroller);", source)
+        self.assertNotIn("scroller.scrollTop > 96", source)
+        scroll_listener_start = source.index("scroller.addEventListener('scroll'")
+        scroll_listener_end = source.index("return streamChanged;", scroll_listener_start)
+        self.assertNotIn("maybeLoadOlder(scroller);", source[scroll_listener_start:scroll_listener_end])
         self.assertNotIn("button.click();", source[source.index("def scroll_stream_to_bottom"):source.index("def install_stream_refresh_timer")])
 
     def test_stream_switch_resets_scroll_state_to_bottom(self) -> None:
@@ -1954,6 +2019,7 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("if (streamChanged) {", source)
         self.assertIn("state.delta = 0;\n                        state.nearBottom = true;\n                        state.userScrolledAway = false;", source)
         self.assertIn("window.__cbStreamForceBottomUntil = Date.now() + 1200;", source)
+        self.assertIn("if (preserveTop && !shouldStickToBottom) {", source)
 
     def test_sidebar_exposes_explicit_new_session_entry(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")
@@ -1964,6 +2030,14 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("def _open_stream_session_from_input(input_box) -> None:", source)
         self.assertIn("ui.web.mobile.new_session_name_required", source)
         self.assertIn("_open_stream_session(session_name)", source)
+
+    def test_sidebar_includes_selected_empty_stream_session(self) -> None:
+        source = Path("ui/app.py").read_text(encoding="utf-8")
+
+        self.assertIn('selected_sidebar_session = str(state["selected_session_name"] or "").strip()', source)
+        self.assertIn("selected_sidebar_session not in sessions", source)
+        self.assertIn("session_order.insert(0, selected_sidebar_session)", source)
+        self.assertIn("not codex_thread_id_from_session_name(selected_sidebar_session)", source)
 
     def test_sidebar_uses_chunked_state_and_lazy_codex_loading(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")

@@ -2747,6 +2747,8 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     key: {cleaned_session_name!r},
                     scrollHeight: scroller.scrollHeight,
                     scrollTop: scroller.scrollTop,
+                    stickToBottom: Math.max(0, scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight) <= 120
+                        || Date.now() < Number(window.__cbStreamForceBottomUntil || 0),
                 }};
             }})();
             """
@@ -3046,6 +3048,10 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                 session_order.append(session_name)
             sessions[session_name].append(task)
         session_order = _stream_session_order(sessions, session_order)
+        selected_sidebar_session = str(state["selected_session_name"] or "").strip()
+        if selected_sidebar_session and not codex_thread_id_from_session_name(selected_sidebar_session) and selected_sidebar_session not in sessions:
+            sessions[selected_sidebar_session] = []
+            session_order.insert(0, selected_sidebar_session)
 
         with ui.column().classes("w-full gap-2 min-h-0"):
             ui.label(t("ui.web.mobile.stream_sessions", "会话")).classes("cb-sidebar-section-title")
@@ -3473,6 +3479,32 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                 const revealPositionedStream = () => {
                     document.querySelector('.cb-agent-panel')?.removeAttribute('data-stream-pending');
                     document.querySelector('.cb-agent-stream')?.removeAttribute('data-stream-pending');
+                };
+                const maybeLoadOlder = (scroller) => {
+                    const trigger = document.querySelector('[data-stream-auto-load-older="1"]');
+                    if (!trigger) return;
+                    const now = Date.now();
+                    const nextAllowedAt = Math.max(
+                        Number(window.__cbStreamSuppressLoadOlderUntil || 0),
+                        Number(window.__cbStreamAutoLoadOlderUntil || 0),
+                    );
+                    if (now < nextAllowedAt) {
+                        window.clearTimeout(Number(window.__cbStreamAutoLoadOlderTimer || 0));
+                        window.__cbStreamAutoLoadOlderTimer = window.setTimeout(() => {
+                            const nextScroller = document.querySelector('.cb-agent-stream');
+                            if (nextScroller) maybeLoadOlder(nextScroller);
+                        }, Math.max(100, nextAllowedAt - now + 20));
+                        return;
+                    }
+                    const key = window.__cbStreamActiveKey || window.__cbStreamDesiredActiveKey || activeKey || readRenderedActiveKey();
+                    window.__cbStreamAutoLoadOlderUntil = now + 1500;
+                    window.__cbStreamLoadOlderAnchor = {
+                        key,
+                        scrollHeight: scroller.scrollHeight,
+                        scrollTop: scroller.scrollTop,
+                        stickToBottom: readDelta(scroller) <= nearBottomLimit || Date.now() < Number(window.__cbStreamForceBottomUntil || 0),
+                    };
+                    trigger.click();
                 };
                 const setupFooterLabelReveal = () => {
                     if (window.__cbStreamFooterRevealDelegateReady === '1') return;
@@ -3919,7 +3951,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                 const scheduleLiveTextSync = () => {
                     if (liveTextScheduled) return;
                     liveTextScheduled = true;
-                    window.requestAnimationFrame(syncLiveText);
+                    (window.queueMicrotask || ((callback) => Promise.resolve().then(callback)))(syncLiveText);
                 };
                 const setupLiveTypewriter = () => {
                     window.__cbStreamTypewriterSync = scheduleLiveTextSync;
@@ -3987,12 +4019,17 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                         && Number.isFinite(Number(loadOlderAnchor.scrollTop))
                     ) {
                         markProgrammaticScroll();
-                        scroller.scrollTop = Math.max(
-                            0,
-                            scroller.scrollHeight - Number(loadOlderAnchor.scrollHeight) + Number(loadOlderAnchor.scrollTop),
-                        );
+                        if (loadOlderAnchor.stickToBottom === true) {
+                            scrollToBottom(scroller);
+                        } else {
+                            scroller.scrollTop = Math.max(
+                                0,
+                                scroller.scrollHeight - Number(loadOlderAnchor.scrollHeight) + Number(loadOlderAnchor.scrollTop),
+                            );
+                        }
                         delete window.__cbStreamLoadOlderAnchor;
                         updateScrollState(scroller);
+                        maybeLoadOlder(scroller);
                         revealPositionedStream();
                         return;
                     }
@@ -4002,7 +4039,8 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                         state.userScrolledAway = false;
                         window.__cbStreamSuppressLoadOlderUntil = Date.now() + 800;
                     }
-                    if (preserveTop) {
+                    const shouldStickToBottom = forceBottom || Date.now() < Number(window.__cbStreamForceBottomUntil || 0) || state.nearBottom === true || !Number.isFinite(previousDelta);
+                    if (preserveTop && !shouldStickToBottom) {
                         markProgrammaticScroll();
                         scroller.scrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight - previousDelta);
                         state.delta = readDelta(scroller);
@@ -4013,7 +4051,6 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                         revealPositionedStream();
                         return;
                     }
-                    const shouldStickToBottom = forceBottom || Date.now() < Number(window.__cbStreamForceBottomUntil || 0) || state.nearBottom === true || !Number.isFinite(previousDelta);
                     if (shouldStickToBottom) {
                         scrollToBottom(scroller);
                     } else {
@@ -4021,6 +4058,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                         scroller.scrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight - previousDelta);
                     }
                     updateScrollState(scroller);
+                    maybeLoadOlder(scroller);
                     revealPositionedStream();
                 };
                 const focusComposerIfNeeded = () => {

@@ -17,6 +17,7 @@ from core.view_models import WebConsoleViewModel
 
 
 Translator = Callable[..., str]
+STREAM_AUTO_HISTORY_LIMIT = 60
 
 
 class UIEventLike(Protocol):
@@ -970,11 +971,14 @@ def _stream_image_previews(value: object) -> list[dict[str, str]]:
 def _stream_activity_items(value: object) -> list[dict[str, object]]:
     if not isinstance(value, list):
         return []
+    hidden_events = {"accepted", "running", "progress", "succeeded"}
     items: list[dict[str, object]] = []
     for item in value:
         if not isinstance(item, dict):
             continue
         event = str(item.get("event") or "").strip()
+        if event in hidden_events or event.startswith("codex_"):
+            continue
         activity_type = str(item.get("type") or "system").strip() or "system"
         at = str(item.get("at") or "").strip()
         detail = str(item.get("detail") or "").strip()
@@ -1297,10 +1301,34 @@ def _render_mobile_stream_messages(
     displayed_session_count = int(context.get("displayed_session_count") or 0)
     session_total_count = int(context.get("session_total_count") or 0)
     latest_task_id = str(context.get("latest_task_id") or "")
+    should_auto_load_older = has_older_session_tasks and displayed_session_count < STREAM_AUTO_HISTORY_LIMIT
 
     with ui.element("div").props("data-stream-pending=1").classes("cb-agent-stream cb-chat-scroll"):
         with ui.column().classes("cb-agent-stream-content"):
-            if has_older_session_tasks:
+            if should_auto_load_older:
+                ui.button(
+                    "",
+                    on_click=lambda session_name=active_session: on_load_older(session_name),
+                    icon="expand_less",
+                ).props(
+                    "flat dense data-load-older-ready=1 data-stream-auto-load-older=1 aria-hidden=true tabindex=-1"
+                ).classes("cb-stream-auto-load-older-trigger hidden").on(
+                    "click",
+                    js_handler=f"""
+                    () => {{
+                        const scroller = document.querySelector('.cb-agent-stream');
+                        if (!scroller) return;
+                        window.__cbStreamLoadOlderAnchor = {{
+                            key: {active_session!r},
+                            scrollHeight: scroller.scrollHeight,
+                            scrollTop: scroller.scrollTop,
+                            stickToBottom: Math.max(0, scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight) <= 120
+                                || Date.now() < Number(window.__cbStreamForceBottomUntil || 0),
+                        }};
+                    }}
+                    """,
+                )
+            elif has_older_session_tasks:
                 load_older_label = _tr(
                     t,
                     "ui.web.mobile.load_older",
@@ -1308,7 +1336,7 @@ def _render_mobile_stream_messages(
                     shown=displayed_session_count,
                     total=session_total_count,
                 )
-                with ui.element("div").props("data-load-older-ready=1").classes("cb-stream-load-older-wrap"):
+                with ui.element("div").classes("cb-stream-load-older-wrap"):
                     ui.button(
                         load_older_label,
                         on_click=lambda session_name=active_session: on_load_older(session_name),
@@ -1345,8 +1373,9 @@ def _render_mobile_stream_messages(
                     error_text = _stream_text(task.get("error"), limit=8000)
                     progress_text = _stream_text(task.get("progress_text"), limit=4000)
                     output_text = _stream_text(task.get("output"), limit=20000)
-                    activity_items = _stream_activity_items(task.get("activity_items"))
-                    has_codex_activity = _stream_has_codex_activity(activity_items)
+                    raw_activity_items = task.get("activity_items")
+                    has_codex_activity = _stream_has_codex_activity(raw_activity_items if isinstance(raw_activity_items, list) else [])
+                    activity_items = _stream_activity_items(raw_activity_items)
                     assume_utc_naive_time = _stream_task_uses_utc_naive_time(task)
                     task_id = str(task.get("id") or "").strip()
                     should_show_activity = bool(activity_items) and (
