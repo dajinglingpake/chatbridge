@@ -3792,7 +3792,19 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             if state["active_page"] == "stream":
                 stream_state = _stream_state_snapshot()
                 active_stream_session = _resolve_stream_active_session(stream_state)
-                scroll_stream_to_bottom(active_stream_session, force_bottom=True)
+                selected_stream_session = str(state["selected_session_name"] or "").strip()
+                next_hub_file_signature = (
+                    None if codex_thread_id_from_session_name(selected_stream_session) else stream_hub_state_file_signature()
+                )
+                next_signature = _stream_signature_snapshot()
+                state["stream_refresh_signature"] = next_signature
+                state["stream_force_bottom_next"] = True
+                _refresh_stream_parts(
+                    stream_state,
+                    active_stream_session,
+                    refresh_signature=next_signature,
+                    hub_file_signature=next_hub_file_signature,
+                )
 
         def refresh_stream() -> None:
             timer = timer_ref["timer"]

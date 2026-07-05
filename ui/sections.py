@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Callable, Protocol
 from urllib.parse import quote, unquote
 
@@ -1060,25 +1060,57 @@ def _stream_session_task_count(mobile_state: dict[str, object], session_name: st
     except (TypeError, ValueError):
         return 0
 
+def _stream_task_uses_utc_naive_time(task: dict[str, object]) -> bool:
+    return False
+
 def _stream_footer_time(task: dict[str, object], status: str) -> str:
     if status in {"running", "queued"}:
         return str(task.get("started_at") or task.get("created_at") or "").strip()
     return str(task.get("finished_at") or task.get("progress_at") or task.get("created_at") or "").strip()
 
 
-def _parse_stream_time(value: object) -> datetime | None:
+def _parse_stream_time(value: object, *, assume_utc_naive: bool = False) -> datetime | None:
     text = str(value or "").strip()
     if not text:
         return None
     try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
+        parsed = None
+    if parsed is None:
+        for fmt in ("%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M", "%Y/%m/%d"):
+            try:
+                parsed = datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                continue
+    if parsed is None:
         return None
+    if assume_utc_naive and parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
+def _stream_display_time(value: object, *, assume_utc_naive: bool = False) -> str:
+    text = str(value or "").strip()
+    parsed = _parse_stream_time(text, assume_utc_naive=assume_utc_naive)
+    if parsed is None or parsed.tzinfo is None:
+        return text
+    return parsed.astimezone().replace(tzinfo=None).isoformat(timespec="seconds")
+
+
+def _stream_client_time(value: object, *, assume_utc_naive: bool = False) -> str:
+    text = str(value or "").strip()
+    parsed = _parse_stream_time(text, assume_utc_naive=assume_utc_naive)
+    if parsed is None:
+        return text
+    if parsed.tzinfo is None:
+        return parsed.isoformat(timespec="seconds")
+    return parsed.astimezone().isoformat(timespec="seconds")
 
 def _stream_duration_text(task: dict[str, object], t: Translator) -> str:
-    started_at = _parse_stream_time(task.get("started_at") or task.get("created_at"))
-    finished_at = _parse_stream_time(task.get("finished_at") or task.get("progress_at"))
+    assume_utc_naive = _stream_task_uses_utc_naive_time(task)
+    started_at = _parse_stream_time(task.get("started_at") or task.get("created_at"), assume_utc_naive=assume_utc_naive)
+    finished_at = _parse_stream_time(task.get("finished_at") or task.get("progress_at"), assume_utc_naive=assume_utc_naive)
     if started_at is None or finished_at is None or finished_at < started_at:
         return ""
     return _stream_duration_seconds_text(max(0, int((finished_at - started_at).total_seconds())), t)
@@ -1094,7 +1126,10 @@ def _stream_duration_seconds_text(total_seconds: int, t: Translator) -> str:
 
 
 def _stream_live_elapsed_text(task: dict[str, object], t: Translator) -> str:
-    started_at = _parse_stream_time(task.get("started_at") or task.get("created_at"))
+    started_at = _parse_stream_time(
+        task.get("started_at") or task.get("created_at"),
+        assume_utc_naive=_stream_task_uses_utc_naive_time(task),
+    )
     if started_at is None:
         return ""
     now = datetime.now(started_at.tzinfo) if started_at.tzinfo else datetime.now()
@@ -1105,14 +1140,22 @@ def _stream_live_elapsed_text(task: dict[str, object], t: Translator) -> str:
 def _stream_footer_label(task: dict[str, object], status: str, t: Translator) -> str:
     status_text = _tr(t, f"bridge.task.status.{status}", status)
     duration_text = _stream_duration_text(task, t)
+    time_text = _stream_display_time(_stream_footer_time(task, status), assume_utc_naive=_stream_task_uses_utc_naive_time(task))
     if duration_text and status not in {"running", "queued"}:
+        if time_text:
+            return _tr(
+                t,
+                "ui.web.mobile.stream_turn_footer_duration_time",
+                "耗时 {duration} · {time}",
+                duration=duration_text,
+                time=time_text,
+            )
         return _tr(
             t,
             "ui.web.mobile.stream_turn_footer_duration",
             "耗时 {duration}",
             duration=duration_text,
         )
-    time_text = _stream_footer_time(task, status)
     if not time_text:
         return status_text
     return _tr(
@@ -1125,7 +1168,9 @@ def _stream_footer_label(task: dict[str, object], status: str, t: Translator) ->
 
 def _stream_footer_time_label(task: dict[str, object], status: str, t: Translator) -> str:
     status_text = _tr(t, f"bridge.task.status.{status}", status)
-    time_text = _stream_footer_time(task, status)
+    if _stream_duration_text(task, t) and status not in {"running", "queued"}:
+        return _stream_footer_label(task, status, t)
+    time_text = _stream_display_time(_stream_footer_time(task, status), assume_utc_naive=_stream_task_uses_utc_naive_time(task))
     if not time_text:
         return status_text
     return _tr(
@@ -1302,6 +1347,7 @@ def _render_mobile_stream_messages(
                     output_text = _stream_text(task.get("output"), limit=20000)
                     activity_items = _stream_activity_items(task.get("activity_items"))
                     has_codex_activity = _stream_has_codex_activity(activity_items)
+                    assume_utc_naive_time = _stream_task_uses_utc_naive_time(task)
                     task_id = str(task.get("id") or "").strip()
                     should_show_activity = bool(activity_items) and (
                         has_codex_activity
@@ -1334,7 +1380,7 @@ def _render_mobile_stream_messages(
                                     with ui.element("div").classes("cb-stream-user-footer"):
                                         created_at = str(task.get("created_at") or "").strip()
                                         if created_at:
-                                            ui.label(created_at).classes("cb-stream-footer-label")
+                                            ui.label(_stream_display_time(created_at, assume_utc_naive=assume_utc_naive_time)).classes("cb-stream-footer-label")
                                         ui.button(
                                             "",
                                             on_click=lambda value=prompt_text: on_copy_text(value),
@@ -1358,7 +1404,7 @@ def _render_mobile_stream_messages(
                                                 if detail:
                                                     display_metadata = {"detail": detail, **display_metadata}
                                                 if at:
-                                                    display_metadata = {"at": at, **display_metadata}
+                                                    display_metadata = {"at": _stream_display_time(at, assume_utc_naive=assume_utc_naive_time), **display_metadata}
                                                 with ui.element("details").props("data-activity-details=1").classes(_stream_activity_type_class(str(item.get("type") or ""))):
                                                     with ui.element("summary").classes("cb-stream-activity-summary"):
                                                         ui.element("span").classes("cb-stream-activity-icon")
@@ -1386,7 +1432,8 @@ def _render_mobile_stream_messages(
                                                     for dot_index in range(6):
                                                         ui.element("span").classes(f"cb-stream-working-loader-dot cb-stream-working-loader-dot-{dot_index}")
                                                 if started_at:
-                                                    ui.label(_stream_live_elapsed_text(task, t)).props(f"data-started-at={started_at}").classes("cb-stream-live-elapsed")
+                                                    client_started_at = _stream_client_time(started_at, assume_utc_naive=assume_utc_naive_time)
+                                                    ui.label(_stream_live_elapsed_text(task, t)).props(f'data-started-at="{client_started_at}"').classes("cb-stream-live-elapsed")
                                                 if task_id:
                                                     stop_label = _tr(t, "ui.web.mobile.cancel_task", "停止任务")
                                                     ui.button(

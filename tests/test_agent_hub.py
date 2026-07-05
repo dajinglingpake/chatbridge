@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from agent_hub import AgentConfig, HubConfig, MultiCodexHub
+from agent_hub import AgentConfig, HubConfig, MultiCodexHub, now_iso
 from core.state_models import HubTask
 
 
@@ -36,6 +36,14 @@ class SleepingBackend:
         if process.returncode != 0:
             raise RuntimeError(stderr.strip() or f"sleep process exited with code {process.returncode}")
         return {"output": "done", "session_id": ""}
+
+
+class AgentHubTimeTests(unittest.TestCase):
+    def test_now_iso_is_utc_zulu(self) -> None:
+        rendered = now_iso()
+
+        self.assertTrue(rendered.endswith("Z"))
+        self.assertNotIn("+", rendered)
 
 
 class AgentHubCancellationTests(unittest.TestCase):

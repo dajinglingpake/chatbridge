@@ -632,6 +632,7 @@
   "ui.web.mobile.stream_title": "Live Conversation",
   "ui.web.mobile.stream_turn_footer": "{time}",
   "ui.web.mobile.stream_turn_footer_duration": "Worked for {duration}",
+  "ui.web.mobile.stream_turn_footer_duration_time": "Worked for {duration} · {time}",
   "ui.web.mobile.stream_unauthorized": "This visit is not authorized. Scan again from the desktop Mobile tab.",
   "ui.web.mobile.stream_updated": "Updated",
   "ui.web.mobile.stream_user": "You",

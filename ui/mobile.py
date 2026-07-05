@@ -11,7 +11,7 @@ import secrets
 import socket
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -122,6 +122,48 @@ def _stream_time_sort_key(value: object) -> tuple[int, float, str]:
             continue
     return (1, 0.0, text)
 
+
+def _parse_mobile_time(value: object, *, assume_utc_naive: bool = False) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        parsed = None
+    if parsed is None:
+        for fmt in ("%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M", "%Y/%m/%d"):
+            try:
+                parsed = datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                continue
+    if parsed is None:
+        return None
+    if assume_utc_naive and parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+def _mobile_display_time(value: object, *, assume_utc_naive: bool = False) -> str:
+    text = str(value or "").strip()
+    parsed = _parse_mobile_time(text, assume_utc_naive=assume_utc_naive)
+    if parsed is None:
+        return text
+    if parsed.tzinfo is None:
+        return parsed.isoformat(timespec="seconds")
+    return parsed.astimezone().replace(tzinfo=None).isoformat(timespec="seconds")
+
+def _source_uses_utc_naive_time(source: object) -> bool:
+    return str(source or "").strip() != "codex-app-server"
+
+def _display_activity_items(items: list[dict[str, object]], *, assume_utc_naive: bool) -> list[dict[str, object]]:
+    displayed: list[dict[str, object]] = []
+    for item in items:
+        copied = dict(item)
+        if copied.get("at"):
+            copied["at"] = _mobile_display_time(copied.get("at"), assume_utc_naive=assume_utc_naive)
+        displayed.append(copied)
+    return displayed
 
 def build_mobile_access_url(*, host: str, port: int) -> str:
     token = _load_or_create_access_token()
@@ -868,12 +910,14 @@ def _stream_raw_window_from_state(
 def _raw_task_payload(raw: dict[str, object], *, stream_order: int = 0) -> dict[str, object]:
     images = _raw_string_list(raw.get("images"))
     agent_id = _raw_clean_text(raw, "agent_id") or _raw_clean_text(raw, "agent_name") or "main"
+    source = _raw_clean_text(raw, "source", "desktop") or "desktop"
+    assume_utc_naive = _source_uses_utc_naive_time(source)
     return {
         "id": _raw_clean_text(raw, "id"),
         "agent_id": agent_id,
         "agent_name": _raw_clean_text(raw, "agent_name") or agent_id,
         "backend": _raw_clean_text(raw, "backend", "codex") or "codex",
-        "source": _raw_clean_text(raw, "source", "desktop") or "desktop",
+        "source": source,
         "sender_id": _raw_clean_text(raw, "sender_id"),
         "session_id": _raw_clean_text(raw, "session_id"),
         "session_name": _raw_task_session_name(raw),
@@ -881,19 +925,19 @@ def _raw_task_payload(raw: dict[str, object], *, stream_order: int = 0) -> dict[
         "model": _raw_clean_text(raw, "model"),
         "status": _raw_clean_text(raw, "status", "queued") or "queued",
         "stream_order": stream_order,
-        "created_at": _raw_clean_text(raw, "created_at"),
-        "started_at": _raw_clean_text(raw, "started_at"),
-        "finished_at": _raw_clean_text(raw, "finished_at"),
+        "created_at": _mobile_display_time(_raw_clean_text(raw, "created_at"), assume_utc_naive=assume_utc_naive),
+        "started_at": _mobile_display_time(_raw_clean_text(raw, "started_at"), assume_utc_naive=assume_utc_naive),
+        "finished_at": _mobile_display_time(_raw_clean_text(raw, "finished_at"), assume_utc_naive=assume_utc_naive),
         "prompt": _raw_text(raw, "prompt"),
         "images": images,
         "image_previews": [_image_preview_payload(item) for item in images],
         "output": _raw_text(raw, "output"),
         "error": _raw_text(raw, "error"),
         "progress_text": _raw_text(raw, "progress_text"),
-        "progress_at": _raw_clean_text(raw, "progress_at"),
+        "progress_at": _mobile_display_time(_raw_clean_text(raw, "progress_at"), assume_utc_naive=assume_utc_naive),
         "progress_seq": _raw_progress_seq(raw),
         "context_left_percent": _raw_optional_percent(raw.get("context_left_percent")),
-        "activity_items": _raw_task_activity_items(raw),
+        "activity_items": _display_activity_items(_raw_task_activity_items(raw), assume_utc_naive=assume_utc_naive),
         "summary": _latest_raw_task_summary(raw),
     }
 
@@ -1080,6 +1124,7 @@ def _build_stream_task_window(
     )
 
 def _task_payload(task: HubTask, *, stream_order: int = 0) -> dict[str, object]:
+    assume_utc_naive = _source_uses_utc_naive_time(task.source)
     return {
         "id": task.id,
         "agent_id": task.agent_id,
@@ -1093,19 +1138,19 @@ def _task_payload(task: HubTask, *, stream_order: int = 0) -> dict[str, object]:
         "model": task.model,
         "status": task.status or "queued",
         "stream_order": stream_order,
-        "created_at": task.created_at,
-        "started_at": task.started_at,
-        "finished_at": task.finished_at,
+        "created_at": _mobile_display_time(task.created_at, assume_utc_naive=assume_utc_naive),
+        "started_at": _mobile_display_time(task.started_at, assume_utc_naive=assume_utc_naive),
+        "finished_at": _mobile_display_time(task.finished_at, assume_utc_naive=assume_utc_naive),
         "prompt": task.prompt,
         "images": list(task.images),
         "image_previews": [_image_preview_payload(item) for item in task.images],
         "output": task.output,
         "error": task.error,
         "progress_text": task.progress_text,
-        "progress_at": task.progress_at,
+        "progress_at": _mobile_display_time(task.progress_at, assume_utc_naive=assume_utc_naive),
         "progress_seq": task.progress_seq,
         "context_left_percent": task.context_left_percent,
-        "activity_items": _task_activity_items(task),
+        "activity_items": _display_activity_items(_task_activity_items(task), assume_utc_naive=assume_utc_naive),
         "summary": _latest_task_summary(task),
     }
 

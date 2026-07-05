@@ -130,6 +130,38 @@ class MobileStateTests(unittest.TestCase):
         self.assertEqual("focus", items[0]["metadata"]["session"])
         self.assertEqual("42", items[0]["metadata"]["context_left_percent"])
 
+    def test_mobile_raw_hub_times_display_utc_as_local(self) -> None:
+        payload = mobile._raw_task_payload(
+            _raw_activity_task(
+                source="desktop",
+                created_at="2026/7/5 10:54:52",
+                started_at="2026-07-05T10:54:53Z",
+                progress_at="2026-07-05T10:54:54",
+                finished_at="2026-07-05T10:54:55Z",
+            )
+        )
+
+        self.assertEqual("2026-07-05T18:54:52", payload["created_at"])
+        self.assertEqual("2026-07-05T18:54:53", payload["started_at"])
+        self.assertEqual("2026-07-05T18:54:54", payload["progress_at"])
+        self.assertEqual("2026-07-05T18:54:55", payload["finished_at"])
+        self.assertEqual("2026-07-05T18:54:52", payload["activity_items"][0]["at"])
+
+    def test_mobile_codex_app_server_times_are_not_shifted(self) -> None:
+        payload = mobile._raw_task_payload(
+            _raw_activity_task(
+                source="codex-app-server",
+                created_at="2026-07-04T00:45:00",
+                started_at="",
+                progress_at="",
+                finished_at="2026-07-04T00:46:00",
+            )
+        )
+
+        self.assertEqual("2026-07-04T00:45:00", payload["created_at"])
+        self.assertEqual("2026-07-04T00:46:00", payload["finished_at"])
+        self.assertEqual("2026-07-04T00:45:00", payload["activity_items"][0]["at"])
+
     def test_non_failed_terminal_activity_is_not_error_red(self) -> None:
         canceled_items = _task_activity_items(_activity_task(status="canceled", error="用户取消"))
         unknown_items = _task_activity_items(_activity_task(status="unknown_after_restart", error="重启中断"))

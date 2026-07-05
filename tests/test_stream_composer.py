@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from ui.app import group_codex_threads_by_workspace
-from ui.sections import _stream_task_sort_key, _stream_text, render_mobile_stream_section
+from ui.sections import _stream_client_time, _stream_display_time, _stream_task_sort_key, _stream_task_uses_utc_naive_time, _stream_text, render_mobile_stream_section
 
 
 class FakeElement:
@@ -126,6 +126,33 @@ class StreamComposerTests(unittest.TestCase):
         ]
 
         self.assertEqual(["task-6am", "task-10am"], [task["id"] for task in sorted(tasks, key=_stream_task_sort_key)])
+
+    def test_codex_utc_naive_times_display_as_local_time(self) -> None:
+        self.assertEqual("2026-07-05T10:54:52", _stream_display_time("2026-07-05T10:54:52"))
+        self.assertEqual(
+            _stream_display_time("2026-07-05T10:54:52Z"),
+            _stream_display_time("2026-07-05T10:54:52", assume_utc_naive=True),
+        )
+        self.assertEqual(
+            _stream_display_time("2026-07-05T10:54:52Z"),
+            _stream_display_time("2026/7/5 10:54:52", assume_utc_naive=True),
+        )
+        self.assertEqual(
+            _stream_client_time("2026-07-05T10:54:52Z"),
+            _stream_client_time("2026-07-05T10:54:52", assume_utc_naive=True),
+        )
+        self.assertRegex(_stream_client_time("2026-07-05T10:54:52", assume_utc_naive=True), r"[+-]\d\d:\d\d$")
+
+    def test_stream_render_uses_mobile_state_times_as_already_displayable(self) -> None:
+        task = {"source": "stream-web", "backend": "codex", "created_at": "2026-07-05T18:54:52"}
+
+        assume_utc_naive = _stream_task_uses_utc_naive_time(task)
+
+        self.assertFalse(assume_utc_naive)
+        self.assertEqual(
+            "2026-07-05T18:54:52",
+            _stream_display_time(task["created_at"], assume_utc_naive=assume_utc_naive),
+        )
 
     def test_codex_threads_are_grouped_by_workspace_for_sidebar(self) -> None:
         groups = group_codex_threads_by_workspace(
@@ -942,12 +969,15 @@ class StreamComposerTests(unittest.TestCase):
         self.assertEqual(3, len(metadata_texts))
         self.assertIn("工具调用", activity_messages)
         metadata_payload = "\n".join(item.text for item in metadata_texts)
+        at_052000 = "2026-07-04T05:20:00"
+        at_052100 = "2026-07-04T05:21:00"
+        at_052030 = "2026-07-04T05:20:30"
         self.assertIn('"task_id": "task-activity"', metadata_payload)
         self.assertIn('"agent": "qq"', metadata_payload)
         self.assertIn('"backend": "codex"', metadata_payload)
-        self.assertIn('"at": "2026-07-04T05:20:00"', metadata_payload)
-        self.assertIn('"at": "2026-07-04T05:21:00"', metadata_payload)
-        self.assertIn('"at": "2026-07-04T05:20:30"', metadata_payload)
+        self.assertIn(f'"at": "{at_052000}"', metadata_payload)
+        self.assertIn(f'"at": "{at_052100}"', metadata_payload)
+        self.assertIn(f'"at": "{at_052030}"', metadata_payload)
         self.assertIn('"name": "shell"', metadata_payload)
 
     def test_canceled_task_error_text_is_not_rendered_as_failure_red(self) -> None:
@@ -1045,6 +1075,8 @@ class StreamComposerTests(unittest.TestCase):
 
         activity_logs = [item for item in ui.elements if "cb-stream-activity-log" in item.class_text.split()]
         activity_messages = [item.text for item in ui.elements if "cb-stream-activity-message" in item.class_text.split()]
+        metadata_texts = [item.text for item in ui.elements if "cb-stream-activity-metadata-text" in item.class_text.split()]
+        footer_labels = [item.text for item in ui.elements if "cb-stream-footer-label" in item.class_text.split()]
         body_texts = [
             item.text
             for item in ui.elements
@@ -1053,6 +1085,8 @@ class StreamComposerTests(unittest.TestCase):
 
         self.assertEqual(1, len(activity_logs))
         self.assertIn("工具调用", activity_messages)
+        self.assertIn('"at": "2026-07-04T05:20:01"', "\n".join(metadata_texts))
+        self.assertIn("2026-07-04T05:21:00", footer_labels)
         self.assertNotIn("shell: pytest", body_texts)
         self.assertEqual(["next prompt", "next answer"], body_texts)
 
@@ -1815,7 +1849,11 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("def install_initial_stream_behavior() -> None:", source)
         self.assertIn("client.on_connect(install_initial_stream_behavior)", source)
         self.assertIn("ui.timer(0.1, install_initial_stream_behavior, once=True)", source)
-        self.assertIn("scroll_stream_to_bottom(active_stream_session, force_bottom=True)", source)
+        initial_start = source.index("def install_initial_stream_behavior() -> None:")
+        initial_end = source.index("def refresh_stream() -> None:", initial_start)
+        initial_body = source[initial_start:initial_end]
+        self.assertIn('state["stream_force_bottom_next"] = True', initial_body)
+        self.assertIn("_refresh_stream_parts(\n                    stream_state,\n                    active_stream_session,", initial_body)
 
     def test_programmatic_stream_scroll_is_not_marked_as_user_scroll(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")
@@ -2272,18 +2310,20 @@ class StreamComposerTests(unittest.TestCase):
             _noop,
         )
 
+        footer_labels = [item.text for item in ui.elements if "cb-stream-footer-label" in item.class_text.split()]
         main_labels = [item.text for item in ui.elements if "cb-stream-footer-label-main" in item.class_text.split()]
         alt_labels = [item.text for item in ui.elements if "cb-stream-footer-label-alt" in item.class_text.split()]
 
-        self.assertEqual(["耗时 1 分 0 秒"], main_labels)
-        self.assertEqual(["2026-07-04T05:21:00"], alt_labels)
+        self.assertIn("耗时 1 分 0 秒 · 2026-07-04T05:21:00", footer_labels)
+        self.assertEqual([], main_labels)
+        self.assertEqual([], alt_labels)
         self.assertNotIn("succeeded · 耗时 1 分 0 秒", main_labels)
 
         source = Path("ui/app.py").read_text(encoding="utf-8")
         sections_source = Path("ui/sections.py").read_text(encoding="utf-8")
         self.assertIn("setupFooterLabelReveal", source)
         self.assertIn("cb-stream-footer-label-revealed", source)
-        self.assertIn("data-footer-toggle=1 role=button tabindex=0", sections_source)
+        self.assertIn('"ui.web.mobile.stream_turn_footer_duration_time"', sections_source)
         self.assertNotIn("wrap.setAttribute('role', 'button')", source)
         self.assertIn("window.setTimeout(() => {", source)
 

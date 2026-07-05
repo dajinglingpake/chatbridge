@@ -9,10 +9,17 @@ import socket
 import site
 import subprocess
 import sys
+import time
 from pathlib import Path
 
+try:
+    import psutil
+except ImportError:  # pragma: no cover - optional dependency
+    psutil = None
 
 APP_DIR = Path(__file__).resolve().parent
+RUNTIME_DIR = APP_DIR / ".runtime"
+NATIVE_UI_PIDS_PATH = RUNTIME_DIR / "native-ui.pids"
 VENV_DIR = APP_DIR / ".venv"
 REQUIREMENTS_PATH = APP_DIR / "requirements.txt"
 IMPORT_NAME_OVERRIDES = {
@@ -128,6 +135,17 @@ def _without_debugger_subprocess_patch():
             patched_module.CreateProcess = patched_create_process
 
 
+def _hidden_subprocess_kwargs() -> dict[str, object]:
+    if os.name != "nt":
+        return {}
+    kwargs: dict[str, object] = {}
+    if hasattr(subprocess, "CREATE_NO_WINDOW"):
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    kwargs["startupinfo"] = startupinfo
+    return kwargs
+
 def _venv_missing_required_dependency_modules(python_executable: str) -> list[str]:
     modules = _required_dependency_modules()
     script = (
@@ -143,6 +161,7 @@ def _venv_missing_required_dependency_modules(python_executable: str) -> list[st
             text=True,
             env=_clean_subprocess_env(),
             check=False,
+            **_hidden_subprocess_kwargs(),
         )
     if completed.returncode != 0:
         return modules
@@ -164,6 +183,7 @@ def _run_command(argv: list[str]) -> None:
             errors="replace",
             env=_clean_subprocess_env(),
             check=False,
+            **_hidden_subprocess_kwargs(),
         )
     if completed.stdout:
         print(completed.stdout, end="")
@@ -187,6 +207,7 @@ def _ensure_venv_pip(python_executable: str) -> None:
             text=True,
             env=_clean_subprocess_env(),
             check=False,
+            **_hidden_subprocess_kwargs(),
         )
     if pip_check.returncode == 0:
         return
@@ -280,6 +301,288 @@ def _print_access_urls(host: str, port: int, native: bool) -> None:
     if host not in {"127.0.0.1", "localhost"}:
         print(f"[chatbridge] Local URL:   {local_url}", file=sys.stderr)
 
+def _native_ui_script_paths(launcher_path: Path | None) -> set[str]:
+    paths = {APP_DIR / "main.py", APP_DIR / "ui_main.py"}
+    if launcher_path is not None:
+        paths.add(launcher_path)
+    resolved: set[str] = set()
+    for path in paths:
+        text = str(path.resolve()).lower()
+        resolved.add(text)
+        resolved.add(text.replace("\\", "/"))
+    return resolved
+
+def _process_cmdline(proc: object) -> list[str]:
+    try:
+        return [str(item) for item in proc.cmdline()]
+    except (AttributeError, OSError):
+        return []
+    except Exception as exc:  # pragma: no cover - psutil.Error depends on optional psutil
+        if psutil is not None and isinstance(exc, psutil.Error):
+            return []
+        raise
+
+def _process_name(proc: object) -> str:
+    try:
+        info = getattr(proc, "info", {})
+        name = info.get("name") if isinstance(info, dict) else None
+        if name:
+            return str(name)
+    except (AttributeError, OSError):
+        pass
+    try:
+        return str(proc.name())
+    except (AttributeError, OSError):
+        return ""
+    except Exception as exc:  # pragma: no cover - psutil.Error depends on optional psutil
+        if psutil is not None and isinstance(exc, psutil.Error):
+            return ""
+        raise
+
+def _process_parent_pid(proc: object) -> int | None:
+    try:
+        return int(proc.ppid())
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+    except Exception as exc:  # pragma: no cover - psutil.Error depends on optional psutil
+        if psutil is not None and isinstance(exc, psutil.Error):
+            return None
+        raise
+
+def _process_cwd(proc: object) -> str:
+    try:
+        info = getattr(proc, "info", {})
+        cwd = info.get("cwd") if isinstance(info, dict) else None
+        if cwd:
+            return str(cwd)
+    except (AttributeError, OSError):
+        pass
+    try:
+        return str(proc.cwd())
+    except (AttributeError, OSError):
+        return ""
+    except Exception as exc:  # pragma: no cover - psutil.Error depends on optional psutil
+        if psutil is not None and isinstance(exc, psutil.Error):
+            return ""
+        raise
+
+def _current_process_family_pids() -> set[int]:
+    current_pid = os.getpid()
+    family = {current_pid}
+    if psutil is None:
+        return family
+    try:
+        family.update(parent.pid for parent in psutil.Process(current_pid).parents())
+    except (psutil.Error, OSError):
+        pass
+    return family
+
+def _read_native_ui_pid_file() -> list[int]:
+    try:
+        text = NATIVE_UI_PIDS_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    pids: list[int] = []
+    for item in text.replace(",", "\n").splitlines():
+        try:
+            pid = int(item.strip())
+        except ValueError:
+            continue
+        if pid > 0:
+            pids.append(pid)
+    return pids
+
+def _write_native_ui_pid_file(pids: list[int]) -> None:
+    try:
+        RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        NATIVE_UI_PIDS_PATH.write_text("\n".join(str(pid) for pid in pids), encoding="utf-8")
+    except OSError:
+        pass
+
+def _is_project_dir(value: str) -> bool:
+    if not value:
+        return False
+    try:
+        return Path(value).resolve() == APP_DIR
+    except OSError:
+        return False
+
+def _is_native_ui_script_arg(value: str) -> bool:
+    normalized = value.strip("\"'").replace("\\", "/").lower()
+    return normalized in {"main.py", "./main.py", "ui_main.py", "./ui_main.py"} or normalized.endswith(("/main.py", "/ui_main.py"))
+
+def _native_window_parent_pid(proc: object) -> int | None:
+    joined = " ".join(_process_cmdline(proc))
+    marker = "spawn_main(parent_pid="
+    if "--multiprocessing-fork" not in joined or marker not in joined:
+        return None
+    start = joined.find(marker) + len(marker)
+    end = joined.find(",", start)
+    if end < 0:
+        end = joined.find(")", start)
+    try:
+        return int(joined[start:end])
+    except ValueError:
+        return None
+
+def _is_native_ui_process(proc: object, script_paths: set[str]) -> bool:
+    cmdline = _process_cmdline(proc)
+    if "--native" not in cmdline:
+        return False
+    joined = " ".join(cmdline).lower()
+    normalized = joined.replace("\\", "/")
+    if any(path in joined or path in normalized for path in script_paths):
+        return True
+    return _is_project_dir(_process_cwd(proc)) and any(_is_native_ui_script_arg(item) for item in cmdline)
+
+def _is_native_webview_process(proc: object) -> bool:
+    if _process_name(proc).lower() != "msedgewebview2.exe":
+        return False
+    return "--webview-exe-name=python" in " ".join(_process_cmdline(proc)).lower()
+
+def _window_pids_by_title(title: str) -> list[int]:
+    if os.name != "nt":
+        return []
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except ImportError:
+        return []
+    user32 = ctypes.windll.user32
+    found: list[int] = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def enum_proc(hwnd, _lparam):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buffer, length + 1)
+        if buffer.value == title:
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value:
+                found.append(int(pid.value))
+        return True
+
+    user32.EnumWindows(enum_proc, 0)
+    return found
+
+def _native_webview_descendant_pids(root_pids: set[int], processes: list[object]) -> list[int]:
+    children_by_parent: dict[int, list[object]] = {}
+    for proc in processes:
+        parent_pid = _process_parent_pid(proc)
+        if parent_pid is not None:
+            children_by_parent.setdefault(parent_pid, []).append(proc)
+    found: list[int] = []
+    stack = list(root_pids)
+    while stack:
+        parent_pid = stack.pop()
+        for child in children_by_parent.get(parent_pid, []):
+            pid = int(getattr(child, "pid", 0) or getattr(child, "info", {}).get("pid") or 0)
+            if not pid:
+                continue
+            stack.append(pid)
+            if _is_native_webview_process(child):
+                found.append(pid)
+    return found
+
+def _native_ui_process_from_pid(pid: int, script_paths: set[str]) -> object | None:
+    if psutil is None:
+        return None
+    try:
+        proc = psutil.Process(pid)
+    except (psutil.Error, OSError):
+        return None
+    return proc if _is_native_ui_process(proc, script_paths) else None
+
+def _current_native_ui_pids(script_paths: set[str]) -> list[int]:
+    if psutil is None:
+        return [os.getpid()]
+    try:
+        current = psutil.Process(os.getpid())
+        processes = [current, *current.parents()]
+    except (psutil.Error, OSError):
+        return [os.getpid()]
+    pids: list[int] = []
+    for proc in processes:
+        pid = int(getattr(proc, "pid", 0) or 0)
+        if pid and _is_native_ui_process(proc, script_paths):
+            pids.append(pid)
+    return pids or [os.getpid()]
+
+def _terminate_process_only(pid: int) -> None:
+    if psutil is not None:
+        try:
+            psutil.Process(pid).kill()
+        except (psutil.Error, OSError):
+            pass
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/F"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            **_hidden_subprocess_kwargs(),
+        )
+        return
+
+def _close_previous_native_ui_instances(launcher_path: Path | None = None) -> list[int]:
+    if psutil is None:
+        return []
+    script_paths = _native_ui_script_paths(launcher_path)
+    current_family = _current_process_family_pids()
+    processes = list(psutil.process_iter(["pid", "ppid", "name", "cmdline", "cwd"]))
+    old_ui_pids: list[int] = []
+    old_ui_pid_set: set[int] = set()
+    for pid in _read_native_ui_pid_file():
+        if pid in current_family or pid in old_ui_pid_set:
+            continue
+        if _native_ui_process_from_pid(pid, script_paths) is not None:
+            old_ui_pids.append(pid)
+            old_ui_pid_set.add(pid)
+    matches = [
+        proc
+        for proc in processes
+        if int(proc.info.get("pid") or getattr(proc, "pid", 0) or 0) not in current_family
+        and _is_native_ui_process(proc, script_paths)
+    ]
+    for proc in matches:
+        pid = int(getattr(proc, "pid", 0) or proc.info.get("pid") or 0)
+        if pid and pid not in old_ui_pid_set:
+            old_ui_pids.append(pid)
+            old_ui_pid_set.add(pid)
+    window_pids = {
+        int(getattr(proc, "pid", 0) or getattr(proc, "info", {}).get("pid") or 0)
+        for proc in processes
+        if (_native_window_parent_pid(proc) in old_ui_pid_set)
+        and int(getattr(proc, "pid", 0) or getattr(proc, "info", {}).get("pid") or 0) not in current_family
+    }
+    window_pids.update(pid for pid in _window_pids_by_title("ChatBridge UI") if pid not in current_family)
+    webview_pids = set(_native_webview_descendant_pids(window_pids, processes))
+    stopped: list[int] = []
+    stopped_set: set[int] = set()
+    for pid in [*webview_pids, *window_pids, *old_ui_pids]:
+        if pid and pid not in stopped_set:
+            _terminate_process_only(pid)
+            stopped.append(pid)
+            stopped_set.add(pid)
+    if old_ui_pids or window_pids:
+        time.sleep(0.8)
+        processes = list(psutil.process_iter(["pid", "ppid", "name", "cmdline", "cwd"]))
+        late_window_pids = {pid for pid in _window_pids_by_title("ChatBridge UI") if pid not in current_family and pid not in stopped_set}
+        late_webview_pids = set(_native_webview_descendant_pids(late_window_pids, processes))
+        for pid in [*late_webview_pids, *late_window_pids]:
+            if pid and pid not in stopped_set:
+                _terminate_process_only(pid)
+                stopped.append(pid)
+                stopped_set.add(pid)
+    return stopped
 
 def run_ui_entry(
     host: str = "0.0.0.0",
@@ -288,6 +591,11 @@ def run_ui_entry(
     launcher_path: Path | None = None,
 ) -> None:
     ensure_ui_dependencies(launcher_path=launcher_path)
+    if native:
+        stopped_pids = _close_previous_native_ui_instances(launcher_path)
+        if stopped_pids:
+            print(f"[chatbridge] Closed previous Native UI PIDs: {', '.join(str(pid) for pid in stopped_pids)}", file=sys.stderr)
+        _write_native_ui_pid_file(_current_native_ui_pids(_native_ui_script_paths(launcher_path)))
     from ui.app import run_ui
 
     _print_access_urls(host, port, native)

@@ -632,6 +632,7 @@
   "ui.web.mobile.stream_title": "实时对话",
   "ui.web.mobile.stream_turn_footer": "{time}",
   "ui.web.mobile.stream_turn_footer_duration": "耗时 {duration}",
+  "ui.web.mobile.stream_turn_footer_duration_time": "耗时 {duration} · {time}",
   "ui.web.mobile.stream_unauthorized": "当前访问未授权，请从桌面手机入口重新扫码打开。",
   "ui.web.mobile.stream_updated": "已更新",
   "ui.web.mobile.stream_user": "你",
