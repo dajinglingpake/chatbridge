@@ -1266,7 +1266,7 @@ def render_mobile_stream_shell(
     render_composer,
 ) -> None:
     encoded_active_session = quote(active_session, safe="")
-    with ui.element("section").props(f"id={STREAM_PAGE.anchor} data-stream-key={encoded_active_session}").classes("cb-agent-panel w-full"):
+    with ui.element("section").props(f"id={STREAM_PAGE.anchor} data-stream-key={encoded_active_session} data-stream-pending=1").classes("cb-agent-panel w-full"):
         render_messages()
         _render_mobile_stream_scroll_button(ui)
         render_composer()
@@ -1298,7 +1298,7 @@ def _render_mobile_stream_messages(
     session_total_count = int(context.get("session_total_count") or 0)
     latest_task_id = str(context.get("latest_task_id") or "")
 
-    with ui.element("div").classes("cb-agent-stream cb-chat-scroll"):
+    with ui.element("div").props("data-stream-pending=1").classes("cb-agent-stream cb-chat-scroll"):
         with ui.column().classes("cb-agent-stream-content"):
             if has_older_session_tasks:
                 load_older_label = _tr(
@@ -1356,8 +1356,10 @@ def _render_mobile_stream_messages(
                     )
                     summary_text = _stream_text(task.get("summary"), limit=4000)
                     assistant_text = error_text or output_text or progress_text or ("" if has_codex_activity else summary_text)
+                    is_working_placeholder = False
                     if not assistant_text and status in {"running", "queued"}:
                         assistant_text = _tr(t, "ui.web.mobile.stream_working", "正在处理")
+                        is_working_placeholder = True
                     turn_classes = "cb-stream-turn cb-stream-turn-with-footer" if assistant_text or should_show_activity else "cb-stream-turn"
                     with ui.element("div").classes(turn_classes):
                         if prompt_text:
@@ -1423,7 +1425,12 @@ def _render_mobile_stream_messages(
                                     elif progress_text and not output_text:
                                         body_classes = f"{body_classes} cb-stream-progress"
                                     if assistant_text:
-                                        ui.markdown(_stream_markdown(assistant_text, t)).classes(f"{body_classes} cb-stream-markdown")
+                                        markdown = ui.markdown(_stream_markdown(assistant_text, t)).classes(f"{body_classes} cb-stream-markdown")
+                                        if status in {"running", "queued"}:
+                                            live_props = f"data-stream-live=1 data-stream-text-key={quote(task_id or str(task.get('id') or ''), safe='')}"
+                                            if is_working_placeholder:
+                                                live_props = f"{live_props} data-stream-placeholder=1"
+                                            markdown.props(live_props).classes(f"{body_classes} cb-stream-markdown cb-stream-live-text")
                                         with ui.element("div").classes("cb-stream-turn-footer"):
                                             if status in {"running", "queued"}:
                                                 task_id = str(task.get("id") or "").strip()

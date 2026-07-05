@@ -46,6 +46,8 @@ CODEX_THREAD_SESSION_PREFIX = "codex:"
 CODEX_THREAD_CACHE_SECONDS = 5.0
 CODEX_THREAD_PAGE_LIMIT = 50
 CODEX_THREAD_MAX_PAGES = 100
+MOBILE_NO_STORE_PATH_PREFIXES = ("/api/mobile/",)
+MOBILE_NO_STORE_PATHS = ("/mobile", "/mobile-link", "/mobile-ui")
 _CODEX_THREADS_CACHE: dict[str, object] = {"loaded_at": 0.0, "payload": {"threads": [], "error": ""}}
 _CODEX_THREAD_DETAIL_CACHE: dict[str, dict[str, object]] = {}
 _CODEX_THREAD_DETAIL_INFLIGHT: set[str] = set()
@@ -79,6 +81,16 @@ MOBILE_ALLOWED_ACTIONS = {
     "restart-qq-stack",
     "emergency-stop",
 }
+
+def _is_mobile_no_store_path(path: str) -> bool:
+    cleaned = str(path or "").strip()
+    return cleaned in MOBILE_NO_STORE_PATHS or any(cleaned.startswith(prefix) for prefix in MOBILE_NO_STORE_PATH_PREFIXES)
+
+def _apply_mobile_no_store_headers(response: Any) -> Any:
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 @dataclass(frozen=True)
 class StreamTaskWindow:
@@ -399,6 +411,16 @@ def codex_thread_id_from_session_name(session_name: str) -> str:
     return cleaned_session_name[len(CODEX_THREAD_SESSION_PREFIX):].strip()
 
 def install_mobile_routes(app: Any, *, host: str, port: int) -> None:
+    if not getattr(app, "_chatbridge_mobile_no_store_middleware_installed", False):
+        setattr(app, "_chatbridge_mobile_no_store_middleware_installed", True)
+
+        @app.middleware("http")
+        async def mobile_no_store_middleware(request: Request, call_next: Any):
+            response = await call_next(request)
+            if _is_mobile_no_store_path(request.url.path):
+                _apply_mobile_no_store_headers(response)
+            return response
+
     if getattr(app, "_chatbridge_mobile_routes_installed", False):
         return
     setattr(app, "_chatbridge_mobile_routes_installed", True)
@@ -1617,7 +1639,7 @@ def _load_codex_thread_cached(thread_id: str, *, blocking: bool = False) -> dict
 
 def _load_codex_thread_now(cleaned_thread_id: str) -> dict[str, object]:
     try:
-        thread = read_codex_thread(cleaned_thread_id, timeout_seconds=3)
+        thread = read_codex_thread(cleaned_thread_id, timeout_seconds=8)
     except Exception as exc:  # noqa: BLE001
         thread = {"id": cleaned_thread_id, "messages": [], "error": str(exc)}
     with _CODEX_THREAD_DETAIL_LOCK:
@@ -1698,6 +1720,16 @@ def _mobile_codex_thread_payload(thread: dict[str, object]) -> dict[str, object]
     }
 
 
+def _codex_uuid_v7_time(value: object) -> str:
+    compact = str(value or "").strip().replace("-", "")
+    if len(compact) < 13 or compact[12].lower() != "7":
+        return ""
+    try:
+        millis = int(compact[:12], 16)
+        return datetime.fromtimestamp(millis / 1000).isoformat(timespec="seconds")
+    except (OSError, OverflowError, ValueError):
+        return ""
+
 def _codex_message_activity_item(message: dict[str, object], *, fallback_at: str = "") -> dict[str, object] | None:
     activity = message.get("activity") if isinstance(message.get("activity"), dict) else {}
     event = str(activity.get("event") or "codex_item").strip()
@@ -1733,7 +1765,7 @@ def _codex_thread_turn_sort_items(thread: dict[str, object]) -> list[tuple[str, 
         turn_order = _codex_message_int(message.get("turn_order"))
         if turn_order and (turn_id not in first_turn_order or turn_order < first_turn_order[turn_id]):
             first_turn_order[turn_id] = turn_order
-        at = _codex_message_at(message)
+        at = _codex_message_at(message) or _codex_uuid_v7_time(turn_id)
         if at and (turn_id not in first_at or at < first_at[turn_id]):
             first_at[turn_id] = at
     return [
@@ -1803,7 +1835,7 @@ def _codex_message_at(message: dict[str, object]) -> str:
 
 def _codex_message_sort_key(index: int, message: dict[str, object], turn_order_lookup: dict[str, int]) -> tuple[int, int, str, int, int]:
     turn_id = str(message.get("turn_id") or message.get("id") or "").strip()
-    at = _codex_message_at(message)
+    at = _codex_message_at(message) or _codex_uuid_v7_time(turn_id)
     return (
         turn_order_lookup.get(turn_id, 0),
         0 if at else 1,
@@ -1887,7 +1919,9 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
         for turn_id in selected_turns
     }
     created_base = str(thread.get("created_at") or thread.get("updated_at") or "").strip()
+    updated_base = str(thread.get("updated_at") or "").strip()
     turn_created_at: dict[str, str] = {}
+    turn_fallback_at: dict[str, str] = {}
     selected_messages = [
         (index, message)
         for index, message in enumerate(messages)
@@ -1896,9 +1930,18 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
     ]
     for _index, message in selected_messages:
         turn_id = str(message.get("turn_id") or message.get("id") or "").strip()
-        at = _codex_message_at(message)
+        at = _codex_message_at(message) or _codex_uuid_v7_time(turn_id)
         if at and (turn_id not in turn_created_at or at < turn_created_at[turn_id]):
             turn_created_at[turn_id] = at
+    last_known_at = ""
+    for index, turn_id in enumerate(selected_turns):
+        known_at = turn_created_at.get(turn_id, "")
+        if known_at:
+            last_known_at = known_at
+            continue
+        fallback_at = updated_base if updated_base and index == len(selected_turns) - 1 else last_known_at or created_base
+        if fallback_at:
+            turn_fallback_at[turn_id] = fallback_at
     sorted_messages = sorted(selected_messages, key=lambda item: _codex_message_sort_key(item[0], item[1], turn_order_lookup))
     for _index, message in sorted_messages:
         turn_id = str(message.get("turn_id") or message.get("id") or "").strip()
@@ -1907,7 +1950,7 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
         if role in {"user", "assistant", "reasoning"} and text:
             by_turn[turn_id][role].append(text)
         elif role == "activity":
-            activity = _codex_message_activity_item(message, fallback_at=_codex_message_at(message) or turn_created_at.get(turn_id, "") or created_base)
+            activity = _codex_message_activity_item(message, fallback_at=_codex_message_at(message) or turn_created_at.get(turn_id, "") or turn_fallback_at.get(turn_id, "") or created_base)
             if activity is not None:
                 by_turn[turn_id]["activity"].append(activity)
     tasks: list[dict[str, object]] = []
@@ -1915,7 +1958,7 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
     thread_error = str(thread.get("error") or "").strip()
     for turn_id in selected_turns:
         parts = by_turn[turn_id]
-        created_at = turn_created_at.get(turn_id, "") or created_base
+        created_at = turn_created_at.get(turn_id, "") or turn_fallback_at.get(turn_id, "") or created_base
         prompt = "\n\n".join(str(part) for part in parts["user"]).strip()
         output = "\n\n".join(str(part) for part in parts["assistant"]).strip()
         reasoning = "\n\n".join(str(part) for part in parts["reasoning"]).strip()

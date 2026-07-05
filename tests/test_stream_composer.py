@@ -248,6 +248,7 @@ class StreamComposerTests(unittest.TestCase):
             _noop,
             _noop,
             _noop,
+            _noop,
         )
 
         body_texts = [
@@ -304,6 +305,7 @@ class StreamComposerTests(unittest.TestCase):
             mobile_state,
             "focus",
             [],
+            _noop,
             _noop,
             _noop,
             _noop,
@@ -1388,6 +1390,57 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("排队发送", send_buttons[0].props_text)
         self.assertEqual("keyboard_return", send_buttons[0].attrs["icon"])
 
+    def test_running_assistant_text_gets_live_typewriter_key(self) -> None:
+        ui = FakeUI()
+        mobile_state = {
+            "counts": {"running": 1, "queued": 0},
+            "updated_at": "2026-07-04T05:20:00",
+            "agents": [{"id": "qq", "name": "QQ", "backend": "codex"}],
+            "tasks": [
+                {
+                    "id": "task-running",
+                    "agent_id": "qq",
+                    "agent_name": "QQ",
+                    "backend": "codex",
+                    "session_name": "focus",
+                    "status": "running",
+                    "created_at": "2026-07-04T05:19:00",
+                    "started_at": "2026-07-04T05:19:00",
+                    "prompt": "keep going",
+                    "progress_text": "working",
+                    "output": "",
+                    "error": "",
+                    "summary": "working",
+                }
+            ],
+            "session_task_counts": {"focus": 1},
+        }
+
+        render_mobile_stream_section(
+            ui,
+            _translator,
+            mobile_state,
+            "focus",
+            [],
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+        )
+
+        live_markdowns = [
+            item for item in ui.elements if item.kind == "markdown" and "cb-stream-live-text" in item.class_text.split()
+        ]
+
+        self.assertEqual(1, len(live_markdowns))
+        self.assertEqual("working", live_markdowns[0].text)
+        self.assertIn("data-stream-live=1", live_markdowns[0].props_text)
+        self.assertIn("data-stream-text-key=task-running", live_markdowns[0].props_text)
+        self.assertNotIn("data-stream-placeholder=1", live_markdowns[0].props_text)
+
     def test_queued_task_is_rendered_in_composer_queue_track_while_running(self) -> None:
         ui = FakeUI()
         mobile_state = {
@@ -1512,6 +1565,7 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("const preserveTop = options.preserveTop === true;", source)
         self.assertIn("window.__cbStreamAfterPatch(__CB_PATCH_OPTIONS__);", source)
         self.assertIn("window.__cbStreamAfterPatch?.", source)
+        self.assertIn("window.history.scrollRestoration = 'manual';", source)
         self.assertIn('"stream_scroll_runtime_clients": set()', source)
         self.assertIn('installed_clients.discard(str(getattr(client, "id", id(client))))', source)
         self.assertIn("build_stream_state_snapshot(", source)
@@ -1527,6 +1581,13 @@ class StreamComposerTests(unittest.TestCase):
         self.assertNotIn("ui.timer(0.05, lambda session=active_stream_session: scroll_stream_to_bottom(session), once=True)", source)
         self.assertIn("document.querySelector('.cb-agent-panel')?.dataset?.streamKey", source)
         self.assertIn("data-stream-key={encoded_active_session}", sections_source)
+        self.assertIn("data-stream-pending=1", sections_source)
+        self.assertIn('props("data-stream-pending=1").classes("cb-agent-stream cb-chat-scroll")', sections_source)
+        self.assertIn('.cb-agent-stream[data-stream-pending="1"] .cb-agent-stream-content', source)
+        self.assertIn('.cb-agent-stream[data-stream-pending="1"]::before', source)
+        self.assertIn("@keyframes cb-stream-pending-spin", source)
+        self.assertIn("const revealPositionedStream = () => {", source)
+        self.assertIn("removeAttribute('data-stream-pending')", source)
 
         refresh_start = source.index("def refresh_stream")
         refresh_end = source.index("client.on_connect", refresh_start)
@@ -1640,6 +1701,17 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("refresh_signature: tuple | None = None", body)
         self.assertIn("hub_file_signature: tuple | None = None", body)
         self.assertIn("stream_panel_view()", source)
+
+    def test_stream_live_text_runtime_animates_suffix_diffs(self) -> None:
+        source = Path("ui/app.py").read_text(encoding="utf-8")
+
+        self.assertIn("__cbStreamLiveTextByKey", source)
+        self.assertIn("const setupLiveTypewriter = () => {", source)
+        self.assertIn("document.querySelectorAll('[data-stream-live=\"1\"][data-stream-text-key]')", source)
+        self.assertIn("const storedFullText = element.dataset.streamFullText || '';", source)
+        self.assertIn("fullText.startsWith(currentText)", source)
+        self.assertIn("animateLiveText(element, key, fullText", source)
+        self.assertIn("new MutationObserver(scheduleLiveTextSync)", source)
 
     def test_stream_timer_reuses_computed_signature_during_refresh(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")
@@ -1861,7 +1933,9 @@ class StreamComposerTests(unittest.TestCase):
 
         self.assertIn("const markProgrammaticScroll = () => {", source)
         self.assertIn("const isProgrammaticScroll = () => Date.now() < Number(window.__cbStreamProgrammaticScrollUntil || 0);", source)
+        self.assertIn("const scrollWindowToBottom = () => {", source)
         self.assertIn("const scrollToBottom = (scroller) => {", source)
+        self.assertIn("scrollWindowToBottom();", source)
         self.assertIn("if (source === 'user' && isProgrammaticScroll())", source)
         self.assertIn("window.__cbStreamForceBottomUntil = 0;", source)
         self.assertIn("window.__cbStreamSuppressLoadOlderUntil = Date.now() + 800;", source)

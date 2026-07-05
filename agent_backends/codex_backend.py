@@ -780,11 +780,12 @@ class CodexBackend(AgentBackend):
             if not isinstance(turn, dict):
                 continue
             turn_id = str(turn.get("id") or "").strip()
+            turn_at = cls._app_server_item_timestamp(turn)
             items = turn.get("items") if isinstance(turn.get("items"), list) else []
             for item_index, item in enumerate(items, start=1):
                 if not isinstance(item, dict):
                     continue
-                message = cls._normalize_app_server_item(item, turn_id=turn_id, turn_order=turn_index, item_order=item_index)
+                message = cls._normalize_app_server_item(item, turn_id=turn_id, turn_order=turn_index, item_order=item_index, fallback_at=turn_at)
                 if message is not None:
                     messages.append(message)
         return messages
@@ -797,6 +798,7 @@ class CodexBackend(AgentBackend):
         turn_id: str,
         turn_order: int = 0,
         item_order: int = 0,
+        fallback_at: str = "",
     ) -> dict[str, object] | None:
         item_type = str(item.get("type") or "").strip()
         item_id = str(item.get("id") or "").strip()
@@ -823,6 +825,7 @@ class CodexBackend(AgentBackend):
                 item_id=item_id,
                 turn_order=turn_order,
                 item_order=item_order,
+                fallback_at=fallback_at,
             )
         if not text:
             return None
@@ -831,7 +834,7 @@ class CodexBackend(AgentBackend):
             "turn_id": turn_id,
             "role": role,
             "phase": str(item.get("phase") or "").strip(),
-            "at": cls._app_server_item_timestamp(item),
+            "at": cls._app_server_item_timestamp(item) or fallback_at,
             "turn_order": turn_order,
             "item_order": item_order,
             "text": text,
@@ -847,8 +850,9 @@ class CodexBackend(AgentBackend):
         item_id: str,
         turn_order: int = 0,
         item_order: int = 0,
+        fallback_at: str = "",
     ) -> dict[str, object] | None:
-        activity = cls._app_server_activity_payload(item, item_type=item_type, item_id=item_id)
+        activity = cls._app_server_activity_payload(item, item_type=item_type, item_id=item_id, fallback_at=fallback_at)
         if not activity:
             return None
         return {
@@ -856,7 +860,7 @@ class CodexBackend(AgentBackend):
             "turn_id": turn_id,
             "role": "activity",
             "phase": str(item.get("phase") or "").strip(),
-            "at": str(activity.get("at") or cls._app_server_item_timestamp(item)),
+            "at": str(activity.get("at") or cls._app_server_item_timestamp(item) or fallback_at),
             "turn_order": turn_order,
             "item_order": item_order,
             "text": str(activity.get("detail") or activity.get("event") or item_type).strip(),
@@ -864,7 +868,7 @@ class CodexBackend(AgentBackend):
         }
 
     @classmethod
-    def _app_server_activity_payload(cls, item: dict[str, Any], *, item_type: str, item_id: str) -> dict[str, object]:
+    def _app_server_activity_payload(cls, item: dict[str, Any], *, item_type: str, item_id: str, fallback_at: str = "") -> dict[str, object]:
         normalized_type = item_type.replace("-", "_").replace(".", "_")
         event = {
             "toolCall": "codex_tool_call",
@@ -894,7 +898,7 @@ class CodexBackend(AgentBackend):
         return {
             "event": event,
             "type": activity_type,
-            "at": cls._app_server_item_timestamp(item),
+            "at": cls._app_server_item_timestamp(item) or fallback_at,
             "detail": detail or item_type or "Codex item",
             "metadata": metadata,
         }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 import asyncio
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -16,9 +17,11 @@ from ui.mobile import (
     build_stream_signature_snapshot,
     build_stream_state_snapshot,
     _event_stream,
+    _apply_mobile_no_store_headers,
     _load_all_codex_threads,
     _codex_thread_task_payloads,
     _codex_thread_turn_count,
+    _is_mobile_no_store_path,
     _mobile_codex_thread_payload,
     _select_mobile_tasks,
     _task_activity_items,
@@ -81,6 +84,17 @@ def _raw_activity_task(**overrides: object) -> dict[str, object]:
 
 
 class MobileStateTests(unittest.TestCase):
+    def test_mobile_routes_disable_browser_cache(self) -> None:
+        response = SimpleNamespace(headers={})
+
+        self.assertTrue(_is_mobile_no_store_path("/mobile-ui"))
+        self.assertTrue(_is_mobile_no_store_path("/api/mobile/state"))
+        self.assertFalse(_is_mobile_no_store_path("/"))
+        self.assertIs(response, _apply_mobile_no_store_headers(response))
+        self.assertEqual("no-store", response.headers["Cache-Control"])
+        self.assertEqual("no-cache", response.headers["Pragma"])
+        self.assertEqual("0", response.headers["Expires"])
+
     def test_selected_session_tasks_are_kept_beyond_global_limit(self) -> None:
         tasks = [
             _task("recent-1", "default"),
@@ -161,6 +175,39 @@ class MobileStateTests(unittest.TestCase):
         self.assertEqual("2026-07-04T00:45:00", payload["created_at"])
         self.assertEqual("2026-07-04T00:46:00", payload["finished_at"])
         self.assertEqual("2026-07-04T00:45:00", payload["activity_items"][0]["at"])
+
+    def test_codex_thread_payloads_use_turn_uuid_time_when_messages_have_no_at(self) -> None:
+        turn_id = "019f28de-979b-7f91-aa60-f1ad2247bb4c"
+        expected = datetime.fromtimestamp(int(turn_id.replace("-", "")[:12], 16) / 1000).isoformat(timespec="seconds")
+        thread = {
+            "id": "thread-uuid-time",
+            "created_at": "2026-07-04T00:45:00",
+            "messages": [
+                {"turn_id": turn_id, "turn_order": 1, "role": "user", "text": "prompt"},
+                {"turn_id": turn_id, "turn_order": 1, "role": "assistant", "text": "answer"},
+            ],
+        }
+
+        tasks = _codex_thread_task_payloads(thread)
+
+        self.assertEqual(expected, tasks[0]["created_at"])
+        self.assertNotEqual(thread["created_at"], tasks[0]["created_at"])
+
+    def test_latest_codex_turn_without_time_uses_thread_updated_at(self) -> None:
+        thread = {
+            "id": "thread-missing-latest-time",
+            "created_at": "2026-07-04T00:45:00",
+            "updated_at": "2026-07-05T21:53:28",
+            "messages": [
+                {"turn_id": "turn-known", "turn_order": 1, "at": "2026-07-05T21:52:20", "role": "user", "text": "known"},
+                {"turn_id": "c36f631d-b0ac-4aad-8d60-6f2a443f7ea7", "turn_order": 2, "role": "assistant", "text": "latest"},
+            ],
+        }
+
+        tasks = _codex_thread_task_payloads(thread, limit=2)
+
+        self.assertEqual("2026-07-05T21:52:20", tasks[0]["created_at"])
+        self.assertEqual("2026-07-05T21:53:28", tasks[1]["created_at"])
 
     def test_non_failed_terminal_activity_is_not_error_red(self) -> None:
         canceled_items = _task_activity_items(_activity_task(status="canceled", error="用户取消"))
@@ -404,6 +451,23 @@ class MobileStateTests(unittest.TestCase):
 
     def test_codex_thread_default_page_limit_stays_sidebar_sized(self) -> None:
         self.assertLessEqual(CODEX_THREAD_PAGE_LIMIT, 50)
+
+    def test_codex_thread_detail_load_uses_ipc_timeout_matching_page_reads(self) -> None:
+        import ui.mobile as mobile
+
+        mobile._CODEX_THREAD_DETAIL_CACHE.clear()
+        mobile._CODEX_THREAD_DETAIL_INFLIGHT.clear()
+        calls: list[dict[str, object]] = []
+
+        def fake_read_codex_thread(thread_id: str, **kwargs: object) -> dict[str, object]:
+            calls.append({"thread_id": thread_id, **kwargs})
+            return {"id": thread_id, "messages": []}
+
+        with patch("ui.mobile.read_codex_thread", side_effect=fake_read_codex_thread):
+            thread = mobile._load_codex_thread_now("thread-1")
+
+        self.assertEqual({"id": "thread-1", "messages": []}, thread)
+        self.assertEqual([{"thread_id": "thread-1", "timeout_seconds": 8}], calls)
 
     def test_mobile_state_defaults_to_lightweight_payload(self) -> None:
         with (

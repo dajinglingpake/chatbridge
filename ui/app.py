@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 import uuid
 
 from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from core.app_service import cancel_hub_task, delete_agent, reset_weixin_conversation, run_named_action, run_repair_command, save_agent, schedule_named_action, set_weixin_notice_enabled, submit_hub_task, switch_active_account, switch_bridge_agent, switch_weixin_session_backend, terminate_external_agent
 from core.navigation import PRIMARY_PAGES
@@ -32,6 +35,20 @@ ASYNC_SERVICE_ACTIONS = {
 STREAM_HISTORY_PAGE_SIZE = 20
 STREAM_SIDEBAR_PAGE_SIZE = 40
 WEB_THEME_OPTIONS = ("dark", "light", "forest")
+STREAM_UI_LOG_PATH = APP_DIR / ".runtime" / "logs" / "ui_stream_refresh.jsonl"
+
+def _append_stream_ui_log(event: str, **fields: object) -> None:
+    try:
+        STREAM_UI_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "at": datetime.now().isoformat(timespec="milliseconds"),
+            "event": event,
+            **fields,
+        }
+        with STREAM_UI_LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+    except Exception:
+        pass
 
 def normalize_web_theme(value: str) -> str:
     cleaned = str(value or "").strip().lower()
@@ -155,6 +172,45 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         (() => {
             if (window.__cbShellBootstrapInstalled === '1') return;
             window.__cbShellBootstrapInstalled = '1';
+            const sendUiLog = (event, payload = {}) => {
+                try {
+                    const body = JSON.stringify({
+                        event,
+                        url: window.location.href,
+                        ...payload,
+                    });
+                    if (navigator.sendBeacon) {
+                        navigator.sendBeacon('/api/ui/stream-log', new Blob([body], { type: 'application/json' }));
+                        return;
+                    }
+                    fetch('/api/ui/stream-log', {
+                        method: 'POST',
+                        headers: { 'content-type': 'application/json' },
+                        body,
+                        keepalive: true,
+                    }).catch(() => {});
+                } catch {}
+            };
+            window.__cbUiLog = sendUiLog;
+            if (window.__cbUiErrorLogInstalled !== '1') {
+                window.__cbUiErrorLogInstalled = '1';
+                window.addEventListener('error', (event) => {
+                    sendUiLog('browser_error', {
+                        message: String(event.message || '').slice(0, 1200),
+                        source: String(event.filename || '').slice(0, 400),
+                        line: event.lineno || 0,
+                        column: event.colno || 0,
+                        stack: String(event.error?.stack || '').slice(0, 1200),
+                    });
+                });
+                window.addEventListener('unhandledrejection', (event) => {
+                    const reason = event.reason;
+                    sendUiLog('browser_unhandledrejection', {
+                        message: String(reason?.message || reason || '').slice(0, 1200),
+                        stack: String(reason?.stack || '').slice(0, 1200),
+                    });
+                });
+            }
             const decodeStreamKey = (value) => {
                 try {
                     return decodeURIComponent(value || '');
@@ -763,12 +819,33 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             display: flex;
             flex-direction: column;
             background: var(--cb-bg);
+            position: relative;
+        }
+        .cb-agent-panel[data-stream-pending="1"] .cb-agent-stream-content,
+        .cb-agent-stream[data-stream-pending="1"] .cb-agent-stream-content {
+            visibility: hidden;
+        }
+        .cb-agent-stream[data-stream-pending="1"]::before {
+            content: "";
+            position: absolute;
+            z-index: 3;
+            left: 50%;
+            top: calc((100dvh - var(--cb-composer-height, 5.5rem)) / 2);
+            width: 1.75rem;
+            height: 1.75rem;
+            margin: -0.875rem 0 0 -0.875rem;
+            border: 2px solid var(--cb-border);
+            border-top-color: var(--cb-accent-bright);
+            border-radius: 999px;
+            animation: cb-stream-pending-spin 800ms linear infinite;
+            pointer-events: none;
         }
         .cb-agent-stream {
             flex: 1;
             min-height: 0;
             overflow: auto;
             padding: 1rem;
+            position: relative;
             overscroll-behavior-y: contain;
         }
         .cb-agent-stream-content {
@@ -780,6 +857,11 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             justify-content: flex-end;
             margin: 0 auto;
             padding: 0 0.5rem;
+        }
+        @keyframes cb-stream-pending-spin {
+            to {
+                transform: rotate(360deg);
+            }
         }
         .cb-agent-titlebar {
             min-height: 3rem;
@@ -2366,9 +2448,22 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         refresh_signature: tuple | None = None,
         hub_file_signature: tuple | None = None,
     ) -> None:
+        start_time = time.perf_counter()
         if stream_state is None or not active_stream_session:
             stream_state = _stream_state_snapshot()
             active_stream_session = _resolve_stream_active_session(stream_state)
+        current_client = context.client
+        client_id = str(getattr(current_client, "id", id(current_client)))
+        _append_stream_ui_log(
+            "refresh_parts_start",
+            client_id=client_id,
+            active_session=active_stream_session,
+            refresh_composer=refresh_composer,
+            refresh_messages=refresh_messages,
+            active_page=state.get("active_page"),
+            has_socket=bool(getattr(current_client, "has_socket_connection", False)),
+            deleted=bool(getattr(current_client, "_deleted", False)),
+        )
         state["stream_panel_render_snapshot"] = (stream_state, active_stream_session)
         state["stream_panel_render_signature"] = refresh_signature
         state["stream_panel_hub_state_file_signature"] = hub_file_signature
@@ -2377,6 +2472,26 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                 stream_composer_view.refresh()
             if refresh_messages:
                 stream_messages_view.refresh()
+            _append_stream_ui_log(
+                "refresh_parts_ok",
+                client_id=client_id,
+                active_session=active_stream_session,
+                refresh_composer=refresh_composer,
+                refresh_messages=refresh_messages,
+                elapsed_ms=round((time.perf_counter() - start_time) * 1000, 3),
+            )
+        except Exception as exc:
+            _append_stream_ui_log(
+                "refresh_parts_error",
+                client_id=client_id,
+                active_session=active_stream_session,
+                refresh_composer=refresh_composer,
+                refresh_messages=refresh_messages,
+                error=repr(exc),
+                traceback=traceback.format_exc(),
+                elapsed_ms=round((time.perf_counter() - start_time) * 1000, 3),
+            )
+            raise
         finally:
             state["stream_panel_render_snapshot"] = None
             state["stream_panel_render_signature"] = None
@@ -3165,6 +3280,52 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                 js_handler="() => document.body.classList.toggle('cb-sidebar-open')",
             )
 
+    def install_ui_error_logger() -> None:
+        ui.run_javascript(
+            """
+            (() => {
+                const sendUiLog = (event, payload = {}) => {
+                    try {
+                        const body = JSON.stringify({
+                            event,
+                            url: window.location.href,
+                            ...payload,
+                        });
+                        if (navigator.sendBeacon) {
+                            navigator.sendBeacon('/api/ui/stream-log', new Blob([body], { type: 'application/json' }));
+                            return;
+                        }
+                        fetch('/api/ui/stream-log', {
+                            method: 'POST',
+                            headers: { 'content-type': 'application/json' },
+                            body,
+                            keepalive: true,
+                        }).catch(() => {});
+                    } catch {}
+                };
+                window.__cbUiLog = sendUiLog;
+                if (window.__cbUiErrorLogInstalled === '1') return;
+                window.__cbUiErrorLogInstalled = '1';
+                window.addEventListener('error', (event) => {
+                    sendUiLog('browser_error', {
+                        message: String(event.message || '').slice(0, 1200),
+                        source: String(event.filename || '').slice(0, 400),
+                        line: event.lineno || 0,
+                        column: event.colno || 0,
+                        stack: String(event.error?.stack || '').slice(0, 1200),
+                    });
+                });
+                window.addEventListener('unhandledrejection', (event) => {
+                    const reason = event.reason;
+                    sendUiLog('browser_unhandledrejection', {
+                        message: String(reason?.message || reason || '').slice(0, 1200),
+                        stack: String(reason?.stack || '').slice(0, 1200),
+                    });
+                });
+            })();
+            """
+        )
+
     def scroll_stream_to_bottom(active_session_name: str = "", *, force_bottom: bool = False, preserve_top: bool = False) -> None:
         active_key = str(active_session_name or "").strip()
         current_client = context.client
@@ -3186,7 +3347,35 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         }
         patch_options_json = json.dumps(patch_options, ensure_ascii=False)
         if client_key in installed_clients:
-            ui.run_javascript(f"window.__cbStreamAfterPatch?.({patch_options_json});")
+            start_time = time.perf_counter()
+            _append_stream_ui_log(
+                "scroll_after_patch_start",
+                client_id=client_key,
+                active_session=active_key,
+                installed=True,
+                force_bottom=bool(force_bottom),
+                preserve_top=bool(preserve_top),
+            )
+            try:
+                ui.run_javascript(f"window.__cbStreamAfterPatch?.({patch_options_json});")
+                _append_stream_ui_log(
+                    "scroll_after_patch_ok",
+                    client_id=client_key,
+                    active_session=active_key,
+                    installed=True,
+                    elapsed_ms=round((time.perf_counter() - start_time) * 1000, 3),
+                )
+            except Exception as exc:
+                _append_stream_ui_log(
+                    "scroll_after_patch_error",
+                    client_id=client_key,
+                    active_session=active_key,
+                    installed=True,
+                    error=repr(exc),
+                    traceback=traceback.format_exc(),
+                    elapsed_ms=round((time.perf_counter() - start_time) * 1000, 3),
+                )
+                raise
             return
         installed_clients.add(client_key)
         script = """
@@ -3194,6 +3383,11 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                 if (window.__cbStreamPatchRuntimeReady !== '1') {
                 window.__cbStreamPatchRuntimeReady = '1';
                 window.__cbStreamAfterPatch = (options = {}) => {
+                try {
+                    if (window.history && 'scrollRestoration' in window.history) {
+                        window.history.scrollRestoration = 'manual';
+                    }
+                } catch {}
                 const labels = options.labels || {};
                 const decodeStreamKey = (value) => {
                     try {
@@ -3227,10 +3421,18 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     window.__cbStreamProgrammaticScrollUntil = Date.now() + 250;
                 };
                 const isProgrammaticScroll = () => Date.now() < Number(window.__cbStreamProgrammaticScrollUntil || 0);
+                const scrollWindowToBottom = () => {
+                    const height = Math.max(
+                        document.body?.scrollHeight || 0,
+                        document.documentElement?.scrollHeight || 0,
+                    );
+                    window.scrollTo(0, height);
+                };
                 const scrollToBottom = (scroller) => {
                     markProgrammaticScroll();
                     scroller.scrollTop = scroller.scrollHeight;
                     scroller.scrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+                    scrollWindowToBottom();
                 };
                 window.__cbStreamScrollStateByKey = window.__cbStreamScrollStateByKey || {};
                 const scrollStateFor = (key) => {
@@ -3267,6 +3469,10 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     if (button) {
                         button.classList.toggle('cb-scroll-bottom-button-visible', delta > nearBottomLimit);
                     }
+                };
+                const revealPositionedStream = () => {
+                    document.querySelector('.cb-agent-panel')?.removeAttribute('data-stream-pending');
+                    document.querySelector('.cb-agent-stream')?.removeAttribute('data-stream-pending');
                 };
                 const setupFooterLabelReveal = () => {
                     if (window.__cbStreamFooterRevealDelegateReady === '1') return;
@@ -3609,6 +3815,129 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     const height = composerZone ? Math.ceil(composerZone.getBoundingClientRect().height) : 0;
                     document.documentElement.style.setProperty('--cb-composer-height', `${height}px`);
                 };
+                const liveTextByKey = window.__cbStreamLiveTextByKey || new Map();
+                window.__cbStreamLiveTextByKey = liveTextByKey;
+                const collectLiveTextNodes = (root) => {
+                    const nodes = [];
+                    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+                        acceptNode: (node) => {
+                            const parent = node.parentElement;
+                            if (!parent || parent.closest('.cb-stream-code-copy-button')) {
+                                return NodeFilter.FILTER_REJECT;
+                            }
+                            return NodeFilter.FILTER_ACCEPT;
+                        },
+                    });
+                    while (walker.nextNode()) {
+                        nodes.push({ node: walker.currentNode, text: walker.currentNode.nodeValue || '' });
+                    }
+                    return nodes;
+                };
+                const setLiveTextPrefix = (segments, length) => {
+                    let remaining = Math.max(0, length);
+                    for (const segment of segments) {
+                        const next = segment.text.slice(0, remaining);
+                        if (segment.node.nodeValue !== next) {
+                            segment.node.nodeValue = next;
+                        }
+                        remaining -= segment.text.length;
+                        if (remaining < 0) remaining = 0;
+                    }
+                };
+                const animateLiveText = (element, key, fullText, fromLength, placeholder) => {
+                    const previous = liveTextByKey.get(key) || {};
+                    if (previous.timer) {
+                        window.clearInterval(previous.timer);
+                    }
+                    const state = {
+                        text: fullText.slice(0, fromLength),
+                        target: fullText,
+                        element,
+                        placeholder,
+                        timer: 0,
+                    };
+                    liveTextByKey.set(key, state);
+                    element.dataset.streamFullText = fullText;
+                    const segments = collectLiveTextNodes(element);
+                    let cursor = Math.max(0, Math.min(fromLength, fullText.length));
+                    setLiveTextPrefix(segments, cursor);
+                    const step = () => {
+                        cursor = Math.min(fullText.length, cursor + Math.max(1, Math.ceil((fullText.length - cursor) / 240)));
+                        setLiveTextPrefix(segments, cursor);
+                        state.text = fullText.slice(0, cursor);
+                        if (cursor >= fullText.length) {
+                            window.clearInterval(state.timer);
+                            state.timer = 0;
+                            state.text = fullText;
+                        }
+                    };
+                    state.timer = window.setInterval(step, 16);
+                    step();
+                };
+                let liveTextScheduled = false;
+                const syncLiveText = () => {
+                    liveTextScheduled = false;
+                    const seen = new Set();
+                    document.querySelectorAll('[data-stream-live="1"][data-stream-text-key]').forEach((element) => {
+                        const key = element.getAttribute('data-stream-text-key') || '';
+                        if (!key) return;
+                        seen.add(key);
+                        const storedFullText = element.dataset.streamFullText || '';
+                        const domText = element.textContent || '';
+                        const fullText = storedFullText && (domText.length < storedFullText.length || storedFullText.startsWith(domText)) ? storedFullText : domText;
+                        const placeholder = element.dataset.streamPlaceholder === '1';
+                        const state = liveTextByKey.get(key);
+                        if (!state) {
+                            liveTextByKey.set(key, { text: fullText, target: fullText, element, placeholder, timer: 0 });
+                            element.dataset.streamFullText = fullText;
+                            return;
+                        }
+                        if (state.element === element && state.target === fullText && state.timer) {
+                            return;
+                        }
+                        const currentText = String(state.text || '');
+                        const canAppend = fullText.startsWith(currentText) && fullText.length > currentText.length;
+                        const canReplacePlaceholder = state.placeholder && fullText.trim() && fullText !== currentText;
+                        if (canAppend || canReplacePlaceholder) {
+                            animateLiveText(element, key, fullText, canAppend ? currentText.length : 0, placeholder);
+                            return;
+                        }
+                        if (state.timer) {
+                            window.clearInterval(state.timer);
+                        }
+                        liveTextByKey.set(key, { text: fullText, target: fullText, element, placeholder, timer: 0 });
+                        element.dataset.streamFullText = fullText;
+                    });
+                    for (const [key, state] of liveTextByKey.entries()) {
+                        if (seen.has(key)) continue;
+                        if (state.timer) {
+                            window.clearInterval(state.timer);
+                        }
+                        liveTextByKey.delete(key);
+                    }
+                };
+                const scheduleLiveTextSync = () => {
+                    if (liveTextScheduled) return;
+                    liveTextScheduled = true;
+                    window.requestAnimationFrame(syncLiveText);
+                };
+                const setupLiveTypewriter = () => {
+                    window.__cbStreamTypewriterSync = scheduleLiveTextSync;
+                    scheduleLiveTextSync();
+                };
+                const ensureLiveTypewriterObserver = (streamContent) => {
+                    if (!streamContent || window.__cbStreamTypewriterObservedContent === streamContent) return;
+                    if (window.__cbStreamTypewriterObserver) {
+                        window.__cbStreamTypewriterObserver.disconnect();
+                    }
+                    window.__cbStreamTypewriterObserver = new MutationObserver(scheduleLiveTextSync);
+                    window.__cbStreamTypewriterObserver.observe(streamContent, {
+                        childList: true,
+                        subtree: true,
+                        characterData: true,
+                    });
+                    window.__cbStreamTypewriterObservedContent = streamContent;
+                };
                 const setupStreamBehavior = () => {
                     setupFooterLabelReveal();
                     setupCopyFeedback();
@@ -3619,6 +3948,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     setupComposerSubmit();
                     updateComposerMetrics();
                     updateLiveElapsed();
+                    setupLiveTypewriter();
                 };
                 const attachScrollListener = (scroller) => {
                     const desiredActiveKey = window.__cbStreamDesiredActiveKey || activeKey || readRenderedActiveKey();
@@ -3663,6 +3993,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                         );
                         delete window.__cbStreamLoadOlderAnchor;
                         updateScrollState(scroller);
+                        revealPositionedStream();
                         return;
                     }
                     if (forceBottom) {
@@ -3679,6 +4010,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                         state.userScrolledAway = true;
                         window.__cbStreamSuppressLoadOlderUntil = Date.now() + 800;
                         updateScrollState(scroller);
+                        revealPositionedStream();
                         return;
                     }
                     const shouldStickToBottom = forceBottom || Date.now() < Number(window.__cbStreamForceBottomUntil || 0) || state.nearBottom === true || !Number.isFinite(previousDelta);
@@ -3689,6 +4021,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                         scroller.scrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight - previousDelta);
                     }
                     updateScrollState(scroller);
+                    revealPositionedStream();
                 };
                 const focusComposerIfNeeded = () => {
                     if (window.innerWidth < 768) return;
@@ -3736,6 +4069,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                 const ensureAutoScrollObserver = () => {
                     const streamContent = document.querySelector('.cb-agent-stream-content') || document.querySelector('.cb-agent-stream');
                     if (!streamContent) return;
+                    ensureLiveTypewriterObserver(streamContent);
                     if (window.__cbStreamObservedContent !== streamContent) {
                         if (window.__cbStreamAutoScrollObserver) {
                             window.__cbStreamAutoScrollObserver.disconnect();
@@ -3777,7 +4111,32 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                 window.__cbStreamAfterPatch(__CB_PATCH_OPTIONS__);
             })();
             """.replace("__CB_PATCH_OPTIONS__", patch_options_json)
-        ui.run_javascript(script)
+        start_time = time.perf_counter()
+        _append_stream_ui_log(
+            "scroll_runtime_install_start",
+            client_id=client_key,
+            active_session=active_key,
+            force_bottom=bool(force_bottom),
+            preserve_top=bool(preserve_top),
+        )
+        try:
+            ui.run_javascript(script)
+            _append_stream_ui_log(
+                "scroll_runtime_install_ok",
+                client_id=client_key,
+                active_session=active_key,
+                elapsed_ms=round((time.perf_counter() - start_time) * 1000, 3),
+            )
+        except Exception as exc:
+            _append_stream_ui_log(
+                "scroll_runtime_install_error",
+                client_id=client_key,
+                active_session=active_key,
+                error=repr(exc),
+                traceback=traceback.format_exc(),
+                elapsed_ms=round((time.perf_counter() - start_time) * 1000, 3),
+            )
+            raise
 
     def install_stream_refresh_timer() -> None:
         client = context.client
@@ -3809,6 +4168,12 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         def refresh_stream() -> None:
             timer = timer_ref["timer"]
             if getattr(client, "_deleted", False) or not client.has_socket_connection:
+                _append_stream_ui_log(
+                    "refresh_timer_cancel",
+                    client_id=str(getattr(client, "id", id(client))),
+                    deleted=bool(getattr(client, "_deleted", False)),
+                    has_socket=bool(getattr(client, "has_socket_connection", False)),
+                )
                 if timer is not None:
                     timer.cancel(with_current_invocation=True)
                 return
@@ -3846,10 +4211,24 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                                 hub_file_signature=next_hub_file_signature,
                             )
                 except RuntimeError as exc:
+                    _append_stream_ui_log(
+                        "refresh_timer_runtime_error",
+                        client_id=str(getattr(client, "id", id(client))),
+                        error=repr(exc),
+                        traceback=traceback.format_exc(),
+                    )
                     if "client this element belongs to has been deleted" not in str(exc):
                         raise
                     if timer is not None:
                         timer.cancel(with_current_invocation=True)
+                except Exception as exc:
+                    _append_stream_ui_log(
+                        "refresh_timer_error",
+                        client_id=str(getattr(client, "id", id(client))),
+                        error=repr(exc),
+                        traceback=traceback.format_exc(),
+                    )
+                    raise
 
         client.on_connect(install_initial_stream_behavior)
         timer_ref["initial_timer"] = ui.timer(0.1, install_initial_stream_behavior, once=True)
@@ -3881,6 +4260,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         shell_view()
         content_view()
         ui.run_javascript(f"window.__cbApplyTheme && window.__cbApplyTheme({state['theme']!r})")
+        install_ui_error_logger()
         install_stream_refresh_timer()
 
     @ui.page("/mobile-ui")
@@ -3899,12 +4279,25 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         shell_view()
         content_view()
         ui.run_javascript(f"window.__cbApplyTheme && window.__cbApplyTheme({state['theme']!r})")
+        install_ui_error_logger()
         install_stream_refresh_timer()
 
 
 def run_ui(host: str = "0.0.0.0", port: int = 8765, native: bool = False) -> None:
     ui = _load_nicegui()
     from nicegui import app
+
+    @app.post("/api/ui/stream-log")
+    async def ui_stream_log(request: Request) -> JSONResponse:
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            payload = {"event": "browser_log_parse_error", "error": repr(exc)}
+        if not isinstance(payload, dict):
+            payload = {"event": "browser_log_invalid_payload", "payload": repr(payload)[:1200]}
+        event = str(payload.pop("event", "browser_event") or "browser_event")
+        _append_stream_ui_log(event, **payload)
+        return JSONResponse({"ok": True})
 
     install_mobile_routes(app, host=host, port=port)
     create_ui(host=host, port=port)

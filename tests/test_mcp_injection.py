@@ -155,6 +155,7 @@ class McpServerInjectionTests(unittest.TestCase):
             "turns": [
                 {
                     "id": "turn-1",
+                    "createdAt": 1783161500,
                     "items": [
                         {"type": "userMessage", "id": "item-user", "content": [{"type": "text", "text": "用户问题"}]},
                         {"type": "reasoning", "id": "item-reasoning", "summary": ["先检查状态"]},
@@ -198,6 +199,11 @@ class McpServerInjectionTests(unittest.TestCase):
         self.assertEqual(["用户问题", "先检查状态", "shell: pytest", "[x] 修复滚动", "completed", "最终回答"], [message["text"] for message in messages])
         self.assertEqual([1, 1, 1, 1, 1, 1], [message["turn_order"] for message in messages])
         self.assertEqual([1, 2, 3, 4, 5, 6], [message["item_order"] for message in messages])
+        turn_at = backend._format_app_server_timestamp(1783161500)
+        self.assertEqual(turn_at, messages[0]["at"])
+        self.assertEqual(turn_at, messages[1]["at"])
+        self.assertEqual(turn_at, messages[-1]["at"])
+        self.assertNotEqual(turn_at, messages[2]["at"])
         activities = [message["activity"] for message in messages if message["role"] == "activity"]
         self.assertEqual(["codex_tool_call", "codex_todo", "codex_compaction"], [activity["event"] for activity in activities])
         self.assertEqual(messages[2]["at"], activities[0]["at"])
