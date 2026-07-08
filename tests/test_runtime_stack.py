@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from runtime_stack import (
     _filter_child_process_matches,
+    get_qq_login_status,
     get_managed_status,
     get_runtime_snapshot,
     _managed_subprocess_env,
@@ -23,6 +24,7 @@ from runtime_stack import (
     start_managed,
     start_qq_stack,
     stop_managed,
+    stop_onebot_runtime,
 )
 
 
@@ -116,6 +118,18 @@ class RuntimeStackTests(unittest.TestCase):
         self.assertEqual("", snapshot.qq_user_id)
         self.assertEqual([False, False, False], [call.kwargs["discover"] for call in mocked_status.call_args_list])
         mocked_onebot.assert_called_once_with(discover=False)
+
+    def test_qq_login_status_prefers_napcat_webui_login_state(self) -> None:
+        with (
+            patch("runtime_stack.fetch_napcat_login_status", return_value={"isLogin": True, "isOffline": False}),
+            patch("runtime_stack.fetch_napcat_login_info", return_value={"uin": "2493227263", "nick": "test"}),
+            patch("runtime_stack._query_onebot_api", side_effect=AssertionError("OneBot fallback should be skipped")),
+        ):
+            logged_in, user_id, nickname = get_qq_login_status()
+
+        self.assertTrue(logged_in)
+        self.assertEqual("2493227263", user_id)
+        self.assertEqual("test", nickname)
 
     def test_start_managed_passes_proxy_env_to_child_process(self) -> None:
         pid_file = self.root / "agent.pid"
@@ -293,6 +307,21 @@ class RuntimeStackTests(unittest.TestCase):
                         message = stop_managed("Bridge", self.root / "weixin_hub_bridge.py", pid_file)
         self.assertEqual([(101,), (202,)], [call.args for call in mocked_kill.call_args_list])
         mocked_clear.assert_called_once_with(pid_file)
+        self.assertIn("PIDs 101, 202", message)
+
+    def test_stop_onebot_runtime_stops_marker_and_port_processes(self) -> None:
+        marker_proc = SimpleNamespace(pid=101)
+        port_proc = SimpleNamespace(pid=202)
+        with (
+            patch("runtime_stack._find_processes_by_markers", return_value=[marker_proc]),
+            patch("runtime_stack._find_onebot_runtime_port_processes", return_value=[marker_proc, port_proc]),
+            patch("runtime_stack._taskkill") as mocked_kill,
+            patch("runtime_stack._clear_pid_file") as mocked_clear,
+        ):
+            message = stop_onebot_runtime()
+
+        self.assertEqual([(101,), (202,)], [call.args for call in mocked_kill.call_args_list])
+        mocked_clear.assert_called_once()
         self.assertIn("PIDs 101, 202", message)
 
     def test_taskkill_skips_current_process_when_stopping_children(self) -> None:

@@ -1,19 +1,19 @@
 from __future__ import annotations
 
-import base64
 import io
 import queue
 import threading
 import time
 import urllib.parse
+from types import SimpleNamespace
 from typing import Callable
 
 import qrcode
 import qrcode.image.svg
 
 from core.app_service import run_named_action
-from core.onebot_runtime_installer import fetch_napcat_login_qrcode_url, find_latest_qr_image
-from runtime_stack import get_runtime_snapshot
+from core.onebot_runtime_installer import fetch_napcat_login_qrcode_url
+from runtime_stack import get_qq_login_status, get_runtime_snapshot
 
 
 Translator = Callable[..., str]
@@ -22,10 +22,6 @@ Translator = Callable[..., str]
 def _tr(t: Translator, key: str, fallback: str, **kwargs: object) -> str:
     value = t(key, **kwargs)
     return value if value != key else fallback.format(**kwargs)
-
-
-def _image_data_uri(image_bytes: bytes) -> str:
-    return f"data:image/png;base64,{base64.b64encode(image_bytes).decode('ascii')}"
 
 
 def _qr_url_data_uri(qr_url: str) -> str:
@@ -43,6 +39,7 @@ def install_qq_login_dialog(
     ui,
     notify: Callable[[str], None],
     t: Translator,
+    on_success: Callable[[], None] | None = None,
 ) -> Callable[[], None]:
     def open_qq_login_dialog() -> None:
         dialog = ui.dialog().props("persistent")
@@ -50,110 +47,136 @@ def install_qq_login_dialog(
             with ui.column().classes("w-full gap-3"):
                 ui.label("QQ Login").classes("cb-kicker")
                 ui.label(_tr(t, "ui.qq_login.title", "扫码登录 QQ")).classes("text-2xl font-black text-white")
-                status = ui.label(_tr(t, "ui.qq_login.preparing", "正在准备 QQ 登录组件...")).classes("cb-chip cb-chip-warn w-fit")
+                status = ui.label(_tr(t, "ui.qq_login.idle", "QQ 登录组件未启动")).classes("cb-chip cb-chip-warn w-fit")
                 with ui.element("div").classes("cb-panel w-full min-w-0 p-4 flex justify-center"):
                     qr_image = ui.image("").classes("w-full max-w-72 aspect-square h-auto self-center")
-                    placeholder = ui.label(_tr(t, "ui.qq_login.waiting_qr", "正在获取二维码...")).classes("text-sm text-slate-300 self-center")
-                detail = ui.label(_tr(t, "ui.qq_login.scan_hint", "请使用手机 QQ 扫码并确认登录。")).classes("text-sm text-slate-300")
+                    placeholder = ui.label(_tr(t, "ui.qq_login.click_get_qr", "点击获取二维码后启动 QQ 登录组件。")).classes("text-sm text-slate-300 self-center")
+                detail = ui.label(_tr(t, "ui.qq_login.start_hint", "启动 UI 不会启动 QQ；需要时请手动获取二维码。")).classes("text-sm text-slate-300")
                 with ui.row().classes("gap-2 flex-wrap"):
-                    retry_button = ui.button(_tr(t, "ui.web.action.reload_qr", "重新获取二维码"), icon="refresh").props("outline color=white")
+                    get_qr_button = ui.button(_tr(t, "ui.qq_login.get_qr", "获取二维码"), icon="qr_code_2")
                     close_button = ui.button(_tr(t, "ui.web.action.close", "关闭"), icon="close").props("outline color=white")
 
         event_queue: queue.SimpleQueue[tuple[str, str]] = queue.SimpleQueue()
-        started_at = {"value": 0.0}
-        qr_since = {"value": time.time()}
-        restart_count = {"value": 0}
+        qr_visible = {"value": False}
+        retry_mode = {"value": False}
+        auto_close_enabled = {"value": False}
+        login_notified = {"value": False}
+        last_login_poll = {"value": 0.0}
+        worker_running = {"value": False}
+        login_done = {"value": False}
 
         def close_dialog() -> None:
             poll_timer.deactivate()
             dialog.close()
 
-        def update_qr_image() -> bool:
-            try:
-                qr_url = fetch_napcat_login_qrcode_url(refresh=False, timeout=1.0)
-            except Exception:  # noqa: BLE001
-                qr_url = ""
-            if qr_url:
-                qr_image.set_source(_qr_url_data_uri(qr_url))
-                placeholder.visible = False
-                status.text = _tr(t, "ui.qq_login.scan", "请使用手机 QQ 扫码")
-                status.classes(replace="cb-chip cb-chip-warn w-fit")
-                detail.text = _tr(t, "ui.qq_login.scan_hint", "请使用手机 QQ 扫码并确认登录。")
-                return True
+        def refresh_after_success() -> None:
+            if on_success is not None:
+                on_success()
 
-            qr_path = find_latest_qr_image(since=qr_since["value"]) or find_latest_qr_image()
-            if qr_path is None:
-                return False
-            try:
-                qr_image.set_source(_image_data_uri(qr_path.read_bytes()))
-            except OSError as exc:
-                detail.text = _tr(t, "ui.qq_login.qr_load_failed", "二维码图片读取失败：{reason}", reason=exc)
-                return False
+        def show_qr_url(qr_url: str) -> None:
+            qr_image.set_source(_qr_url_data_uri(qr_url))
             placeholder.visible = False
             status.text = _tr(t, "ui.qq_login.scan", "请使用手机 QQ 扫码")
             status.classes(replace="cb-chip cb-chip-warn w-fit")
-            detail.text = _tr(t, "ui.qq_login.scan_hint", "扫码后请在手机 QQ 中确认登录。登录成功后即可通过 QQ 私聊或群聊发送消息。")
+            detail.text = _tr(t, "ui.qq_login.scan_hint", "请使用手机 QQ 扫码并确认登录。")
+            qr_visible["value"] = True
+            retry_mode["value"] = True
+
+        def show_login_success(snapshot) -> bool:
+            if not snapshot.qq_logged_in:
+                return False
+            account = f"{snapshot.qq_nickname} ({snapshot.qq_user_id})" if snapshot.qq_nickname and snapshot.qq_user_id else snapshot.qq_user_id or "-"
+            status.text = _tr(t, "ui.qq_login.success", "QQ 登录成功")
+            status.classes(replace="cb-chip cb-chip-ok w-fit")
+            placeholder.visible = False
+            detail.text = _tr(t, "ui.qq_login.logged_in", "当前 QQ：{account}", account=account)
+            if not login_notified["value"]:
+                login_notified["value"] = True
+                notify(_tr(t, "ui.qq_login.success", "QQ 登录成功"))
             return True
 
-        def start_worker() -> None:
-            started_at["value"] = time.monotonic()
-            qr_since["value"] = time.time() - 1.0
+        def finish_login_success(snapshot) -> None:
+            if login_done["value"] or not show_login_success(snapshot):
+                return
+            login_done["value"] = True
+            close_dialog()
+            refresh_after_success()
+
+        def current_login_snapshot():
+            logged_in, user_id, nickname = get_qq_login_status()
+            return SimpleNamespace(qq_logged_in=logged_in, qq_user_id=user_id, qq_nickname=nickname)
+
+        def start_worker(*, force_restart: bool = False) -> None:
+            if worker_running["value"]:
+                return
+            worker_running["value"] = True
+            auto_close_enabled["value"] = not current_login_snapshot().qq_logged_in
+            get_qr_button.set_enabled(False)
+            qr_visible["value"] = False
+            qr_image.set_source("")
             status.text = _tr(t, "ui.qq_login.loading_qr", "正在获取二维码...")
             status.classes(replace="cb-chip cb-chip-warn w-fit")
             detail.text = _tr(t, "ui.qq_login.scan_hint", "请使用手机 QQ 扫码并确认登录。")
             placeholder.visible = True
 
             def worker() -> None:
-                result = run_named_action("prepare-qq-login")
-                try:
-                    fetch_napcat_login_qrcode_url(refresh=True, timeout=2.0)
-                except Exception:  # noqa: BLE001
-                    pass
-                event_queue.put(("result", result.message))
+                result = run_named_action("restart-onebot-runtime" if force_restart else "prepare-qq-login")
+                deadline = time.monotonic() + 25.0
+                last_error = ""
+                should_refresh_qr = True
+                while time.monotonic() < deadline:
+                    try:
+                        qr_url = fetch_napcat_login_qrcode_url(refresh=should_refresh_qr, timeout=3.0)
+                        should_refresh_qr = False
+                    except Exception as exc:  # noqa: BLE001
+                        last_error = f"{type(exc).__name__}: {exc}"
+                        time.sleep(1.0)
+                        continue
+                    if qr_url:
+                        event_queue.put(("qr", qr_url))
+                        return
+                    time.sleep(1.0)
+                event_queue.put(("error", last_error or result.message))
 
             threading.Thread(target=worker, daemon=True).start()
 
         def drain_events() -> None:
-            has_qr = update_qr_image()
-            if not has_qr and started_at["value"] and time.monotonic() - started_at["value"] > 12 and restart_count["value"] < 1:
-                restart_count["value"] += 1
-                start_worker()
-                return
             while True:
                 try:
                     event_type, message = event_queue.get_nowait()
                 except queue.Empty:
-                    return
-                if event_type != "result":
-                    continue
-                if update_qr_image():
+                    break
+                worker_running["value"] = False
+                get_qr_button.set_enabled(True)
+                get_qr_button.text = _tr(t, "ui.web.action.reload_qr", "重新获取二维码")
+                retry_mode["value"] = True
+                if event_type == "qr":
+                    show_qr_url(message)
                     notify(_tr(t, "ui.qq_login.qr_ready", "QQ 登录二维码已生成"))
                     continue
-                snapshot = get_runtime_snapshot(include_agent_processes=False)
-                if not snapshot.onebot_runtime_running:
-                    status.text = _tr(t, "ui.qq_login.loading_qr", "正在获取二维码...")
-                    status.classes(replace="cb-chip cb-chip-warn w-fit")
-                    detail.text = _tr(
-                        t,
-                        "ui.qq_login.retrying_hint",
-                        "QQ 登录组件正在自动重试，稍等片刻即可。",
-                        message=message,
-                    )
+                if event_type == "error":
+                    status.text = _tr(t, "ui.qq_login.qr_failed", "二维码获取失败")
+                    status.classes(replace="cb-chip cb-chip-danger w-fit")
+                    detail.text = message
                     continue
                 status.text = _tr(t, "ui.qq_login.loading_qr", "正在获取二维码...")
                 status.classes(replace="cb-chip cb-chip-warn w-fit")
-                detail.text = _tr(
-                    t,
-                    "ui.qq_login.waiting_runtime_qr",
-                    "QQ 登录组件已启动，正在等待二维码生成。",
-                    message=message,
-                )
+                detail.text = _tr(t, "ui.qq_login.waiting_runtime_qr", "QQ 登录组件已启动，正在等待二维码生成。", message=message)
+                if show_login_success(get_runtime_snapshot(include_agent_processes=False)):
+                    finish_login_success(current_login_snapshot())
+                    return
 
-        retry_button.on_click(start_worker)
+            if not auto_close_enabled["value"] or not qr_visible["value"] or time.monotonic() - last_login_poll["value"] < 2.0:
+                return
+            last_login_poll["value"] = time.monotonic()
+            finish_login_success(current_login_snapshot())
+
+        get_qr_button.on_click(lambda: start_worker(force_restart=retry_mode["value"]))
         close_button.on_click(close_dialog)
         poll_timer = ui.timer(0.5, drain_events)
-        notify(_tr(t, "ui.qq_login.opened", "正在准备 QQ 登录"))
         dialog.open()
-        start_worker()
+        if show_login_success(current_login_snapshot()):
+            get_qr_button.text = _tr(t, "ui.web.action.reload_qr", "重新获取二维码")
+            retry_mode["value"] = True
 
     return open_qq_login_dialog

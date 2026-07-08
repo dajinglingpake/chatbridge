@@ -149,6 +149,59 @@ class OneBotRuntimeInstallerTests(unittest.TestCase):
 
         self.assertEqual(["/api/auth/login", "/api/QQLogin/RefreshQRcode", "/api/QQLogin/GetQQLoginQrcode"], calls)
 
+    def test_fetch_napcat_login_status_uses_check_login_status_endpoint(self) -> None:
+        calls: list[str] = []
+
+        def fake_post(path: str, *, body=None, headers=None, timeout=0):
+            del body, headers, timeout
+            calls.append(path)
+            if path == "/api/auth/login":
+                return {"data": {"Credential": "cred-1"}}
+            if path == "/api/QQLogin/CheckLoginStatus":
+                return {"data": {"isLogin": True, "isOffline": False}}
+            return {"data": None}
+
+        with patch("core.onebot_runtime_installer._napcat_post", side_effect=fake_post):
+            self.assertEqual({"isLogin": True, "isOffline": False}, installer.fetch_napcat_login_status(timeout=1.0))
+
+        self.assertEqual(["/api/auth/login", "/api/QQLogin/CheckLoginStatus"], calls)
+
+    def test_fetch_napcat_login_info_uses_get_login_info_endpoint(self) -> None:
+        calls: list[str] = []
+
+        def fake_post(path: str, *, body=None, headers=None, timeout=0):
+            del body, headers, timeout
+            calls.append(path)
+            if path == "/api/auth/login":
+                return {"data": {"Credential": "cred-1"}}
+            if path == "/api/QQLogin/GetQQLoginInfo":
+                return {"data": {"uin": "2493227263", "nick": "test"}}
+            return {"data": None}
+
+        with patch("core.onebot_runtime_installer._napcat_post", side_effect=fake_post):
+            self.assertEqual({"uin": "2493227263", "nick": "test"}, installer.fetch_napcat_login_info(timeout=1.0))
+
+        self.assertEqual(["/api/auth/login", "/api/QQLogin/GetQQLoginInfo"], calls)
+
+    def test_napcat_webui_base_urls_prefer_latest_logged_port(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "qq_onebot_runtime.out.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "WebUi User Panel Url: http://127.0.0.1:6099/webui?token=x",
+                        "WebUi User Panel Url: http://127.0.0.1:6100/webui?token=x",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("core.onebot_runtime_installer.ONEBOT_RUNTIME_OUT_LOG", log_path):
+                urls = installer._napcat_webui_base_urls()
+
+        self.assertEqual("http://127.0.0.1:6100", urls[0])
+        self.assertIn("http://127.0.0.1:6099", urls)
+
     def test_safe_extract_zip_rejects_path_traversal(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

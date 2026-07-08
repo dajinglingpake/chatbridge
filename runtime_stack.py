@@ -19,7 +19,7 @@ except ImportError:  # pragma: no cover - optional dependency
     psutil = None
 
 from core.json_store import load_json, save_json
-from core.onebot_runtime_installer import NAPCAT_QUICK_LOGIN_ENV, NAPCAT_RUNTIME_NAME, NAPCAT_WEBUI_TOKEN, ensure_default_onebot_runtime, find_installed_napcat_launcher
+from core.onebot_runtime_installer import NAPCAT_QUICK_LOGIN_ENV, NAPCAT_RUNTIME_NAME, NAPCAT_WEBUI_TOKEN, ensure_default_onebot_runtime, fetch_napcat_login_info, fetch_napcat_login_status, find_installed_napcat_launcher
 from core.platform_compat import IS_WINDOWS, creationflags
 from core.runtime_paths import (
     APP_DIR,
@@ -53,6 +53,7 @@ QQ_BRIDGE_SCRIPT = APP_DIR / "qq_onebot_bridge.py"
 ONEBOT_RUNTIME_COMMAND_ENV = "CHATBRIDGE_ONEBOT_RUNTIME_COMMAND"
 ONEBOT_API_BASE = "http://127.0.0.1:3000"
 ONEBOT_RUNTIME_PROCESS_MARKERS = ("llonebot", "lagrange.onebot", "lagrange-onebot", "chatbridge-start-lagrange", "chatbridge-start-napcat", "napcat", "napcatqq", "go-cqhttp")
+ONEBOT_RUNTIME_PORTS = {3000, 6099, 6100, 6101, 6102}
 PROXY_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy")
 AGENT_PROCESS_KEYWORDS = ("codex", "claude", "opencode")
 AGENT_PROCESS_HOST_NAMES = {
@@ -234,6 +235,31 @@ def _find_processes_by_markers(markers: tuple[str, ...]) -> list[object]:
         if any(marker in lowered_name for marker in lowered_markers) or any(marker in lowered_cmdline for marker in launcher_markers):
             matches.append(proc)
     return sorted(matches, key=lambda item: getattr(item, "pid", 0))
+
+def _find_onebot_runtime_port_processes() -> list[object]:
+    if psutil is None:
+        return []
+    pids: set[int] = set()
+    for conn in psutil.net_connections(kind="tcp"):
+        try:
+            if conn.status == psutil.CONN_LISTEN and conn.laddr.port in ONEBOT_RUNTIME_PORTS and conn.pid:
+                pids.add(int(conn.pid))
+        except (AttributeError, TypeError):
+            continue
+    processes: dict[int, object] = {}
+    for pid in pids:
+        proc = _get_process(pid)
+        if proc is None:
+            continue
+        processes[pid] = proc
+        cmdline = _cmdline_text(proc).lower()
+        try:
+            parent = proc.parent()
+        except (psutil.Error, OSError):
+            parent = None
+        if parent is not None and "node.mojom.nodeservice" in cmdline and "--enable-logging" in _cmdline_text(parent).lower():
+            processes[parent.pid] = parent
+    return sorted(processes.values(), key=lambda item: getattr(item, "pid", 0))
 
 
 def _managed_root_pids() -> set[int]:
@@ -476,6 +502,21 @@ def _query_onebot_api(action: str, *, timeout: float = 0.8) -> dict:
 
 
 def get_qq_login_status() -> tuple[bool, str, str]:
+    try:
+        napcat_status = fetch_napcat_login_status(timeout=0.8)
+    except (OSError, RuntimeError, json.JSONDecodeError, urllib.error.URLError):
+        napcat_status = {}
+    if napcat_status.get("isLogin") is True:
+        try:
+            napcat_info = fetch_napcat_login_info(timeout=0.8)
+        except (OSError, RuntimeError, json.JSONDecodeError, urllib.error.URLError):
+            napcat_info = {}
+        user_id = str(napcat_info.get("uin") or napcat_info.get("user_id") or "").strip()
+        nickname = str(napcat_info.get("nick") or napcat_info.get("nickname") or "").strip()
+        return True, user_id, nickname
+    if napcat_status.get("isOffline") is True:
+        return False, "", ""
+
     try:
         status_payload = _query_onebot_api("get_status")
         login_payload = _query_onebot_api("get_login_info")
@@ -781,7 +822,12 @@ def stop_qq_bridge() -> str:
 
 
 def stop_onebot_runtime() -> str:
-    running_processes = _find_processes_by_markers(ONEBOT_RUNTIME_PROCESS_MARKERS)
+    running_processes = list(
+        {
+            getattr(proc, "pid", 0): proc
+            for proc in [*_find_processes_by_markers(ONEBOT_RUNTIME_PROCESS_MARKERS), *_find_onebot_runtime_port_processes()]
+        }.values()
+    )
     if not running_processes:
         _clear_pid_file(ONEBOT_RUNTIME_PID_FILE)
         return "QQ OneBot Runtime is not running"

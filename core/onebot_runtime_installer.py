@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import stat
 import tarfile
 import time
@@ -15,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from core.platform_compat import IS_WINDOWS
-from core.runtime_paths import APP_DIR, DOWNLOAD_DIR, ONEBOT_RUNTIME_DIR
+from core.runtime_paths import APP_DIR, DOWNLOAD_DIR, ONEBOT_RUNTIME_DIR, ONEBOT_RUNTIME_OUT_LOG
 
 
 LAGRANGE_RELEASE_API = "https://api.github.com/repos/LagrangeDev/Lagrange.Core/releases/tags/nightly"
@@ -121,6 +122,22 @@ def fetch_napcat_login_qrcode_url(*, refresh: bool = False, timeout: float = 3.0
     return str(data.get("qrcode") or "").strip()
 
 
+def fetch_napcat_login_status(*, timeout: float = 3.0) -> dict[str, object]:
+    credential = _napcat_webui_credential(timeout=timeout)
+    headers = {"Authorization": f"Bearer {credential}", "Content-Type": "application/json"}
+    payload = _napcat_post("/api/QQLogin/CheckLoginStatus", headers=headers, timeout=timeout)
+    data = payload.get("data") if isinstance(payload, dict) else None
+    return data if isinstance(data, dict) else {}
+
+
+def fetch_napcat_login_info(*, timeout: float = 3.0) -> dict[str, object]:
+    credential = _napcat_webui_credential(timeout=timeout)
+    headers = {"Authorization": f"Bearer {credential}", "Content-Type": "application/json"}
+    payload = _napcat_post("/api/QQLogin/GetQQLoginInfo", headers=headers, timeout=timeout)
+    data = payload.get("data") if isinstance(payload, dict) else None
+    return data if isinstance(data, dict) else {}
+
+
 def _qr_search_roots() -> list[Path]:
     roots = [ONEBOT_RUNTIME_DIR / NAPCAT_RUNTIME_NAME, ONEBOT_RUNTIME_DIR / LAGRANGE_RUNTIME_NAME, APP_DIR / "vendor" / "napcat"]
     for env_key in ("APPDATA", "LOCALAPPDATA", "USERPROFILE"):
@@ -143,15 +160,39 @@ def _napcat_webui_credential(*, timeout: float) -> str:
 
 def _napcat_post(path: str, *, body: dict[str, object] | None = None, headers: dict[str, str] | None = None, timeout: float) -> dict[str, object]:
     request_headers = {"Content-Type": "application/json", **(headers or {})}
-    request = urllib.request.Request(
-        NAPCAT_WEBUI_BASE_URL + path,
-        data=json.dumps(body or {}, ensure_ascii=False).encode("utf-8"),
-        headers=request_headers,
-        method="POST",
-    )
-    with _open_local_url(request, timeout=timeout) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-    return payload if isinstance(payload, dict) else {}
+    last_error: Exception | None = None
+    for base_url in _napcat_webui_base_urls():
+        request = urllib.request.Request(
+            base_url + path,
+            data=json.dumps(body or {}, ensure_ascii=False).encode("utf-8"),
+            headers=request_headers,
+            method="POST",
+        )
+        try:
+            with _open_local_url(request, timeout=timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            return payload if isinstance(payload, dict) else {}
+        except (OSError, RuntimeError, json.JSONDecodeError, urllib.error.URLError) as exc:
+            last_error = exc
+            continue
+    if last_error is not None:
+        raise last_error
+    return {}
+
+def _napcat_webui_base_urls() -> list[str]:
+    urls: list[str] = []
+    if port := _latest_napcat_webui_port():
+        urls.append(f"http://127.0.0.1:{port}")
+    urls.extend([NAPCAT_WEBUI_BASE_URL, "http://127.0.0.1:6100", "http://127.0.0.1:6101", "http://127.0.0.1:6102"])
+    return list(dict.fromkeys(urls))
+
+def _latest_napcat_webui_port() -> str:
+    try:
+        raw = ONEBOT_RUNTIME_OUT_LOG.read_bytes()[-65536:].decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    matches = re.findall(r"WebUi User Panel Url:\s*http://127\.0\.0\.1:(\d+)/webui", raw)
+    return matches[-1] if matches else ""
 
 
 def _open_local_url(request: urllib.request.Request, *, timeout: float):

@@ -2226,7 +2226,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         on_open=mark_qr_login_open,
         on_close=mark_qr_login_closed,
     )
-    open_qq_login = install_qq_login_dialog(ui, notify_only, translate)
+    open_qq_login = install_qq_login_dialog(ui, notify_only, translate, on_success=lambda: content_view.refresh())
 
     def _stream_session_task_limit(session_name: str) -> int:
         cleaned_session_name = str(session_name or "").strip() or "default"
