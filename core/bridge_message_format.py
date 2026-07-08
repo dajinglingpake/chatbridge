@@ -9,7 +9,10 @@ def now_iso() -> str:
 
 def parse_iso_datetime(value: str) -> datetime | None:
     try:
-        return datetime.fromisoformat(str(value or "").strip())
+        text = str(value or "").strip()
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        return datetime.fromisoformat(text)
     except ValueError:
         return None
 
@@ -18,7 +21,11 @@ def format_duration_since(started_at: str, *, ended_at: str | None = None) -> st
     start = parse_iso_datetime(started_at)
     if start is None:
         return "-"
-    end = parse_iso_datetime(ended_at or "") or datetime.now()
+    end = parse_iso_datetime(ended_at or "") or (datetime.now(start.tzinfo) if start.tzinfo else datetime.now())
+    if start.tzinfo is None and end.tzinfo is not None:
+        start = start.replace(tzinfo=end.tzinfo)
+    elif start.tzinfo is not None and end.tzinfo is None:
+        end = end.replace(tzinfo=start.tzinfo)
     seconds = max(0, int((end - start).total_seconds()))
     minutes, remainder = divmod(seconds, 60)
     if minutes:

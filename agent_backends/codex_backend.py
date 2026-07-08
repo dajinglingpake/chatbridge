@@ -1086,21 +1086,21 @@ class CodexBackend(AgentBackend):
         chunk = normalized.strip()
         return chunk, ""
 
-    def _extract_text_delta(self, value: object) -> str:
+    def _extract_text_delta(self, value: object, event_type: str = "") -> str:
         if isinstance(value, dict):
+            current_event_type = str(value.get("type") or value.get("event") or value.get("method") or event_type).lower()
             for key in ("delta", "text_delta", "output_text", "text"):
                 raw = value.get(key)
                 if isinstance(raw, str) and raw.strip():
-                    event_type = str(value.get("type") or value.get("event") or "").lower()
-                    if "delta" in event_type or "message" in event_type or "response" in event_type:
+                    if "delta" in current_event_type or "message" in current_event_type or "response" in current_event_type:
                         return raw
             for item in value.values():
-                nested = self._extract_text_delta(item)
+                nested = self._extract_text_delta(item, current_event_type)
                 if nested:
                     return nested
         if isinstance(value, list):
             for item in value:
-                nested = self._extract_text_delta(item)
+                nested = self._extract_text_delta(item, event_type)
                 if nested:
                     return nested
         return ""

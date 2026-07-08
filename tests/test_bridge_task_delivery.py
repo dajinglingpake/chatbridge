@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
-from core.bridge_task_delivery import build_terminal_task_delivery_plan
+from core.bridge_task_delivery import TaskUpdateDeliveryController, build_terminal_task_delivery_plan
 from core.state_models import HubTask
 
 
@@ -75,6 +76,24 @@ class BridgeTaskDeliveryTests(unittest.TestCase):
         self.assertIn("请重新发送你的问题", plan.reply)
         self.assertNotIn("codex 任务失败", plan.reply)
         self.assertEqual("lost after restart", plan.error_preview)
+
+    def test_terminal_update_forgets_pending_even_when_delivery_fails(self) -> None:
+        forgotten: list[str] = []
+        controller = TaskUpdateDeliveryController(
+            send_progress=lambda *_args: None,
+            send_terminal=lambda *_args: (_ for _ in ()).throw(RuntimeError("delivery failed")),
+            save_pending_task=lambda _task_id: None,
+            forget_pending_task=forgotten.append,
+        )
+
+        with self.assertRaises(RuntimeError):
+            controller.handle_task_update(
+                reply_target={"message_type": "private", "user_id": 10001},
+                task=_task(id="task-terminal", status="unknown_after_restart"),
+                pending_task=SimpleNamespace(last_status="running", last_progress_seq=0, last_progress_text=""),
+            )
+
+        self.assertEqual(["task-terminal"], forgotten)
 
 
 if __name__ == "__main__":

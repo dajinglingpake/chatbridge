@@ -1499,5 +1499,13 @@ class McpServerCodexBackendTests(unittest.TestCase):
         self.assertEqual("thread-active", result["session_id"])
         terminate.assert_not_called()
 
+    def test_codex_backend_extracts_json_rpc_delta_progress(self) -> None:
+        backend = CodexBackend()
+
+        self.assertEqual(
+            "streaming",
+            backend._extract_text_delta({"method": "item/agentMessage/delta", "params": {"delta": "streaming"}}),
+        )
+
 if __name__ == "__main__":
     unittest.main()

@@ -286,7 +286,9 @@ class TaskUpdateDeliveryController:
             self.save_pending_task(task.id)
             state_updated = True
         if task.status in TERMINAL_TASK_STATUSES:
-            self.send_terminal(reply_target, pending_task, task)
-            self.forget_pending_task(task.id)
+            try:
+                self.send_terminal(reply_target, pending_task, task)
+            finally:
+                self.forget_pending_task(task.id)
             state_updated = True
         return next_typing_sent_at, state_updated

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from core.bridge_message_format import format_bridge_reply, prefix_bridge_output
+from core.bridge_message_format import format_bridge_reply, format_duration_since, prefix_bridge_output
 from core.bridge_message_filters import BridgeDuplicateMessageFilter, has_ignored_prefix
 from core.bridge_notifier import NoticeResult, broadcast_bridge_notice_by_kind
 from core.bridge_typing_runtime import should_refresh_typing_ticket, should_send_typing_keepalive
@@ -14,6 +14,10 @@ class BridgeCommonRuntimeTests(unittest.TestCase):
 
         self.assertEqual("running · 3s · ctx 20% · 18:09:46\n\nhello", output)
         self.assertEqual(output, format_bridge_reply(output))
+
+    def test_duration_accepts_utc_z_timestamps(self) -> None:
+        self.assertEqual("5s", format_duration_since("2026-07-09T01:36:21Z", ended_at="2026-07-09T01:36:26Z"))
+        self.assertEqual("5s", format_duration_since("2026-07-09T01:36:21Z", ended_at="2026-07-09T01:36:26"))
 
     def test_typing_keepalive_policy(self) -> None:
         self.assertTrue(should_send_typing_keepalive(0, now_seconds=100, keepalive_seconds=5))
