@@ -2738,6 +2738,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             state["stream_session_task_limits"] = limits
         state["stream_force_bottom_session"] = ""
         state["stream_preserve_top_session"] = cleaned_session_name
+        state["selected_session_name"] = cleaned_session_name
         ui.run_javascript(
             f"""
             (() => {{
@@ -2754,7 +2755,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             """
         )
         limits[cleaned_session_name] = _stream_session_task_limit(cleaned_session_name) + STREAM_HISTORY_PAGE_SIZE
-        stream_messages_view.refresh()
+        _refresh_stream_parts(refresh_composer=False, refresh_messages=True)
         scroll_stream_to_bottom(cleaned_session_name, preserve_top=True)
 
     def _submit_stream_message(prompt: str, session_name: str, agent_id: str, backend: str) -> bool:
@@ -3496,6 +3497,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                         }, Math.max(100, nextAllowedAt - now + 20));
                         return;
                     }
+                    if (scroller.scrollHeight <= scroller.clientHeight + 2 || scroller.scrollTop > 80) return;
                     const key = window.__cbStreamActiveKey || window.__cbStreamDesiredActiveKey || activeKey || readRenderedActiveKey();
                     window.__cbStreamAutoLoadOlderUntil = now + 1500;
                     window.__cbStreamLoadOlderAnchor = {

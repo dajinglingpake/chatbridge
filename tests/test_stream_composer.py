@@ -3,9 +3,11 @@ from __future__ import annotations
 import re
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from ui.app import group_codex_threads_by_workspace
-from ui.sections import _stream_client_time, _stream_display_time, _stream_task_sort_key, _stream_task_uses_utc_naive_time, _stream_text, render_mobile_stream_section
+from ui.sections import _stream_client_time, _stream_display_time, _stream_markdown, _stream_task_sort_key, _stream_task_uses_utc_naive_time, _stream_text, render_mobile_stream_section
 
 
 class FakeElement:
@@ -261,6 +263,68 @@ class StreamComposerTests(unittest.TestCase):
         self.assertEqual(["old prompt", "old answer", "new prompt", "new answer"], body_texts)
         self.assertEqual(1, len(send_buttons))
         self.assertEqual("arrow_upward", send_buttons[0].attrs["icon"])
+
+    def test_stream_does_not_render_prompt_as_assistant_output(self) -> None:
+        ui = FakeUI()
+        mobile_state = {
+            "counts": {"running": 0, "queued": 0},
+            "updated_at": "2026-07-04T05:20:00",
+            "agents": [{"id": "qq", "name": "QQ", "backend": "codex"}],
+            "tasks": [
+                {
+                    "id": "task-prompt-only",
+                    "agent_id": "qq",
+                    "agent_name": "QQ",
+                    "backend": "codex",
+                    "session_name": "focus",
+                    "status": "succeeded",
+                    "created_at": "2026-07-04T05:20:00",
+                    "prompt": "only prompt",
+                    "summary": "only prompt",
+                },
+            ],
+            "session_task_counts": {"focus": 1},
+        }
+
+        render_mobile_stream_section(ui, _translator, mobile_state, "focus", [], _noop, _noop, _noop, _noop, _noop, _noop, _noop)
+
+        body_texts = [item.text for item in ui.elements if "cb-stream-body" in item.class_text.split()]
+        assistant_blocks = [item for item in ui.elements if "cb-stream-assistant" in item.class_text.split()]
+
+        self.assertEqual(["only prompt"], body_texts)
+        self.assertEqual([], assistant_blocks)
+
+    def test_stream_shows_manual_load_older_when_auto_load_is_available(self) -> None:
+        ui = FakeUI()
+        tasks = [
+            {
+                "id": f"task-{index}",
+                "agent_id": "qq",
+                "agent_name": "QQ",
+                "backend": "codex",
+                "session_name": "focus",
+                "status": "succeeded",
+                "created_at": f"2026-07-04T05:{index:02d}:00",
+                "prompt": f"prompt {index}",
+                "output": f"answer {index}",
+            }
+            for index in range(20)
+        ]
+        mobile_state = {
+            "counts": {"running": 0, "queued": 0},
+            "updated_at": "2026-07-04T05:20:00",
+            "agents": [{"id": "qq", "name": "QQ", "backend": "codex"}],
+            "tasks": tasks,
+            "session_task_counts": {"focus": 40},
+        }
+
+        render_mobile_stream_section(ui, _translator, mobile_state, "focus", [], _noop, _noop, _noop, _noop, _noop, _noop, _noop)
+
+        auto_buttons = [item for item in ui.elements if "cb-stream-auto-load-older-trigger" in item.class_text]
+        manual_buttons = [item for item in ui.elements if "cb-stream-load-older-button" in item.class_text]
+
+        self.assertEqual(1, len(auto_buttons))
+        self.assertEqual(1, len(manual_buttons))
 
     def test_stream_uses_explicit_order_when_timestamps_match(self) -> None:
         ui = FakeUI()
@@ -814,7 +878,7 @@ class StreamComposerTests(unittest.TestCase):
         self.assertEqual(0, len(buttons))
         self.assertEqual([], new_session_calls)
 
-    def test_older_history_uses_hidden_auto_loader_not_visible_button(self) -> None:
+    def test_older_history_keeps_manual_button_with_hidden_auto_loader(self) -> None:
         ui = FakeUI()
         mobile_state = {
             "counts": {"running": 0, "queued": 0},
@@ -858,8 +922,8 @@ class StreamComposerTests(unittest.TestCase):
             item for item in ui.elements if "cb-stream-auto-load-older-trigger" in item.class_text
         ]
 
-        self.assertEqual([], load_older_buttons)
-        self.assertEqual([], load_older_wrappers)
+        self.assertEqual(1, len(load_older_buttons))
+        self.assertEqual(1, len(load_older_wrappers))
         self.assertEqual(1, len(auto_load_triggers))
         self.assertIn("data-load-older-ready=1", auto_load_triggers[0].props_text)
         self.assertIn("data-stream-auto-load-older=1", auto_load_triggers[0].props_text)
@@ -1796,9 +1860,10 @@ class StreamComposerTests(unittest.TestCase):
         older_body = source[older_start:older_end]
         self.assertIn('state["stream_force_bottom_session"] = ""', older_body)
         self.assertIn('state["stream_preserve_top_session"] = cleaned_session_name', older_body)
+        self.assertIn('state["selected_session_name"] = cleaned_session_name', older_body)
         self.assertIn("window.__cbStreamLoadOlderAnchor = {", older_body)
         self.assertIn("stickToBottom: Math.max(0, scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight) <= 120", older_body)
-        self.assertIn("stream_messages_view.refresh()", older_body)
+        self.assertIn("_refresh_stream_parts(refresh_composer=False, refresh_messages=True)", older_body)
         self.assertIn("scroll_stream_to_bottom(cleaned_session_name, preserve_top=True)", older_body)
         self.assertNotIn("stream_panel_view.refresh()", older_body)
 
@@ -1887,6 +1952,38 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("max-width: 100%;", source)
         self.assertIn("height: auto;", source)
         self.assertIn("max-height: min(60vh, 28rem);", source)
+
+    def test_stream_markdown_rewrites_local_mobile_upload_images(self) -> None:
+        markdown = _stream_markdown(
+            "![图](http://127.0.0.1:8765/mobile-upload/qq/a.png)\n"
+            "`http://127.0.0.1:8765/mobile-upload/qq/code.png`",
+            _translator,
+        )
+
+        self.assertIn("![图](/mobile-upload/qq/a.png)", markdown)
+        self.assertIn("`http://127.0.0.1:8765/mobile-upload/qq/code.png`", markdown)
+
+    def test_stream_markdown_code_block_images_get_preview(self) -> None:
+        markdown = _stream_markdown(
+            "```markdown\n![图](http://127.0.0.1:8765/mobile-upload/qq/a.png)\n```",
+            _translator,
+        )
+
+        self.assertIn("```markdown", markdown)
+        self.assertIn("![图](http://127.0.0.1:8765/mobile-upload/qq/a.png)", markdown)
+        self.assertIn("![图](/mobile-upload/qq/a.png)", markdown)
+
+    def test_stream_markdown_rewrites_local_image_files_for_mobile(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            image_path = temp_path / "shot.png"
+            upload_root = temp_path / "uploads"
+            image_path.write_bytes(b"png-data")
+
+            with patch("ui.mobile.MOBILE_UPLOAD_ROOT", upload_root):
+                markdown = _stream_markdown(f"![图]({image_path.as_posix()})", _translator)
+
+        self.assertIn("![图](/mobile-local-image/", markdown)
 
     def test_confirmation_dialogs_use_dark_responsive_cards(self) -> None:
         sections_source = Path("ui/sections.py").read_text(encoding="utf-8")
@@ -2000,6 +2097,7 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("window.__cbStreamAutoLoadOlderUntil = now + 1500;", source)
         self.assertIn("window.__cbStreamAutoLoadOlderTimer", source)
         self.assertIn("Math.max(100, nextAllowedAt - now + 20)", source)
+        self.assertIn("if (scroller.scrollHeight <= scroller.clientHeight + 2 || scroller.scrollTop > 80) return;", source)
         self.assertIn("stickToBottom: readDelta(scroller) <= nearBottomLimit", source)
         self.assertIn("if (loadOlderAnchor.stickToBottom === true)", source)
         self.assertIn("maybeLoadOlder(scroller);\n                        revealPositionedStream();\n                        return;", source)

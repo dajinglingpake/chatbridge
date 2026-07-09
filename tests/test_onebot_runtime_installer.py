@@ -88,6 +88,7 @@ class OneBotRuntimeInstallerTests(unittest.TestCase):
         self.assertIn("NapCatWinBootMain.exe", payload)
         self.assertIn("QQ.exe", payload)
         self.assertIn(installer.NAPCAT_QUICK_LOGIN_ENV, payload)
+        self.assertIn('process.argv.push("-q",q)', payload)
         self.assertIn("-q", payload)
         self.assertIn("onebot11_*.json", payload)
         self.assertNotIn("pause", payload.lower())

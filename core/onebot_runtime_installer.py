@@ -476,7 +476,7 @@ if not exist "%QQPath%" (
 )
 
 set NAPCAT_MAIN_PATH=%NAPCAT_MAIN_PATH:\=/%
-echo (async () =^> {await import("file:///%NAPCAT_MAIN_PATH%")})() > "%NAPCAT_LOAD_PATH%"
+echo (async () =^> {const q=process.env.CHATBRIDGE_NAPCAT_QQ;if(q)process.argv.push("-q",q);await import("file:///%NAPCAT_MAIN_PATH%")})() > "%NAPCAT_LOAD_PATH%"
 set "CHATBRIDGE_NAPCAT_QQ=%CHATBRIDGE_NAPCAT_QQ%"
 if not defined CHATBRIDGE_NAPCAT_QQ (
     for /f "delims=" %%f in ('dir /b /o-d "%cd%\config\onebot11_*.json" 2^>nul') do (

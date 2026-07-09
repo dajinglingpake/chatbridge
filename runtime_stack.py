@@ -458,6 +458,7 @@ def _resolve_onebot_runtime_command() -> list[str]:
             return [executable]
     installed = find_installed_napcat_launcher()
     if installed is not None:
+        ensure_default_onebot_runtime()
         return [str(installed)]
     return []
 

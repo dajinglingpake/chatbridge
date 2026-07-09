@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import base64
 from dataclasses import dataclass
+import hashlib
 import heapq
+import hmac
 import io
 import json
 import mimetypes
@@ -480,6 +482,14 @@ def install_mobile_routes(app: Any, *, host: str, port: int) -> None:
         root = MOBILE_UPLOAD_ROOT.resolve()
         target = (root / path).resolve()
         if not _is_relative_to(target, root) or not target.is_file() or not _is_image_path(target):
+            return PlainTextResponse("not found", status_code=404)
+        media_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+        return FileResponse(target, media_type=media_type)
+
+    @app.get("/mobile-local-image/{signature}/{encoded_path}")
+    async def mobile_local_image(signature: str, encoded_path: str):
+        target = _decode_signed_local_image_path(signature, encoded_path)
+        if target is None or not target.is_file() or not _is_image_path(target):
             return PlainTextResponse("not found", status_code=404)
         media_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
         return FileResponse(target, media_type=media_type)
@@ -1226,6 +1236,27 @@ def _is_relative_to(path: Path, root: Path) -> bool:
 def _is_image_path(path: Path) -> bool:
     return path.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 
+def _signed_local_image_source(path: Path) -> str:
+    text = str(path)
+    encoded = base64.urlsafe_b64encode(text.encode("utf-8")).decode("ascii").rstrip("=")
+    signature = _local_image_signature(text)
+    return f"/mobile-local-image/{signature}/{encoded}"
+
+def _local_image_signature(path_text: str) -> str:
+    token = _load_or_create_access_token()
+    return hmac.new(token.encode("utf-8"), path_text.encode("utf-8", errors="ignore"), hashlib.sha256).hexdigest()[:24]
+
+def _decode_signed_local_image_path(signature: str, encoded_path: str) -> Path | None:
+    try:
+        padding = "=" * (-len(encoded_path) % 4)
+        path_text = base64.urlsafe_b64decode(f"{encoded_path}{padding}".encode("ascii")).decode("utf-8")
+        path = Path(path_text).expanduser().resolve()
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    if not hmac.compare_digest(str(signature or ""), _local_image_signature(str(path))):
+        return None
+    return path
+
 def _image_preview_payload(value: str) -> dict[str, str]:
     cleaned = str(value or "").strip()
     label = cleaned.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] or cleaned
@@ -1240,6 +1271,8 @@ def _image_preview_payload(value: str) -> dict[str, str]:
     if _is_relative_to(path, root) and _is_image_path(path):
         rel = path.relative_to(root).as_posix()
         return {"source": f"/mobile-upload/{quote(rel)}", "label": label}
+    if path.is_file() and _is_image_path(path):
+        return {"source": _signed_local_image_source(path), "label": label}
     return {"source": "", "label": label}
 
 def _session_name_for_task(task: HubTask) -> str:

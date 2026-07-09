@@ -21,8 +21,10 @@ from ui.mobile import (
     _load_all_codex_threads,
     _codex_thread_task_payloads,
     _codex_thread_turn_count,
+    _decode_signed_local_image_path,
     _is_mobile_no_store_path,
     _mobile_codex_thread_payload,
+    _image_preview_payload,
     _select_mobile_tasks,
     _task_activity_items,
     codex_thread_id_from_session_name,
@@ -175,6 +177,24 @@ class MobileStateTests(unittest.TestCase):
         self.assertEqual("2026-07-04T00:45:00", payload["created_at"])
         self.assertEqual("2026-07-04T00:46:00", payload["finished_at"])
         self.assertEqual("2026-07-04T00:45:00", payload["activity_items"][0]["at"])
+
+    def test_local_task_image_gets_mobile_preview_url(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            upload_root = temp_path / "uploads"
+            image_path = temp_path / "outside" / "photo.png"
+            image_path.parent.mkdir(parents=True)
+            image_path.write_bytes(b"png-data")
+
+            with patch("ui.mobile.MOBILE_UPLOAD_ROOT", upload_root):
+                preview = _image_preview_payload(str(image_path))
+
+            self.assertEqual("photo.png", preview["label"])
+            self.assertTrue(str(preview["source"]).startswith("/mobile-local-image/"))
+            self.assertFalse((upload_root / "previews").exists())
+            _empty, route, signature, encoded_path = str(preview["source"]).split("/", 3)
+            self.assertEqual("mobile-local-image", route)
+            self.assertEqual(image_path.resolve(), _decode_signed_local_image_path(signature, encoded_path))
 
     def test_codex_thread_payloads_use_turn_uuid_time_when_messages_have_no_at(self) -> None:
         turn_id = "019f28de-979b-7f91-aa60-f1ad2247bb4c"

@@ -615,6 +615,9 @@ _STREAM_FENCED_CODE_RE = re.compile(
     re.DOTALL | re.MULTILINE,
 )
 _STREAM_INDENTED_CODE_LINE_RE = re.compile(r"^(?: {4}|\t)")
+_STREAM_LOCAL_MOBILE_URL_RE = re.compile(r"https?://(?:localhost|127(?:\.\d{1,3}){3}|\[::1\])(?::\d+)?(?=/mobile-upload/)")
+_STREAM_MARKDOWN_FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})[ \t]*(?:markdown|md)[^\n]*\n(?P<body>.*)\n[ \t]*(?:`{3,}|~{3,})[ \t]*$", re.DOTALL | re.IGNORECASE)
+_STREAM_MARKDOWN_IMAGE_LINE_RE = re.compile(r"^[ \t]*!\[[^\]\n]*\]\([^)]+\)[ \t]*$")
 _STREAM_LINE_SUFFIX_RE = re.compile(r"(#L\d+(?:-L?\d+)?|:\d+(?::\d+)?(?:-\d+(?::\d+)?)?|\(\d+(?:,\d+)?(?:-\d+(?:,\d+)?)?\))$")
 _STREAM_FILE_EXTENSIONS = {
     "astro",
@@ -683,11 +686,24 @@ def _stream_markdown(value: str, t: Translator) -> str:
     for match in _STREAM_FENCED_CODE_RE.finditer(text):
         if match.start() > cursor:
             parts.append(_stream_markdown_text_segment(text[cursor:match.start()], copy_title))
-        parts.append(match.group(0))
+        parts.append(_stream_markdown_fenced_segment(match.group(0), copy_title))
         cursor = match.end()
     if cursor < len(text):
         parts.append(_stream_markdown_text_segment(text[cursor:], copy_title))
     return "".join(parts)
+
+def _stream_markdown_fenced_segment(value: str, copy_title: str) -> str:
+    match = _STREAM_MARKDOWN_FENCE_RE.match(value)
+    if not match:
+        return value
+    image_lines = [
+        line.strip()
+        for line in str(match.group("body") or "").splitlines()
+        if _STREAM_MARKDOWN_IMAGE_LINE_RE.match(line)
+    ]
+    if not image_lines:
+        return value
+    return f"{value}\n\n{_stream_markdown_text_segment(chr(10).join(image_lines), copy_title)}"
 
 def _stream_markdown_text_segment(value: str, copy_title: str) -> str:
     parts: list[str] = []
@@ -714,13 +730,17 @@ def _stream_markdown_inline_segment(value: str, copy_title: str) -> str:
     cursor = 0
     for match in _STREAM_INLINE_CODE_RE.finditer(value):
         if match.start() > cursor:
-            parts.append(_stream_rewrite_markdown_links(value[cursor:match.start()], copy_title))
+            segment = _stream_rewrite_local_mobile_urls(value[cursor:match.start()])
+            parts.append(_stream_rewrite_markdown_links(segment, copy_title))
         parts.append(_stream_file_link_replacement(match, copy_title))
         cursor = match.end()
     if cursor < len(value):
-        parts.append(_stream_rewrite_markdown_links(value[cursor:], copy_title))
+        segment = _stream_rewrite_local_mobile_urls(value[cursor:])
+        parts.append(_stream_rewrite_markdown_links(segment, copy_title))
     return "".join(parts)
 
+def _stream_rewrite_local_mobile_urls(value: str) -> str:
+    return _STREAM_LOCAL_MOBILE_URL_RE.sub("", value)
 
 def _stream_rewrite_markdown_links(value: str, copy_title: str) -> str:
     parts: list[str] = []
@@ -730,10 +750,6 @@ def _stream_rewrite_markdown_links(value: str, copy_title: str) -> str:
         if start < 0:
             parts.append(value[cursor:])
             break
-        if start > 0 and value[start - 1] == "!":
-            parts.append(value[cursor:start + 1])
-            cursor = start + 1
-            continue
         label_end = _stream_find_markdown_label_end(value, start)
         if label_end < 0 or label_end + 1 >= len(value) or value[label_end + 1] != "(":
             parts.append(value[cursor:start + 1])
@@ -745,6 +761,16 @@ def _stream_rewrite_markdown_links(value: str, copy_title: str) -> str:
             cursor = start + 1
             continue
         destination, end = parsed
+        if start > 0 and value[start - 1] == "!":
+            rewritten = _stream_markdown_image_destination(destination)
+            if rewritten != destination:
+                parts.append(value[cursor:label_end + 2])
+                parts.append(rewritten)
+                parts.append(")")
+            else:
+                parts.append(value[cursor:end + 1])
+            cursor = end + 1
+            continue
         href = _stream_markdown_href_candidate(destination)
         if href and _stream_is_file_href_candidate(href, allow_spaces=True):
             parts.append(value[cursor:start])
@@ -754,6 +780,18 @@ def _stream_rewrite_markdown_links(value: str, copy_title: str) -> str:
         parts.append(value[cursor:end + 1])
         cursor = end + 1
     return "".join(parts)
+
+def _stream_markdown_image_destination(destination: str) -> str:
+    href = _stream_markdown_href_candidate(destination)
+    if href.lower().startswith(("data:image/", "http://", "https://", "/mobile-upload/")):
+        return href
+    try:
+        from ui.mobile import _image_preview_payload
+    except ImportError:
+        return destination
+    preview = _image_preview_payload(href)
+    source = str(preview.get("source") or "").strip()
+    return source or destination
 
 
 def _stream_find_markdown_label_end(value: str, start: int) -> int:
@@ -1328,7 +1366,7 @@ def _render_mobile_stream_messages(
                     }}
                     """,
                 )
-            elif has_older_session_tasks:
+            if has_older_session_tasks:
                 load_older_label = _tr(
                     t,
                     "ui.web.mobile.load_older",
@@ -1383,8 +1421,7 @@ def _render_mobile_stream_messages(
                         or task_id == latest_task_id
                         or status in {"running", "queued"}
                     )
-                    summary_text = _stream_text(task.get("summary"), limit=4000)
-                    assistant_text = error_text or output_text or progress_text or ("" if has_codex_activity else summary_text)
+                    assistant_text = error_text or output_text or progress_text
                     is_working_placeholder = False
                     if not assistant_text and status in {"running", "queued"}:
                         assistant_text = _tr(t, "ui.web.mobile.stream_working", "正在处理")
