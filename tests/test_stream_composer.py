@@ -1270,6 +1270,9 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn('data-lightbox-zoom="in"', source)
         self.assertIn('data-lightbox-nav="next"', source)
         self.assertIn("overlay.__cbLightboxMoveBy = moveBy;", source)
+        self.assertIn("overlay.__cbLightboxOpenTrigger = openTrigger;", source)
+        self.assertIn("trigger.setAttribute('data-lightbox-key'", source)
+        self.assertIn("overlay.addEventListener('touchmove', preventBrowserGesture, { passive: false });", source)
         self.assertIn("event.key === 'ArrowRight'", source)
         self.assertIn("state.swipeLast || state.pointers.get(event.pointerId)", source)
         self.assertIn("stage.addEventListener('pointermove'", source)
@@ -2535,6 +2538,7 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("role=button tabindex=0", sections_source)
         self.assertIn("prepareLightboxTriggers", source)
         self.assertIn("data-lightbox-nav=\"prev\"", source)
+        self.assertIn("gesturestart", source)
 
 
     def test_completed_turn_footer_uses_paseo_duration_then_timestamp(self) -> None:

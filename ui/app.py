@@ -1211,6 +1211,9 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             justify-content: center;
             padding: 0;
             background: rgba(0, 0, 0, 0.92);
+            overscroll-behavior: contain;
+            touch-action: none;
+            user-select: none;
         }
         .cb-image-lightbox.cb-image-lightbox-open {
             display: flex;
@@ -1223,6 +1226,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             height: 100vh;
             height: 100dvh;
             overflow: hidden;
+            touch-action: none;
         }
         .cb-image-lightbox-stage {
             position: relative;
@@ -3741,6 +3745,19 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                                 return value || '';
                             }
                         };
+                        const assignLightboxKeys = () => {
+                            const keyBySource = new Map();
+                            let nextKey = 0;
+                            document.querySelectorAll('.cb-stream-image-lightbox-trigger[data-lightbox-src]').forEach((trigger) => {
+                                const source = trigger.getAttribute('data-lightbox-src') || '';
+                                if (!source) return;
+                                if (!keyBySource.has(source)) {
+                                    keyBySource.set(source, `lb-${nextKey}`);
+                                    nextKey += 1;
+                                }
+                                trigger.setAttribute('data-lightbox-key', keyBySource.get(source));
+                            });
+                        };
                         const prepareMarkdownImages = () => {
                             document.querySelectorAll('.cb-stream-markdown img').forEach((image) => {
                                 const source = image.getAttribute('src') || '';
@@ -3770,6 +3787,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                                     image.setAttribute('title', imageLightboxOpenLabel);
                                 });
                             });
+                            assignLightboxKeys();
                         };
                         const ensureLightbox = () => {
                         let overlay = document.querySelector('.cb-image-lightbox');
@@ -3810,14 +3828,18 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                         const image = overlay.querySelector('.cb-image-lightbox-image');
                         const stage = overlay.querySelector('.cb-image-lightbox-stage');
                         const caption = overlay.querySelector('.cb-image-lightbox-caption');
-                        const lightboxItems = () => Array.from(document.querySelectorAll('.cb-stream-image-lightbox-trigger[data-lightbox-src]'))
-                            .map((trigger) => ({
-                                source: decodeAttr(trigger.getAttribute('data-lightbox-src') || ''),
-                                label: decodeAttr(trigger.getAttribute('data-lightbox-label') || ''),
-                                trigger,
-                            }))
-                            .filter((item) => item.source)
-                            .filter((item, index, items) => items.findIndex((candidate) => candidate.source === item.source) === index);
+                        const lightboxItems = () => {
+                            assignLightboxKeys();
+                            return Array.from(document.querySelectorAll('.cb-stream-image-lightbox-trigger[data-lightbox-src]'))
+                                .map((trigger) => ({
+                                    key: trigger.getAttribute('data-lightbox-key') || '',
+                                    source: decodeAttr(trigger.getAttribute('data-lightbox-src') || ''),
+                                    label: decodeAttr(trigger.getAttribute('data-lightbox-label') || ''),
+                                    trigger,
+                                }))
+                                .filter((item) => item.key && item.source)
+                                .filter((item, index, items) => items.findIndex((candidate) => candidate.key === item.key) === index);
+                        };
                         const apply = () => {
                             if (!image) return;
                             image.style.setProperty('--cb-lightbox-scale', String(state.scale));
@@ -3870,13 +3892,15 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                             if (items.length < 2) return;
                             openAt((state.currentIndex < 0 ? 0 : state.currentIndex) + delta);
                         };
-                        const openSource = (source, label = '') => {
+                        const openTrigger = (trigger) => {
+                            assignLightboxKeys();
+                            const key = trigger?.getAttribute?.('data-lightbox-key') || '';
                             const items = lightboxItems();
-                            const index = items.findIndex((item) => item.source === source && (!label || item.label === label));
+                            const index = items.findIndex((item) => item.key === key);
                             openAt(index >= 0 ? index : 0);
                         };
                         overlay.__cbLightboxOpenAt = openAt;
-                        overlay.__cbLightboxOpenSource = openSource;
+                        overlay.__cbLightboxOpenTrigger = openTrigger;
                         overlay.__cbLightboxMoveBy = moveBy;
                         overlay.__cbLightboxReset = reset;
                         if (stage) {
@@ -3979,6 +4003,14 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                                 reset();
                             }
                         });
+                        const preventBrowserGesture = (event) => {
+                            if (overlay.classList.contains('cb-image-lightbox-open')) {
+                                event.preventDefault();
+                            }
+                        };
+                        overlay.addEventListener('touchmove', preventBrowserGesture, { passive: false });
+                        overlay.addEventListener('gesturestart', preventBrowserGesture, { passive: false });
+                        overlay.addEventListener('gesturechange', preventBrowserGesture, { passive: false });
                         document.addEventListener('keydown', (event) => {
                             if (!overlay.classList.contains('cb-image-lightbox-open')) return;
                             if (event.key === 'Escape') {
@@ -4002,9 +4034,8 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                             event.stopPropagation();
                             const source = decodeAttr(trigger.getAttribute('data-lightbox-src') || '');
                             if (!source) return;
-                            const label = decodeAttr(trigger.getAttribute('data-lightbox-label') || '');
                             const overlay = ensureLightbox();
-                            overlay.__cbLightboxOpenSource?.(source, label);
+                            overlay.__cbLightboxOpenTrigger?.(trigger);
                         };
                         document.addEventListener('click', openLightbox, true);
                         document.addEventListener('pointerup', openLightbox, true);
