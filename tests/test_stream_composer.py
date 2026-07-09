@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from ui.app import group_codex_threads_by_workspace
-from ui.sections import _stream_client_time, _stream_display_time, _stream_markdown, _stream_task_sort_key, _stream_task_uses_utc_naive_time, _stream_text, render_mobile_stream_section
+from ui.sections import _stream_client_time, _stream_display_time, _stream_image_is_previewable, _stream_markdown, _stream_task_sort_key, _stream_task_uses_utc_naive_time, _stream_text, render_mobile_stream_section
 
 
 class FakeElement:
@@ -1255,10 +1255,27 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("cb-stream-image-lightbox-trigger", images[0].class_text)
         self.assertIn("data-lightbox-src=%2Fmobile-upload%2Fweb%2Ffocus%2Fimage.png", images[0].props_text)
         self.assertIn("data-lightbox-label=image.png", images[0].props_text)
-        self.assertIn(".cb-stream-image-attachment {\n            width: 3rem;\n            height: 3rem;", source)
+        self.assertIn(".cb-stream-image-attachment {\n            width: min(72vw, 20rem);", source)
+        self.assertIn("min-height: 8rem;", source)
+        self.assertIn("max-height: 20rem;", source)
+        self.assertNotIn(".cb-stream-image-attachment {\n                width: 3rem;", source)
         self.assertIn("border-radius: 6px;", source)
         self.assertIn("border: 1px solid var(--cb-border);", source)
         self.assertIn("background: var(--cb-surface-raised);", source)
+        self.assertIn("cb-image-lightbox-stage", source)
+        self.assertIn("prepareMarkdownImages", source)
+        self.assertIn("prepareLightboxTriggers", source)
+        self.assertIn("document.addEventListener('pointerup', openLightbox, true);", source)
+        self.assertIn(".cb-stream-markdown img", source)
+        self.assertIn('data-lightbox-zoom="in"', source)
+        self.assertIn('data-lightbox-nav="next"', source)
+        self.assertIn("overlay.__cbLightboxMoveBy = moveBy;", source)
+        self.assertIn("event.key === 'ArrowRight'", source)
+        self.assertIn("state.swipeLast || state.pointers.get(event.pointerId)", source)
+        self.assertIn("stage.addEventListener('pointermove'", source)
+        self.assertIn("stage.addEventListener('wheel'", source)
+        self.assertTrue(_stream_image_is_previewable("/mobile-local-image/sig/path"))
+        self.assertTrue(_stream_image_is_previewable("/mobile-upload/web/image.png"))
         self.assertNotIn("width: 6.5rem;", source)
         self.assertNotIn("width: 5.5rem;", source)
 
@@ -1739,7 +1756,7 @@ class StreamComposerTests(unittest.TestCase):
         self.assertNotIn("document.querySelectorAll('.cb-stream-copy-button')", scroll_body)
         self.assertNotIn("document.querySelectorAll('.cb-stream-markdown a[href]')", scroll_body)
         self.assertNotIn("document.querySelectorAll('.cb-stream-footer-label-wrap')", scroll_body)
-        self.assertNotIn("document.querySelectorAll('.cb-stream-image-lightbox-trigger[data-lightbox-src]')", scroll_body)
+        self.assertIn("prepareLightboxTriggers", scroll_body)
         self.assertNotIn("document.querySelectorAll('.cb-stream-markdown pre')", scroll_body)
         self.assertIn("window.__cbStreamCopyFeedbackDelegateReady", scroll_body)
         self.assertIn("window.__cbStreamFooterRevealDelegateReady", scroll_body)
@@ -2008,6 +2025,9 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn(".row {{ display: flex; flex-wrap: wrap;", source)
         self.assertIn(".row > .title {{ min-width: 0; flex: 1 1 auto; }}", source)
         self.assertIn(".badge {{ display: inline-flex; align-items: center; flex: 0 0 auto;", source)
+        sections_source = Path("ui/sections.py").read_text(encoding="utf-8")
+        self.assertIn('task.get("output_image_previews")', sections_source)
+        self.assertIn("cb-stream-image-lightbox-trigger", sections_source)
         self.assertIn("resize: none;", source)
         self.assertIn("background:#111111;color:#f5f5f0", source)
         self.assertIn("--bg: #111111;", source)
@@ -2513,7 +2533,8 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn(".cb-stream-image-lightbox-trigger[data-lightbox-src]", source)
         self.assertIn("cb-image-lightbox-open", source)
         self.assertIn("role=button tabindex=0", sections_source)
-        self.assertNotIn("document.querySelectorAll('.cb-stream-image-lightbox-trigger[data-lightbox-src]')", source)
+        self.assertIn("prepareLightboxTriggers", source)
+        self.assertIn("data-lightbox-nav=\"prev\"", source)
 
 
     def test_completed_turn_footer_uses_paseo_duration_then_timestamp(self) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 import asyncio
+import json
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -195,6 +196,125 @@ class MobileStateTests(unittest.TestCase):
             _empty, route, signature, encoded_path = str(preview["source"]).split("/", 3)
             self.assertEqual("mobile-local-image", route)
             self.assertEqual(image_path.resolve(), _decode_signed_local_image_path(signature, encoded_path))
+
+    def test_output_markdown_images_get_mobile_previews_without_copying(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            upload_root = temp_path / "uploads"
+            image_path = temp_path / "contact.png"
+            image_path.write_bytes(b"png-data")
+            thread = {
+                "id": "thread-image",
+                "messages": [
+                    {"turn_id": "turn-1", "role": "user", "text": "show image"},
+                    {"turn_id": "turn-1", "role": "assistant", "text": f"![contact]({image_path.as_posix()})"},
+                ],
+            }
+
+            with patch("ui.mobile.MOBILE_UPLOAD_ROOT", upload_root):
+                tasks = _codex_thread_task_payloads(thread)
+
+            previews = tasks[0]["image_previews"]
+            self.assertEqual("contact.png", previews[0]["label"])
+            self.assertTrue(str(previews[0]["source"]).startswith("/mobile-local-image/"))
+            self.assertEqual(previews, tasks[0]["output_image_previews"])
+            self.assertFalse(upload_root.exists())
+
+    def test_localhost_mobile_upload_output_preview_uses_relative_url(self) -> None:
+        previews = mobile._output_image_previews("![图](http://127.0.0.1:8765/mobile-upload/qq/a.png)")
+
+        self.assertEqual("/mobile-upload/qq/a.png", previews[0]["source"])
+        self.assertEqual("markdown_image", previews[0]["kind"])
+
+    def test_output_file_image_links_get_mobile_previews(self) -> None:
+        previews = mobile._output_image_previews("[contact](http://127.0.0.1:8765/mobile-upload/qq/a.png)")
+
+        self.assertEqual("/mobile-upload/qq/a.png", previews[0]["source"])
+        self.assertEqual("image_link", previews[0]["kind"])
+
+    def test_codex_user_file_mentions_get_mobile_image_previews(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            upload_root = temp_path / "uploads"
+            image_path = temp_path / "qq-image.png"
+            image_path.write_bytes(b"png-data")
+            thread = {
+                "id": "thread-user-image",
+                "messages": [
+                    {
+                        "turn_id": "turn-1",
+                        "role": "user",
+                        "text": f"# Files mentioned by the user:\n\n## qq-image.png: {image_path.as_posix()}\n\n## My request for Codex:\n看这张图",
+                    },
+                    {"turn_id": "turn-1", "role": "assistant", "text": "看到了"},
+                ],
+            }
+
+            with patch("ui.mobile.MOBILE_UPLOAD_ROOT", upload_root):
+                tasks = _codex_thread_task_payloads(thread)
+
+            self.assertEqual([image_path.as_posix()], tasks[0]["images"])
+            self.assertEqual("qq-image.png", tasks[0]["image_previews"][0]["label"])
+            self.assertTrue(str(tasks[0]["image_previews"][0]["source"]).startswith("/mobile-local-image/"))
+            self.assertFalse(upload_root.exists())
+
+    def test_codex_raw_view_image_calls_get_mobile_output_previews(self) -> None:
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            upload_root = temp_path / "uploads"
+            sessions_root = temp_path / "codex" / "sessions"
+            sessions_root.mkdir(parents=True)
+            image_path = temp_path / "legacy-img2img-optimized-contact-002.png"
+            image_path.write_bytes(b"png-data")
+            jsonl_path = sessions_root / "rollout-2026-07-09T01-43-06-thread-view-image.jsonl"
+            jsonl_path.write_text(
+                json.dumps(
+                    {
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "验图完成"}],
+                            "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
+                        }
+                    }
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "payload": {
+                            "type": "function_call",
+                            "name": "view_image",
+                            "arguments": json.dumps({"path": image_path.as_posix()}),
+                            "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
+                        }
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            thread = {
+                "id": "thread-view-image",
+                "messages": [
+                    {"turn_id": "turn-1", "role": "user", "text": "验图"},
+                    {"turn_id": "turn-1", "role": "assistant", "text": "验图完成"},
+                ],
+            }
+
+            with (
+                patch("ui.mobile.MOBILE_UPLOAD_ROOT", upload_root),
+                patch("ui.mobile._codex_sessions_root", return_value=sessions_root),
+            ):
+                tasks = _codex_thread_task_payloads(thread)
+
+            previews = tasks[0]["output_image_previews"]
+            self.assertEqual("legacy-img2img-optimized-contact-002.png", previews[0]["label"])
+            self.assertEqual("markdown_image", previews[0]["kind"])
+            self.assertTrue(str(previews[0]["source"]).startswith("/mobile-local-image/"))
+            self.assertEqual(previews, tasks[0]["image_previews"])
+            self.assertTrue(str(tasks[0]["output"]).startswith("验图完成\n\n![legacy-img2img-optimized-contact-002.png]("))
+            self.assertFalse(upload_root.exists())
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
 
     def test_codex_thread_payloads_use_turn_uuid_time_when_messages_have_no_at(self) -> None:
         turn_id = "019f28de-979b-7f91-aa60-f1ad2247bb4c"

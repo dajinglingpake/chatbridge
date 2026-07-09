@@ -1001,8 +1001,9 @@ def _stream_image_previews(value: object) -> list[dict[str, str]]:
             continue
         source = str(item.get("source") or "").strip()
         label = str(item.get("label") or "").strip()
+        kind = str(item.get("kind") or "").strip()
         if source or label:
-            previews.append({"source": source, "label": label})
+            previews.append({"source": source, "label": label, "kind": kind})
     return previews
 
 
@@ -1068,7 +1069,7 @@ def _stream_has_codex_activity(items: list[dict[str, object]]) -> bool:
     return any(str(item.get("event") or "").startswith("codex_") for item in items)
 
 def _stream_image_is_previewable(value: str) -> bool:
-    return value.lower().startswith(("data:image/", "http://", "https://"))
+    return value.lower().startswith(("data:image/", "http://", "https://", "/mobile-upload/", "/mobile-local-image/"))
 
 
 def _stream_attachment_label(value: str) -> str:
@@ -1408,6 +1409,7 @@ def _render_mobile_stream_messages(
                     prompt_text = _stream_text(task.get("prompt"), limit=6000)
                     image_items = _stream_image_items(task.get("images"))
                     image_previews = _stream_image_previews(task.get("image_previews"))
+                    output_image_previews = _stream_image_previews(task.get("output_image_previews"))
                     error_text = _stream_text(task.get("error"), limit=8000)
                     progress_text = _stream_text(task.get("progress_text"), limit=4000)
                     output_text = _stream_text(task.get("output"), limit=20000)
@@ -1491,6 +1493,14 @@ def _render_mobile_stream_messages(
                                     elif progress_text and not output_text:
                                         body_classes = f"{body_classes} cb-stream-progress"
                                     if assistant_text:
+                                        output_link_previews = [preview for preview in output_image_previews if preview.get("kind") != "markdown_image"]
+                                        if output_link_previews:
+                                            with ui.element("div").classes("cb-stream-attachments"):
+                                                for preview in output_link_previews:
+                                                    preview_source = preview.get("source") or ""
+                                                    preview_label = preview.get("label") or _stream_attachment_label(preview_source)
+                                                    if _stream_image_is_previewable(preview_source) or preview_source.startswith(("/mobile-upload/", "/mobile-local-image/")):
+                                                        ui.image(preview_source).props(_stream_lightbox_props(preview_source, preview_label, t)).classes("cb-stream-image-attachment cb-stream-image-lightbox-trigger")
                                         markdown = ui.markdown(_stream_markdown(assistant_text, t)).classes(f"{body_classes} cb-stream-markdown")
                                         if status in {"running", "queued"}:
                                             live_props = f"data-stream-live=1 data-stream-text-key={quote(task_id or str(task.get('id') or ''), safe='')}"

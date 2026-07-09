@@ -9,6 +9,8 @@ import hmac
 import io
 import json
 import mimetypes
+import os
+import re
 import secrets
 import socket
 import threading
@@ -16,7 +18,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 import qrcode
 from starlette.requests import Request
@@ -50,6 +52,9 @@ CODEX_THREAD_PAGE_LIMIT = 50
 CODEX_THREAD_MAX_PAGES = 100
 MOBILE_NO_STORE_PATH_PREFIXES = ("/api/mobile/",)
 MOBILE_NO_STORE_PATHS = ("/mobile", "/mobile-link", "/mobile-ui")
+_MARKDOWN_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)\r\n]+)\)")
+_MARKDOWN_IMAGE_LINK_RE = re.compile(r"(?<!!)\[[^\]]+\]\(([^)\r\n]+?\.(?:png|jpe?g|gif|webp|bmp)(?:[?#][^)\r\n]*)?)\)", re.IGNORECASE)
+_LOCAL_IMAGE_PATH_RE = re.compile(r"(?<![\w:/\\])(?:[A-Za-z]:[\\/][^\r\n`*<>|]+?\.(?:png|jpe?g|gif|webp|bmp)|/[^\r\n`*<>|]+?\.(?:png|jpe?g|gif|webp|bmp))", re.IGNORECASE)
 _CODEX_THREADS_CACHE: dict[str, object] = {"loaded_at": 0.0, "payload": {"threads": [], "error": ""}}
 _CODEX_THREAD_DETAIL_CACHE: dict[str, dict[str, object]] = {}
 _CODEX_THREAD_DETAIL_INFLIGHT: set[str] = set()
@@ -59,6 +64,7 @@ _RAW_HUB_STATE_CACHE: dict[str, object] = {"signature": None, "payload": {}}
 _RAW_STREAM_WINDOW_CACHE: dict[str, object] = {"key": None, "window": None}
 _RAW_STREAM_INDEX_CACHE: dict[str, object] = {"key": None, "index": None}
 _RAW_STREAM_SIDEBAR_CACHE: dict[str, object] = {"key": None, "state": None}
+_CODEX_VIEW_IMAGE_PREVIEW_CACHE: dict[str, dict[str, object]] = {}
 MOBILE_ASYNC_ACTIONS = {
     "restart",
     "restart-bridge",
@@ -941,6 +947,10 @@ def _stream_raw_window_from_state(
 
 def _raw_task_payload(raw: dict[str, object], *, stream_order: int = 0) -> dict[str, object]:
     images = _raw_string_list(raw.get("images"))
+    output = _raw_text(raw, "output")
+    output_image_previews = _output_image_previews(output)
+    image_previews = [_image_preview_payload(item) for item in images]
+    image_previews.extend(output_image_previews)
     agent_id = _raw_clean_text(raw, "agent_id") or _raw_clean_text(raw, "agent_name") or "main"
     source = _raw_clean_text(raw, "source", "desktop") or "desktop"
     assume_utc_naive = _source_uses_utc_naive_time(source)
@@ -962,8 +972,9 @@ def _raw_task_payload(raw: dict[str, object], *, stream_order: int = 0) -> dict[
         "finished_at": _mobile_display_time(_raw_clean_text(raw, "finished_at"), assume_utc_naive=assume_utc_naive),
         "prompt": _raw_text(raw, "prompt"),
         "images": images,
-        "image_previews": [_image_preview_payload(item) for item in images],
-        "output": _raw_text(raw, "output"),
+        "image_previews": image_previews,
+        "output_image_previews": output_image_previews,
+        "output": output,
         "error": _raw_text(raw, "error"),
         "progress_text": _raw_text(raw, "progress_text"),
         "progress_at": _mobile_display_time(_raw_clean_text(raw, "progress_at"), assume_utc_naive=assume_utc_naive),
@@ -1157,6 +1168,9 @@ def _build_stream_task_window(
 
 def _task_payload(task: HubTask, *, stream_order: int = 0) -> dict[str, object]:
     assume_utc_naive = _source_uses_utc_naive_time(task.source)
+    output_image_previews = _output_image_previews(task.output)
+    image_previews = [_image_preview_payload(item) for item in task.images]
+    image_previews.extend(output_image_previews)
     return {
         "id": task.id,
         "agent_id": task.agent_id,
@@ -1175,7 +1189,8 @@ def _task_payload(task: HubTask, *, stream_order: int = 0) -> dict[str, object]:
         "finished_at": _mobile_display_time(task.finished_at, assume_utc_naive=assume_utc_naive),
         "prompt": task.prompt,
         "images": list(task.images),
-        "image_previews": [_image_preview_payload(item) for item in task.images],
+        "image_previews": image_previews,
+        "output_image_previews": output_image_previews,
         "output": task.output,
         "error": task.error,
         "progress_text": task.progress_text,
@@ -1212,7 +1227,9 @@ def _payload_activity_signature(value: object) -> tuple[int, str, str, int]:
     )
 
 
-def _payload_task_signature_part(task: dict[str, object]) -> tuple[str, str, str, str, str, int, int, int, str, tuple[int, str, str, int]]:
+def _payload_task_signature_part(task: dict[str, object]) -> tuple[str, str, str, str, str, int, int, int, str, int, str, int, str, tuple[int, str, str, int]]:
+    image_previews = task.get("image_previews") if isinstance(task.get("image_previews"), list) else []
+    output_image_previews = task.get("output_image_previews") if isinstance(task.get("output_image_previews"), list) else []
     return (
         str(task.get("id") or ""),
         str(task.get("status") or ""),
@@ -1223,6 +1240,10 @@ def _payload_task_signature_part(task: dict[str, object]) -> tuple[str, str, str
         len(str(task.get("output") or "")),
         len(str(task.get("error") or "")),
         str(task.get("context_left_percent") or ""),
+        len(image_previews),
+        str(image_previews[-1].get("source") or "") if image_previews and isinstance(image_previews[-1], dict) else "",
+        len(output_image_previews),
+        str(output_image_previews[-1].get("source") or "") if output_image_previews and isinstance(output_image_previews[-1], dict) else "",
         _payload_activity_signature(task.get("activity_items")),
     )
 
@@ -1261,6 +1282,11 @@ def _image_preview_payload(value: str) -> dict[str, str]:
     cleaned = str(value or "").strip()
     label = cleaned.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] or cleaned
     lowered = cleaned.lower()
+    rewritten_upload = _local_mobile_upload_source(cleaned)
+    if rewritten_upload:
+        return {"source": rewritten_upload, "label": label}
+    if lowered.startswith(("/mobile-upload/", "/mobile-local-image/")):
+        return {"source": cleaned, "label": label}
     if lowered.startswith(("data:image/", "http://", "https://")):
         return {"source": cleaned, "label": label}
     try:
@@ -1274,6 +1300,206 @@ def _image_preview_payload(value: str) -> dict[str, str]:
     if path.is_file() and _is_image_path(path):
         return {"source": _signed_local_image_source(path), "label": label}
     return {"source": "", "label": label}
+
+def _local_mobile_upload_source(value: str) -> str:
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return ""
+    if parsed.scheme not in {"http", "https"} or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        return ""
+    if parsed.path == "/mobile-upload" or parsed.path.startswith("/mobile-upload/"):
+        return f"{parsed.path}{('?' + parsed.query) if parsed.query else ''}"
+    return ""
+
+def _markdown_destination_href(value: str) -> str:
+    cleaned = str(value or "").strip()
+    if cleaned.startswith("<"):
+        end = cleaned.find(">")
+        return cleaned[1:end].strip() if end > 0 else ""
+    return cleaned.strip()
+
+def _output_image_previews(value: str) -> list[dict[str, str]]:
+    previews: list[dict[str, str]] = []
+    seen_sources: set[str] = set()
+    for match in _MARKDOWN_IMAGE_RE.finditer(str(value or "")):
+        href = _markdown_destination_href(match.group(2))
+        if not href:
+            continue
+        preview = _image_preview_payload(unquote(href))
+        source = str(preview.get("source") or "").strip()
+        if not source or source in seen_sources:
+            continue
+        seen_sources.add(source)
+        alt = str(match.group(1) or "").strip()
+        if alt and "." not in str(preview.get("label") or "").strip().rsplit("/", 1)[-1]:
+            preview["label"] = alt
+        preview["kind"] = "markdown_image"
+        previews.append(preview)
+    for match in _MARKDOWN_IMAGE_LINK_RE.finditer(str(value or "")):
+        href = _markdown_destination_href(match.group(1))
+        if not href:
+            continue
+        preview = _image_preview_payload(unquote(href))
+        source = str(preview.get("source") or "").strip()
+        if not source or source in seen_sources:
+            continue
+        seen_sources.add(source)
+        preview["kind"] = "image_link"
+        previews.append(preview)
+    return previews
+
+def _codex_sessions_root() -> Path:
+    raw_codex_home = str(os.environ.get("CODEX_HOME") or "").strip()
+    codex_home = Path(raw_codex_home).expanduser() if raw_codex_home else Path.home() / ".codex"
+    return codex_home / "sessions"
+
+def _find_codex_rollout_jsonl(thread_id: str) -> Path | None:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]", "", str(thread_id or "").strip())
+    if not cleaned:
+        return None
+    root = _codex_sessions_root()
+    if not root.is_dir():
+        return None
+    try:
+        matches = [path for path in root.rglob(f"*{cleaned}.jsonl") if path.is_file()]
+    except OSError:
+        return None
+    if not matches:
+        return None
+    return max(matches, key=lambda path: path.stat().st_mtime_ns)
+
+def _codex_raw_view_image_payload(thread_id: str) -> dict[str, dict[str, object]]:
+    cleaned = str(thread_id or "").strip()
+    if not cleaned:
+        return {"previews": {}, "outputs": {}}
+    path = _find_codex_rollout_jsonl(cleaned)
+    try:
+        path_signature = (str(path), path.stat().st_mtime_ns, path.stat().st_size) if path else ("", 0, 0)
+    except OSError:
+        path_signature = ("", 0, 0)
+        path = None
+    cached = _CODEX_VIEW_IMAGE_PREVIEW_CACHE.get(cleaned)
+    if isinstance(cached, dict) and cached.get("signature") == path_signature:
+        return {
+            "previews": _copy_preview_map(cached.get("previews")),
+            "outputs": {
+                str(turn_id): str(output)
+                for turn_id, output in (cached.get("outputs") or {}).items()
+            } if isinstance(cached.get("outputs"), dict) else {},
+        }
+    previews_by_turn: dict[str, list[dict[str, str]]] = {}
+    seen_by_turn: dict[str, set[str]] = {}
+    events_by_turn: dict[str, list[str]] = {}
+    text_seen_by_turn: set[str] = set()
+    if path is not None:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            lines = []
+        for line in lines:
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            payload = item.get("payload") if isinstance(item, dict) and isinstance(item.get("payload"), dict) else {}
+            metadata = payload.get("internal_chat_message_metadata_passthrough")
+            turn_id = str(metadata.get("turn_id") or "").strip() if isinstance(metadata, dict) else ""
+            if not turn_id:
+                continue
+            if payload.get("type") == "message" and payload.get("role") == "assistant":
+                text = _codex_raw_message_text(payload)
+                if text:
+                    events_by_turn.setdefault(turn_id, []).append(text)
+                    text_seen_by_turn.add(turn_id)
+                continue
+            if payload.get("type") != "function_call" or payload.get("name") != "view_image":
+                continue
+            arguments = payload.get("arguments")
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    arguments = {}
+            if not isinstance(arguments, dict):
+                continue
+            image_path = str(arguments.get("path") or "").strip()
+            if not image_path:
+                continue
+            preview = _image_preview_payload(image_path)
+            source = str(preview.get("source") or "").strip()
+            if not source:
+                continue
+            seen = seen_by_turn.setdefault(turn_id, set())
+            if source in seen:
+                continue
+            seen.add(source)
+            preview["kind"] = "view_image"
+            previews_by_turn.setdefault(turn_id, []).append(preview)
+            events_by_turn.setdefault(turn_id, []).append(_markdown_image_for_preview(preview))
+    outputs_by_turn = {
+        turn_id: "\n\n".join(part for part in parts if str(part).strip()).strip()
+        for turn_id, parts in events_by_turn.items()
+        if turn_id in text_seen_by_turn and previews_by_turn.get(turn_id)
+    }
+    _CODEX_VIEW_IMAGE_PREVIEW_CACHE[cleaned] = {
+        "signature": path_signature,
+        "previews": {
+            turn_id: [dict(preview) for preview in previews]
+            for turn_id, previews in previews_by_turn.items()
+        },
+        "outputs": dict(outputs_by_turn),
+    }
+    return {"previews": previews_by_turn, "outputs": outputs_by_turn}
+
+def _copy_preview_map(value: object) -> dict[str, list[dict[str, str]]]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(turn_id): [dict(preview) for preview in items if isinstance(preview, dict)]
+        for turn_id, items in value.items()
+        if isinstance(items, list)
+    }
+
+def _codex_raw_view_image_previews_by_turn(thread_id: str) -> dict[str, list[dict[str, str]]]:
+    return _copy_preview_map(_codex_raw_view_image_payload(thread_id).get("previews"))
+
+def _codex_raw_output_with_view_images_by_turn(thread_id: str) -> dict[str, str]:
+    outputs = _codex_raw_view_image_payload(thread_id).get("outputs")
+    return {
+        str(turn_id): str(output)
+        for turn_id, output in outputs.items()
+    } if isinstance(outputs, dict) else {}
+
+def _codex_raw_message_text(payload: dict[str, object]) -> str:
+    content = payload.get("content")
+    if isinstance(content, list):
+        parts = [
+            str(item.get("text") or "").strip()
+            for item in content
+            if isinstance(item, dict) and str(item.get("text") or "").strip()
+        ]
+        return "\n\n".join(parts).strip()
+    return str(payload.get("text") or "").strip()
+
+def _markdown_image_for_preview(preview: dict[str, str]) -> str:
+    source = str(preview.get("source") or "").strip()
+    label = str(preview.get("label") or "image").replace("[", "\\[").replace("]", "\\]")
+    return f"![{label}]({source})" if source else ""
+
+def _text_local_image_paths(value: str) -> list[str]:
+    paths: list[str] = []
+    seen: set[str] = set()
+    for match in _LOCAL_IMAGE_PATH_RE.finditer(str(value or "")):
+        cleaned = match.group(0).strip().rstrip(".,;:，。；：")
+        if not cleaned or cleaned in seen:
+            continue
+        preview = _image_preview_payload(cleaned)
+        if not str(preview.get("source") or "").strip():
+            continue
+        seen.add(cleaned)
+        paths.append(cleaned)
+    return paths
 
 def _session_name_for_task(task: HubTask) -> str:
     return task.session_name or "default"
@@ -1947,6 +2173,8 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
     messages = thread.get("messages") if isinstance(thread.get("messages"), list) else []
     selected_turns, turn_order_lookup = _codex_thread_selected_turns(thread, limit)
     selected_turn_set = set(selected_turns)
+    view_image_previews_by_turn = _codex_raw_view_image_previews_by_turn(thread_id)
+    raw_output_with_images_by_turn = _codex_raw_output_with_view_images_by_turn(thread_id)
     by_turn: dict[str, dict[str, list[object]]] = {
         turn_id: {"user": [], "assistant": [], "reasoning": [], "activity": []}
         for turn_id in selected_turns
@@ -1993,11 +2221,39 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
         parts = by_turn[turn_id]
         created_at = turn_created_at.get(turn_id, "") or turn_fallback_at.get(turn_id, "") or created_base
         prompt = "\n\n".join(str(part) for part in parts["user"]).strip()
-        output = "\n\n".join(str(part) for part in parts["assistant"]).strip()
+        prompt_images: list[str] = []
+        seen_prompt_images: set[str] = set()
+        for part in parts["user"]:
+            for image_path in _text_local_image_paths(str(part)):
+                if image_path in seen_prompt_images:
+                    continue
+                seen_prompt_images.add(image_path)
+                prompt_images.append(image_path)
+        prompt_image_previews = [_image_preview_payload(item) for item in prompt_images]
+        raw_output_with_images = raw_output_with_images_by_turn.get(turn_id, "")
+        output = raw_output_with_images or "\n\n".join(str(part) for part in parts["assistant"]).strip()
+        output_image_previews = _output_image_previews(output)
+        seen_output_sources = {
+            str(preview.get("source") or "").strip()
+            for preview in output_image_previews
+            if isinstance(preview, dict)
+        }
+        if not raw_output_with_images:
+            for preview in view_image_previews_by_turn.get(turn_id, []):
+                source = str(preview.get("source") or "").strip() if isinstance(preview, dict) else ""
+                if not source or source in seen_output_sources:
+                    continue
+                seen_output_sources.add(source)
+                output_image_previews.append(dict(preview))
         reasoning = "\n\n".join(str(part) for part in parts["reasoning"]).strip()
         activity_items = [item for item in parts["activity"] if isinstance(item, dict)]
-        if not prompt and not output and not reasoning and not activity_items:
+        if not prompt and not output and not reasoning and not activity_items and not output_image_previews:
             continue
+        summary = output or reasoning or prompt
+        if not summary and activity_items:
+            summary = str(activity_items[-1].get("detail") or activity_items[-1].get("event") or "")
+        if not summary and output_image_previews:
+            summary = str(output_image_previews[-1].get("label") or "image")
         tasks.append(
             {
                 "id": f"codex-{thread_id}-{turn_id}",
@@ -2016,8 +2272,9 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
                 "started_at": "",
                 "finished_at": "",
                 "prompt": prompt,
-                "images": [],
-                "image_previews": [],
+                "images": prompt_images,
+                "image_previews": [*prompt_image_previews, *output_image_previews],
+                "output_image_previews": output_image_previews,
                 "output": output,
                 "error": "",
                 "progress_text": reasoning,
@@ -2025,7 +2282,7 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
                 "progress_seq": 1 if reasoning else 0,
                 "context_left_percent": None,
                 "activity_items": activity_items,
-                "summary": output or reasoning or prompt or str(activity_items[-1].get("detail") or activity_items[-1].get("event") or ""),
+                "summary": summary,
             }
         )
     if not tasks and thread_error:

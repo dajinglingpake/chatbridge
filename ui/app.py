@@ -1180,13 +1180,19 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             justify-content: flex-end;
         }
         .cb-stream-image-attachment {
-            width: 3rem;
-            height: 3rem;
+            width: min(72vw, 20rem);
+            max-width: 100%;
+            height: auto;
+            min-height: 8rem;
+            max-height: 20rem;
             border-radius: 6px;
             overflow: hidden;
             border: 1px solid var(--cb-border);
             background: var(--cb-surface-raised);
-            object-fit: cover;
+            object-fit: contain;
+        }
+        .cb-stream-image-attachment .q-img__image {
+            object-fit: contain !important;
         }
         .cb-stream-image-lightbox-trigger {
             cursor: zoom-in;
@@ -1203,8 +1209,8 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             display: none;
             align-items: center;
             justify-content: center;
-            padding: 1rem;
-            background: rgba(15, 23, 42, 0.78);
+            padding: 0;
+            background: rgba(0, 0, 0, 0.92);
         }
         .cb-image-lightbox.cb-image-lightbox-open {
             display: flex;
@@ -1213,33 +1219,97 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             position: relative;
             display: flex;
             flex-direction: column;
-            gap: 0.6rem;
-            width: min(94vw, 68rem);
-            max-height: 92vh;
+            width: 100vw;
+            height: 100vh;
+            height: 100dvh;
+            overflow: hidden;
+        }
+        .cb-image-lightbox-stage {
+            position: relative;
+            flex: 1 1 auto;
+            min-height: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            touch-action: none;
+            cursor: grab;
         }
         .cb-image-lightbox-image {
             max-width: 100%;
-            max-height: calc(92vh - 3.5rem);
+            max-height: 100%;
             object-fit: contain;
-            border-radius: 8px;
+            border-radius: 0;
             background: #0c0d0f;
-            box-shadow: 0 18px 50px rgba(0, 0, 0, 0.32);
+            user-select: none;
+            transform: translate3d(var(--cb-lightbox-x, 0px), var(--cb-lightbox-y, 0px), 0) scale(var(--cb-lightbox-scale, 1));
+            transform-origin: center center;
+            will-change: transform;
         }
         .cb-image-lightbox-caption {
+            position: absolute;
+            left: 0.75rem;
+            right: 8.75rem;
+            bottom: max(0.75rem, env(safe-area-inset-bottom));
             color: #f8fafc;
             font-size: 0.86rem;
             overflow-wrap: anywhere;
+            text-shadow: 0 1px 4px rgba(0, 0, 0, 0.7);
         }
         .cb-image-lightbox-close {
             position: absolute;
-            top: -0.75rem;
-            right: -0.75rem;
-            width: 2rem;
-            height: 2rem;
+            top: max(0.75rem, env(safe-area-inset-top));
+            right: 0.75rem;
+            z-index: 1;
+            width: 2.5rem;
+            height: 2.5rem;
             border: 0;
             border-radius: 999px;
-            background: #f7f7f4;
-            color: #20201d;
+            background: rgba(247, 247, 244, 0.92);
+            color: #111111;
+            font-weight: 800;
+            cursor: pointer;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+        }
+        .cb-image-lightbox-nav {
+            position: absolute;
+            top: 50%;
+            z-index: 1;
+            width: 2.75rem;
+            height: 2.75rem;
+            border: 0;
+            border-radius: 999px;
+            background: rgba(247, 247, 244, 0.76);
+            color: #111111;
+            font-size: 1.8rem;
+            font-weight: 800;
+            line-height: 1;
+            cursor: pointer;
+            transform: translateY(-50%);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+        }
+        .cb-image-lightbox-nav-prev {
+            left: 0.75rem;
+        }
+        .cb-image-lightbox-nav-next {
+            right: 0.75rem;
+        }
+        .cb-image-lightbox-controls {
+            position: absolute;
+            right: 0.75rem;
+            bottom: max(0.75rem, env(safe-area-inset-bottom));
+            z-index: 1;
+            display: flex;
+            gap: 0.4rem;
+        }
+        .cb-image-lightbox-control {
+            width: 2.5rem;
+            height: 2.5rem;
+            border: 0;
+            border-radius: 999px;
+            background: rgba(247, 247, 244, 0.92);
+            color: #111111;
+            font-size: 1rem;
             font-weight: 800;
             cursor: pointer;
             box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
@@ -1961,10 +2031,6 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             }
             .cb-stream-user-content {
                 max-width: 100%;
-            }
-            .cb-stream-image-attachment {
-                width: 3rem;
-                height: 3rem;
             }
             .cb-stream-user-footer,
             .cb-stream-copy-button {
@@ -3347,6 +3413,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             "preserveTop": bool(preserve_top),
             "labels": {
                 "fileLinkTitle": t("ui.web.mobile.copy_file_path", "Copy file path"),
+                "imageLightboxOpenLabel": t("ui.web.mobile.open_image_preview", "Open image preview"),
                 "imageLightboxCloseLabel": t("ui.web.mobile.close_image_preview", "Close image preview"),
                 "copyCodeLabel": t("ui.web.mobile.copy_code", "Copy code"),
                 "copiedLabel": t("ui.web.mobile.copied", "Copied"),
@@ -3420,6 +3487,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                 const nearBottomLimit = 120;
                 const nearHistoryStartLimit = 96;
                 const fileLinkTitle = labels.fileLinkTitle || 'Copy file path';
+                const imageLightboxOpenLabel = labels.imageLightboxOpenLabel || 'Open image preview';
                 const imageLightboxCloseLabel = labels.imageLightboxCloseLabel || 'Close image preview';
                 const copyCodeLabel = labels.copyCodeLabel || 'Copy code';
                 const copiedLabel = labels.copiedLabel || 'Copied';
@@ -3665,15 +3733,45 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                         }, true);
                     }
                 };
-                const setupImageLightbox = () => {
-                    const decodeAttr = (value) => {
-                        try {
-                            return decodeURIComponent(value || '');
-                        } catch {
-                            return value || '';
-                        }
-                    };
-                    const ensureLightbox = () => {
+                    const setupImageLightbox = () => {
+                        const decodeAttr = (value) => {
+                            try {
+                                return decodeURIComponent(value || '');
+                            } catch {
+                                return value || '';
+                            }
+                        };
+                        const prepareMarkdownImages = () => {
+                            document.querySelectorAll('.cb-stream-markdown img').forEach((image) => {
+                                const source = image.getAttribute('src') || '';
+                                if (!source || image.dataset.cbLightboxReady === '1') return;
+                                const label = image.getAttribute('alt') || source.split('/').pop() || '';
+                                image.dataset.cbLightboxReady = '1';
+                                image.classList.add('cb-stream-image-lightbox-trigger');
+                                image.setAttribute('data-lightbox-src', encodeURIComponent(source));
+                                image.setAttribute('data-lightbox-label', encodeURIComponent(label));
+                                image.setAttribute('role', 'button');
+                                image.setAttribute('tabindex', '0');
+                                image.setAttribute('title', imageLightboxOpenLabel);
+                            });
+                        };
+                        const prepareLightboxTriggers = () => {
+                            document.querySelectorAll('.cb-stream-image-lightbox-trigger[data-lightbox-src]').forEach((trigger) => {
+                                const source = trigger.getAttribute('data-lightbox-src') || '';
+                                const label = trigger.getAttribute('data-lightbox-label') || '';
+                                trigger.querySelectorAll?.('img')?.forEach((image) => {
+                                    if (image.dataset.cbLightboxReady === '1') return;
+                                    image.dataset.cbLightboxReady = '1';
+                                    image.classList.add('cb-stream-image-lightbox-trigger');
+                                    image.setAttribute('data-lightbox-src', source);
+                                    image.setAttribute('data-lightbox-label', label);
+                                    image.setAttribute('role', 'button');
+                                    image.setAttribute('tabindex', '0');
+                                    image.setAttribute('title', imageLightboxOpenLabel);
+                                });
+                            });
+                        };
+                        const ensureLightbox = () => {
                         let overlay = document.querySelector('.cb-image-lightbox');
                         if (overlay) return overlay;
                         overlay = document.createElement('div');
@@ -3683,30 +3781,220 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                         overlay.innerHTML = `
                             <div class="cb-image-lightbox-panel">
                                 <button type="button" class="cb-image-lightbox-close" aria-label="${imageLightboxCloseLabel}" title="${imageLightboxCloseLabel}">X</button>
-                                <img class="cb-image-lightbox-image" alt="">
+                                <button type="button" class="cb-image-lightbox-nav cb-image-lightbox-nav-prev" data-lightbox-nav="prev" aria-label="Previous image" title="Previous image">&lsaquo;</button>
+                                <button type="button" class="cb-image-lightbox-nav cb-image-lightbox-nav-next" data-lightbox-nav="next" aria-label="Next image" title="Next image">&rsaquo;</button>
+                                <div class="cb-image-lightbox-stage">
+                                    <img class="cb-image-lightbox-image" alt="">
+                                </div>
                                 <div class="cb-image-lightbox-caption"></div>
+                                <div class="cb-image-lightbox-controls">
+                                    <button type="button" class="cb-image-lightbox-control" data-lightbox-zoom="out" aria-label="Zoom out" title="Zoom out">-</button>
+                                    <button type="button" class="cb-image-lightbox-control" data-lightbox-zoom="reset" aria-label="Reset zoom" title="Reset zoom">1:1</button>
+                                    <button type="button" class="cb-image-lightbox-control" data-lightbox-zoom="in" aria-label="Zoom in" title="Zoom in">+</button>
+                                </div>
                             </div>
                         `;
                         document.body.appendChild(overlay);
+                        const state = {
+                            scale: 1,
+                            x: 0,
+                            y: 0,
+                            pointers: new Map(),
+                            dragStart: null,
+                            pinchStart: null,
+                            swipeStart: null,
+                            swipeLast: null,
+                            currentIndex: -1,
+                        };
+                        overlay.__cbLightboxState = state;
+                        const image = overlay.querySelector('.cb-image-lightbox-image');
+                        const stage = overlay.querySelector('.cb-image-lightbox-stage');
+                        const caption = overlay.querySelector('.cb-image-lightbox-caption');
+                        const lightboxItems = () => Array.from(document.querySelectorAll('.cb-stream-image-lightbox-trigger[data-lightbox-src]'))
+                            .map((trigger) => ({
+                                source: decodeAttr(trigger.getAttribute('data-lightbox-src') || ''),
+                                label: decodeAttr(trigger.getAttribute('data-lightbox-label') || ''),
+                                trigger,
+                            }))
+                            .filter((item) => item.source)
+                            .filter((item, index, items) => items.findIndex((candidate) => candidate.source === item.source) === index);
+                        const apply = () => {
+                            if (!image) return;
+                            image.style.setProperty('--cb-lightbox-scale', String(state.scale));
+                            image.style.setProperty('--cb-lightbox-x', `${state.x}px`);
+                            image.style.setProperty('--cb-lightbox-y', `${state.y}px`);
+                        };
+                        const reset = () => {
+                            state.scale = 1;
+                            state.x = 0;
+                            state.y = 0;
+                            state.swipeStart = null;
+                            state.swipeLast = null;
+                            apply();
+                        };
+                        const setScale = (nextScale, centerX = 0, centerY = 0) => {
+                            const previous = state.scale || 1;
+                            const scale = Math.max(1, Math.min(6, nextScale));
+                            if (scale === previous) return;
+                            if (scale === 1) {
+                                state.scale = 1;
+                                state.x = 0;
+                                state.y = 0;
+                                apply();
+                                return;
+                            }
+                            const ratio = scale / previous;
+                            state.x = (state.x - centerX) * ratio + centerX;
+                            state.y = (state.y - centerY) * ratio + centerY;
+                            state.scale = scale;
+                            apply();
+                        };
+                        const openAt = (index) => {
+                            const items = lightboxItems();
+                            if (!items.length) return;
+                            const safeIndex = ((index % items.length) + items.length) % items.length;
+                            const item = items[safeIndex];
+                            state.currentIndex = safeIndex;
+                            reset();
+                            if (image) {
+                                image.setAttribute('src', item.source);
+                                image.setAttribute('alt', item.label);
+                            }
+                            if (caption) {
+                                caption.textContent = item.label;
+                            }
+                            overlay.classList.add('cb-image-lightbox-open');
+                        };
+                        const moveBy = (delta) => {
+                            const items = lightboxItems();
+                            if (items.length < 2) return;
+                            openAt((state.currentIndex < 0 ? 0 : state.currentIndex) + delta);
+                        };
+                        const openSource = (source, label = '') => {
+                            const items = lightboxItems();
+                            const index = items.findIndex((item) => item.source === source && (!label || item.label === label));
+                            openAt(index >= 0 ? index : 0);
+                        };
+                        overlay.__cbLightboxOpenAt = openAt;
+                        overlay.__cbLightboxOpenSource = openSource;
+                        overlay.__cbLightboxMoveBy = moveBy;
+                        overlay.__cbLightboxReset = reset;
+                        if (stage) {
+                            stage.addEventListener('wheel', (event) => {
+                                event.preventDefault();
+                                const rect = stage.getBoundingClientRect();
+                                setScale(state.scale * (event.deltaY < 0 ? 1.18 : 0.84), event.clientX - rect.left - rect.width / 2, event.clientY - rect.top - rect.height / 2);
+                            }, { passive: false });
+                            stage.addEventListener('dblclick', (event) => {
+                                event.preventDefault();
+                                const rect = stage.getBoundingClientRect();
+                                setScale(state.scale > 1 ? 1 : 2.5, event.clientX - rect.left - rect.width / 2, event.clientY - rect.top - rect.height / 2);
+                            });
+                            stage.addEventListener('pointerdown', (event) => {
+                                stage.setPointerCapture?.(event.pointerId);
+                                state.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+                                if (state.pointers.size === 1) {
+                                    state.dragStart = { x: event.clientX, y: event.clientY, baseX: state.x, baseY: state.y };
+                                    state.swipeStart = { x: event.clientX, y: event.clientY };
+                                    state.swipeLast = { x: event.clientX, y: event.clientY };
+                                } else if (state.pointers.size === 2) {
+                                    state.swipeStart = null;
+                                    state.swipeLast = null;
+                                    const points = Array.from(state.pointers.values());
+                                    state.pinchStart = {
+                                        distance: Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y) || 1,
+                                        scale: state.scale,
+                                    };
+                                }
+                            });
+                            stage.addEventListener('pointermove', (event) => {
+                                if (!state.pointers.has(event.pointerId)) return;
+                                state.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+                                if (state.pointers.size === 1 && state.swipeStart) {
+                                    state.swipeLast = { x: event.clientX, y: event.clientY };
+                                }
+                                if (state.pointers.size === 2 && state.pinchStart) {
+                                    const points = Array.from(state.pointers.values());
+                                    const distance = Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y) || 1;
+                                    setScale(state.pinchStart.scale * distance / state.pinchStart.distance);
+                                    return;
+                                }
+                                if (state.scale <= 1 || !state.dragStart) return;
+                                state.x = state.dragStart.baseX + event.clientX - state.dragStart.x;
+                                state.y = state.dragStart.baseY + event.clientY - state.dragStart.y;
+                                apply();
+                            });
+                            const endPointer = (event) => {
+                                if (state.scale <= 1 && state.swipeStart && state.pointers.size === 1) {
+                                    const point = state.swipeLast || state.pointers.get(event.pointerId) || { x: event.clientX, y: event.clientY };
+                                    const dx = point.x - state.swipeStart.x;
+                                    const dy = point.y - state.swipeStart.y;
+                                    if (Math.abs(dx) >= 54 && Math.abs(dx) > Math.abs(dy) * 1.35) {
+                                        event.preventDefault();
+                                        moveBy(dx < 0 ? 1 : -1);
+                                    }
+                                }
+                                state.pointers.delete(event.pointerId);
+                                state.dragStart = null;
+                                state.pinchStart = null;
+                                state.swipeStart = null;
+                                state.swipeLast = null;
+                                if (state.pointers.size === 1) {
+                                    const point = Array.from(state.pointers.values())[0];
+                                    state.dragStart = { x: point.x, y: point.y, baseX: state.x, baseY: state.y };
+                                    state.swipeStart = { x: point.x, y: point.y };
+                                    state.swipeLast = { x: point.x, y: point.y };
+                                }
+                            };
+                            stage.addEventListener('pointerup', endPointer);
+                            stage.addEventListener('pointercancel', endPointer);
+                        }
                         const close = () => {
                             overlay.classList.remove('cb-image-lightbox-open');
                             const image = overlay.querySelector('.cb-image-lightbox-image');
                             if (image) image.removeAttribute('src');
+                            overlay.__cbLightboxReset?.();
+                            overlay.__cbLightboxState?.pointers?.clear?.();
                         };
                         overlay.addEventListener('click', (event) => {
                             if (event.target === overlay || event.target?.closest?.('.cb-image-lightbox-close')) {
                                 close();
+                                return;
+                            }
+                            const zoom = event.target?.closest?.('[data-lightbox-zoom]')?.getAttribute('data-lightbox-zoom');
+                            const nav = event.target?.closest?.('[data-lightbox-nav]')?.getAttribute('data-lightbox-nav');
+                            if (nav === 'next') {
+                                moveBy(1);
+                                return;
+                            }
+                            if (nav === 'prev') {
+                                moveBy(-1);
+                                return;
+                            }
+                            if (zoom === 'in') {
+                                setScale(state.scale * 1.35);
+                            } else if (zoom === 'out') {
+                                setScale(state.scale / 1.35);
+                            } else if (zoom === 'reset') {
+                                reset();
                             }
                         });
                         document.addEventListener('keydown', (event) => {
-                            if (event.key === 'Escape' && overlay.classList.contains('cb-image-lightbox-open')) {
+                            if (!overlay.classList.contains('cb-image-lightbox-open')) return;
+                            if (event.key === 'Escape') {
                                 close();
+                            } else if (event.key === 'ArrowRight') {
+                                event.preventDefault();
+                                moveBy(1);
+                            } else if (event.key === 'ArrowLeft') {
+                                event.preventDefault();
+                                moveBy(-1);
                             }
                         });
                         return overlay;
                     };
-                    if (window.__cbImageLightboxDelegateReady !== '1') {
-                        window.__cbImageLightboxDelegateReady = '1';
+                        if (window.__cbImageLightboxDelegateReady !== '1') {
+                            window.__cbImageLightboxDelegateReady = '1';
                         const openLightbox = (event) => {
                             const trigger = event.target?.closest?.('.cb-stream-image-lightbox-trigger[data-lightbox-src]');
                             if (!trigger) return;
@@ -3716,23 +4004,17 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                             if (!source) return;
                             const label = decodeAttr(trigger.getAttribute('data-lightbox-label') || '');
                             const overlay = ensureLightbox();
-                            const image = overlay.querySelector('.cb-image-lightbox-image');
-                            const caption = overlay.querySelector('.cb-image-lightbox-caption');
-                            if (image) {
-                                image.setAttribute('src', source);
-                                image.setAttribute('alt', label);
-                            }
-                            if (caption) {
-                                caption.textContent = label;
-                            }
-                            overlay.classList.add('cb-image-lightbox-open');
+                            overlay.__cbLightboxOpenSource?.(source, label);
                         };
                         document.addEventListener('click', openLightbox, true);
+                        document.addEventListener('pointerup', openLightbox, true);
                         document.addEventListener('keydown', (event) => {
                             if (event.key !== 'Enter' && event.key !== ' ') return;
                             openLightbox(event);
                         }, true);
                     }
+                    prepareMarkdownImages();
+                    prepareLightboxTriggers();
                 };
                 const setupCodeBlockCopy = () => {
                     if (window.__cbStreamCodeCopyDelegateReady === '1') return;
