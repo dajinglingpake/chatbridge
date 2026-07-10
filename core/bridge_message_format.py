@@ -37,6 +37,8 @@ def format_output_time(value: str | None) -> str:
     parsed = parse_iso_datetime(value or "")
     if parsed is None:
         parsed = datetime.now()
+    elif parsed.tzinfo is not None:
+        parsed = parsed.astimezone().replace(tzinfo=None)
     return parsed.strftime("%H:%M:%S")
 
 

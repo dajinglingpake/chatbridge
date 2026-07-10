@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime
 
 from core.bridge_message_format import format_bridge_reply, format_duration_since, prefix_bridge_output
 from core.bridge_message_filters import BridgeDuplicateMessageFilter, has_ignored_prefix
@@ -18,6 +19,12 @@ class BridgeCommonRuntimeTests(unittest.TestCase):
     def test_duration_accepts_utc_z_timestamps(self) -> None:
         self.assertEqual("5s", format_duration_since("2026-07-09T01:36:21Z", ended_at="2026-07-09T01:36:26Z"))
         self.assertEqual("5s", format_duration_since("2026-07-09T01:36:21Z", ended_at="2026-07-09T01:36:26"))
+
+    def test_bridge_reply_header_displays_aware_time_as_local_time(self) -> None:
+        expected = datetime.fromisoformat("2026-07-09T01:36:26+00:00").astimezone().strftime("%H:%M:%S")
+        output = prefix_bridge_output("done", "5s", "ok", at="2026-07-09T01:36:26Z")
+
+        self.assertEqual(f"done · 5s · {expected}\n\nok", output)
 
     def test_typing_keepalive_policy(self) -> None:
         self.assertTrue(should_send_typing_keepalive(0, now_seconds=100, keepalive_seconds=5))
