@@ -127,7 +127,7 @@ class QQLoginDialogTests(unittest.TestCase):
         with (
             patch("ui.qq_login.threading.Thread", FakeThread),
             patch("ui.qq_login.run_named_action") as mocked_run,
-            patch("ui.qq_login.fetch_napcat_login_qrcode_url", return_value="https://example.test/qr"),
+            patch("ui.qq_login.fetch_napcat_login_qrcode_url", return_value="https://example.test/qr") as mocked_fetch,
             patch("ui.qq_login.get_qq_login_status", return_value=(False, "", "")),
         ):
             mocked_run.return_value.message = "started"
@@ -137,6 +137,7 @@ class QQLoginDialogTests(unittest.TestCase):
             ui.timers[-1].attrs["callback"]()
 
         mocked_run.assert_called_once_with("prepare-qq-login")
+        mocked_fetch.assert_called_once_with(refresh=True, timeout=3.0)
         self.assertIn("QQ 登录二维码已生成", notifications)
 
     def test_opening_dialog_shows_existing_login_without_starting_stack(self) -> None:

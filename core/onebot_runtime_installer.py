@@ -28,6 +28,8 @@ INSTALL_METADATA_FILE = "chatbridge-runtime.json"
 NAPCAT_WEBUI_TOKEN = "chatbridge-local-onebot"
 NAPCAT_WEBUI_BASE_URL = "http://127.0.0.1:6099"
 NAPCAT_QUICK_LOGIN_ENV = "CHATBRIDGE_NAPCAT_QQ"
+NAPCAT_QR_REFRESH_WAIT_SECONDS = 3.0
+NAPCAT_QR_REFRESH_POLL_INTERVAL_SECONDS = 0.25
 
 
 @dataclass(frozen=True)
@@ -112,9 +114,22 @@ def find_latest_qr_image(*, since: float | None = None) -> Path | None:
 def fetch_napcat_login_qrcode_url(*, refresh: bool = False, timeout: float = 3.0) -> str:
     credential = _napcat_webui_credential(timeout=timeout)
     headers = {"Authorization": f"Bearer {credential}", "Content-Type": "application/json"}
-    if refresh:
-        _napcat_post("/api/QQLogin/RefreshQRcode", headers=headers, timeout=timeout)
-        time.sleep(0.5)
+    previous_qr_url = _fetch_napcat_login_qrcode_url(headers=headers, timeout=timeout)
+    if not refresh:
+        return previous_qr_url
+
+    _napcat_post("/api/QQLogin/RefreshQRcode", headers=headers, timeout=timeout)
+    deadline = time.monotonic() + NAPCAT_QR_REFRESH_WAIT_SECONDS
+    while True:
+        time.sleep(NAPCAT_QR_REFRESH_POLL_INTERVAL_SECONDS)
+        qr_url = _fetch_napcat_login_qrcode_url(headers=headers, timeout=timeout)
+        if qr_url and qr_url != previous_qr_url:
+            return qr_url
+        if time.monotonic() >= deadline:
+            return ""
+
+
+def _fetch_napcat_login_qrcode_url(*, headers: dict[str, str], timeout: float) -> str:
     payload = _napcat_post("/api/QQLogin/GetQQLoginQrcode", headers=headers, timeout=timeout)
     data = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(data, dict):

@@ -133,8 +133,9 @@ class OneBotRuntimeInstallerTests(unittest.TestCase):
         expected_hash = hashlib.sha256(("chatbridge-local-onebot" + ".napcat").encode("utf-8")).hexdigest()
         self.assertEqual(("/api/auth/login", {"hash": expected_hash}), calls[0])
 
-    def test_fetch_napcat_login_qrcode_url_uses_refresh_endpoint(self) -> None:
+    def test_fetch_napcat_login_qrcode_url_waits_for_a_refreshed_value(self) -> None:
         calls: list[str] = []
+        qrcode_urls = iter(["https://q.qq.com/expired", "https://q.qq.com/expired", "https://q.qq.com/fresh"])
 
         def fake_post(path: str, *, body=None, headers=None, timeout=0):
             del body, headers, timeout
@@ -142,13 +143,22 @@ class OneBotRuntimeInstallerTests(unittest.TestCase):
             if path == "/api/auth/login":
                 return {"data": {"Credential": "cred-1"}}
             if path == "/api/QQLogin/GetQQLoginQrcode":
-                return {"data": {"qrcode": "https://q.qq.com/login"}}
+                return {"data": {"qrcode": next(qrcode_urls)}}
             return {"data": None}
 
         with patch("core.onebot_runtime_installer._napcat_post", side_effect=fake_post), patch("core.onebot_runtime_installer.time.sleep", return_value=None):
-            self.assertEqual("https://q.qq.com/login", installer.fetch_napcat_login_qrcode_url(refresh=True, timeout=1.0))
+            self.assertEqual("https://q.qq.com/fresh", installer.fetch_napcat_login_qrcode_url(refresh=True, timeout=1.0))
 
-        self.assertEqual(["/api/auth/login", "/api/QQLogin/RefreshQRcode", "/api/QQLogin/GetQQLoginQrcode"], calls)
+        self.assertEqual(
+            [
+                "/api/auth/login",
+                "/api/QQLogin/GetQQLoginQrcode",
+                "/api/QQLogin/RefreshQRcode",
+                "/api/QQLogin/GetQQLoginQrcode",
+                "/api/QQLogin/GetQQLoginQrcode",
+            ],
+            calls,
+        )
 
     def test_fetch_napcat_login_status_uses_check_login_status_endpoint(self) -> None:
         calls: list[str] = []

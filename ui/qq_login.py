@@ -127,7 +127,8 @@ def install_qq_login_dialog(
                 while time.monotonic() < deadline:
                     try:
                         qr_url = fetch_napcat_login_qrcode_url(refresh=should_refresh_qr, timeout=3.0)
-                        should_refresh_qr = False
+                        if qr_url:
+                            should_refresh_qr = False
                     except Exception as exc:  # noqa: BLE001
                         last_error = f"{type(exc).__name__}: {exc}"
                         time.sleep(1.0)
