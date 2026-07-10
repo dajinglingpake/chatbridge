@@ -279,6 +279,7 @@ class WeixinBridge:
             unsupported_message=None,
             render_status_reply=self._render_control_status,
             render_task_summary_reply=self._render_task_summary,
+            codex_status_context=self._resolve_codex_status_context,
             restrict_task_lookup_to_sender=False,
         )
         self.session_control_runtime = BridgeSessionControlRuntime(
@@ -330,7 +331,6 @@ class WeixinBridge:
             save_conversations=self._save_conversations,
             unsupported_agent_slash_reply=lambda command: self._t("bridge.passthrough.unsupported", command=command),
             unsupported_bridge_command_reply=lambda command: self._t("bridge.passthrough.unsupported", command=command),
-            render_local_passthrough=self._render_local_codex_status,
             on_handled=self._runtime_prompt_handled,
             save_state=self._save_state,
         )
@@ -2320,31 +2320,19 @@ class WeixinBridge:
             True,
         )
 
-    def _render_local_codex_status(
-        self,
-        session_name: str,
-        session_meta: WeixinSessionMeta,
-        passthrough_prompt: str,
-    ) -> str | None:
-        if str(passthrough_prompt or "").strip().lower() != "/status":
-            return None
-        if session_meta.backend != "codex":
-            return "当前会话后端不是 Codex，//status 只支持 Codex 会话。"
-        response = self._ipc_request(
-            "codex_status",
-            {
-                "agent_id": self.config.backend_id,
-                "session_name": session_name,
-                "workdir": self._resolve_session_workdir(session_meta),
-            },
-            timeout_seconds=15,
+    def _resolve_codex_status_context(self, sender_id: str) -> tuple[str, str, str, str]:
+        binding = self._ensure_conversation(sender_id)
+        session_name, session_meta = binding.get_current_session(
+            default_backend=self.config.default_backend,
+            now=now_iso(),
+            normalize_backend=normalize_backend,
         )
-        if not response.ok:
-            return f"Codex 状态查询失败：{response.error or 'unknown error'}"
-        status_panel = str(response.payload.get("status") or "").strip()
-        if not status_panel:
-            return "当前会话还没有可查询的 Codex 交互状态。请先在这个会话里发送一条普通消息。"
-        return status_panel
+        return (
+            self.config.backend_id,
+            session_name,
+            session_meta.backend,
+            self._resolve_session_workdir(session_meta),
+        )
 
     @staticmethod
     def _extract_passthrough_prompt(text: str) -> str | None:

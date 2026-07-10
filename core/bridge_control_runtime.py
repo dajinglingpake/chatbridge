@@ -6,6 +6,10 @@ from core.bridge_command_catalog import parse_bridge_command, render_bridge_help
 from core.bridge_runtime import BridgeCommandResult
 from core.state_models import HubTask
 
+
+CODEX_STATUS_QUERY_TIMEOUT_SECONDS = 30
+
+
 class BridgeControlRuntime:
     def __init__(
         self,
@@ -22,6 +26,7 @@ class BridgeControlRuntime:
         unsupported_message: str | None,
         render_status_reply: Callable[[str], str] | None = None,
         render_task_summary_reply: Callable[[HubTask], str] | None = None,
+        codex_status_context: Callable[[str], tuple[str, str, str, str]] | None = None,
         restrict_task_lookup_to_sender: bool = True,
     ) -> None:
         self.help_message_keys = help_message_keys
@@ -36,6 +41,7 @@ class BridgeControlRuntime:
         self.unsupported_message = unsupported_message
         self.render_status_reply = render_status_reply
         self.render_task_summary_reply = render_task_summary_reply
+        self.codex_status_context = codex_status_context
         self.restrict_task_lookup_to_sender = restrict_task_lookup_to_sender
 
     def handle(self, sender_id: str, text: str) -> BridgeCommandResult:
@@ -130,20 +136,30 @@ class BridgeControlRuntime:
         )
 
     def render_codex_status(self, sender_id: str) -> str:
-        if self.default_backend() != "codex":
+        agent_id = self.agent_id()
+        session_name = self.session_name(sender_id)
+        backend = self.default_backend()
+        workdir = ""
+        if self.codex_status_context is not None:
+            agent_id, session_name, backend, workdir = self.codex_status_context(sender_id)
+        if str(backend or "").strip().lower() != "codex":
             return "当前会话后端不是 Codex，//status 只支持 Codex 会话。"
-        response = self.ipc_request(
-            "codex_status",
-            {
-                "agent_id": self.agent_id(),
-                "session_name": self.session_name(sender_id),
-                "workdir": "",
-            },
-            15,
-        )
-        if not response.ok:
-            return f"Codex 状态查询失败：{response.error or 'unknown error'}"
-        status_panel = str(response.payload.get("status") or "").strip()
+        try:
+            response = self.ipc_request(
+                "codex_status",
+                {
+                    "agent_id": agent_id,
+                    "session_name": session_name,
+                    "workdir": workdir,
+                },
+                CODEX_STATUS_QUERY_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return f"Codex 状态查询失败：{exc}"
+        if not getattr(response, "ok", False):
+            return f"Codex 状态查询失败：{getattr(response, 'error', '') or 'unknown error'}"
+        payload = getattr(response, "payload", {})
+        status_panel = str(payload.get("status") or "").strip() if isinstance(payload, dict) else ""
         if not status_panel:
             return "当前会话还没有可查询的 Codex 交互状态。请先在这个会话里发送一条普通消息。"
         return status_panel

@@ -12,7 +12,7 @@ PERMISSION_MODE_PRESETS: tuple[tuple[str, str], ...] = (
     ("default", "Default"),
     ("full-access", "Full Access"),
 )
-SPECIAL_NATIVE_MENU_COMMANDS = frozenset({"/model", "/permission", "/permissions"})
+SPECIAL_NATIVE_MENU_COMMANDS = frozenset({"/model", "/permission", "/permissions", "/status"})
 
 
 class _NativeMenuSessionMeta(Protocol):

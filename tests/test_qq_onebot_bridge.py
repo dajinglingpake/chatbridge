@@ -15,7 +15,7 @@ from core.bridge_pending_tasks import BridgePendingReplyTask
 from core.bridge_runtime import BridgeSubmittedTask, IncomingBridgeMessage
 from core.state_models import HubTask
 import local_ipc
-from qq_onebot_bridge import DEFAULT_QQ_AGENT_ID, QQ_GROUP_ATTACHMENT_DIR_NAME, QQOneBotBridge
+from qq_onebot_bridge import DEFAULT_QQ_AGENT_ID, QQ_GROUP_ATTACHMENT_DIR_NAME, WORKSPACE_DIR, QQOneBotBridge
 from http.server import ThreadingHTTPServer
 
 
@@ -81,15 +81,19 @@ class QQOneBotBridgeTests(unittest.TestCase):
         self.temp_path = Path(self._tempdir.name)
         self.state_path = self.temp_path / "qq_media.json"
         self.pending_tasks_path = self.temp_path / "qq_pending_tasks.json"
+        self.conversations_path = self.temp_path / "qq_conversations.json"
         self.service_action_state_path = self.temp_path / "service_action_state.json"
         media_patcher = patch("qq_onebot_bridge.ONEBOT_STATE_PATH", self.state_path)
         task_patcher = patch("qq_onebot_bridge.QQ_PENDING_TASKS_PATH", self.pending_tasks_path)
+        conversations_patcher = patch("qq_onebot_bridge.QQ_CONVERSATIONS_PATH", self.conversations_path)
         service_action_patcher = patch("qq_onebot_bridge.SERVICE_ACTION_STATE_PATH", self.service_action_state_path)
         media_patcher.start()
         task_patcher.start()
+        conversations_patcher.start()
         service_action_patcher.start()
         self.addCleanup(media_patcher.stop)
         self.addCleanup(task_patcher.stop)
+        self.addCleanup(conversations_patcher.stop)
         self.addCleanup(service_action_patcher.stop)
 
     def test_media_only_message_caches_attachment_for_next_text(self) -> None:
@@ -569,6 +573,42 @@ class QQOneBotBridgeTests(unittest.TestCase):
         self.assertEqual("send_group_msg", bridge.api_calls[-1][0])
         self.assertIn("群聊只支持普通问题", bridge.api_calls[-1][1]["message"])
 
+    def test_group_model_command_is_handled_locally_without_agent_submission(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.handle_event(
+            {
+                "post_type": "message",
+                "message_type": "group",
+                "group_id": 20002,
+                "user_id": 10001,
+                "self_id": 900000001,
+                "message": [
+                    {"type": "at", "data": {"qq": "900000001"}},
+                    {"type": "text", "data": {"text": "/model gpt-5"}},
+                ],
+            }
+        )
+
+        self.assertEqual([], bridge.submitted)
+        self.assertEqual("send_group_msg", bridge.api_calls[-1][0])
+        self.assertIn("已切换会话模型", bridge.api_calls[-1][1]["message"])
+
+    def test_qq_help_lists_model_and_backend_commands(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.handle_event(
+            {
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": 10001,
+                "message": "/help",
+            }
+        )
+
+        self.assertEqual([], bridge.submitted)
+        sent_text = str(bridge.api_calls[-1][1]["message"])
+        self.assertIn("/model <name>", sent_text)
+        self.assertIn("/backend <backend>", sent_text)
+
     def test_private_message_respects_private_user_blocklist(self) -> None:
         bridge = FakeQQBridge(self.temp_path)
         bridge.config.qq_blocked_private_user_ids = ["10001"]
@@ -816,6 +856,74 @@ class QQOneBotBridgeTests(unittest.TestCase):
         self.assertEqual([], bridge.submitted)
         self.assertEqual("send_private_msg", bridge.api_calls[-1][0])
         self.assertEqual("Codex status panel", bridge.api_calls[-1][1]["message"])
+
+        status_call = next(payload for action, payload in bridge.api_calls if action == "ipc:codex_status")
+        self.assertEqual(DEFAULT_QQ_AGENT_ID, status_call["agent_id"])
+        self.assertEqual("qq-private-10001", status_call["session_name"])
+        self.assertEqual(str(WORKSPACE_DIR.resolve()), status_call["workdir"])
+
+    def test_double_slash_status_bypasses_active_model_menu(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.ipc_responses["codex_status"] = SimpleNamespace(ok=True, error="", payload={"status": "Codex status panel"})
+
+        bridge.handle_event(
+            {
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": 10001,
+                "message": "//model",
+            }
+        )
+        bridge.handle_event(
+            {
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": 10001,
+                "message": "//status",
+            }
+        )
+
+        self.assertEqual([], bridge.submitted)
+        self.assertEqual("Codex status panel", bridge.api_calls[-1][1]["message"])
+        session = bridge.conversations["qq:private:10001"].sessions["qq-private-10001"]
+        self.assertEqual("/model", session.native_menu_command)
+
+    def test_double_slash_status_timeout_returns_a_reply(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+
+        with patch.object(bridge, "_ipc_request", side_effect=TimeoutError("status query timed out")):
+            bridge.handle_event(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "user_id": 10001,
+                    "message": "//status",
+                }
+            )
+
+        self.assertEqual([], bridge.submitted)
+        self.assertEqual("send_private_msg", bridge.api_calls[-1][0])
+        self.assertIn("Codex 状态查询失败", bridge.api_calls[-1][1]["message"])
+
+    def test_group_double_slash_status_is_rejected(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+        bridge.handle_event(
+            {
+                "post_type": "message",
+                "message_type": "group",
+                "group_id": 20002,
+                "user_id": 10001,
+                "self_id": 900000001,
+                "message": [
+                    {"type": "at", "data": {"qq": "900000001"}},
+                    {"type": "text", "data": {"text": "//status"}},
+                ],
+            }
+        )
+
+        self.assertEqual([], bridge.submitted)
+        self.assertEqual("send_group_msg", bridge.api_calls[-1][0])
+        self.assertIn("群聊只支持普通问题", bridge.api_calls[-1][1]["message"])
 
     def test_unknown_double_slash_command_still_passes_through_to_agent(self) -> None:
         bridge = FakeQQBridge(self.temp_path)
@@ -1716,6 +1824,9 @@ class QQOneBotBridgeTests(unittest.TestCase):
 
         self.assertIn("200 OK", response)
         self.assertIn('"retcode":0', response)
+        deadline = time.monotonic() + 1.0
+        while not bridge.submitted and time.monotonic() < deadline:
+            time.sleep(0.01)
         self.assertEqual(1, len(bridge.submitted))
         self.assertEqual("chunked hello", bridge.submitted[0][1])
 

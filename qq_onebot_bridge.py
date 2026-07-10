@@ -256,6 +256,7 @@ class QQOneBotBridge:
             ipc_request=lambda action, payload, timeout_seconds: self._ipc_request(action, payload, timeout_seconds=timeout_seconds),
             retry_source="qq",
             unsupported_message=None,
+            codex_status_context=self._resolve_codex_status_context,
         )
         self.session_control_runtime = BridgeSessionControlRuntime(
             adapter=self,
@@ -771,7 +772,13 @@ class QQOneBotBridge:
 
     @staticmethod
     def _is_group_control_command(text: str) -> bool:
-        return str(text or "").strip().startswith("/")
+        cleaned = str(text or "").strip()
+        if not cleaned.startswith("/"):
+            return False
+        if cleaned.startswith("//"):
+            return True
+        command = cleaned.split(maxsplit=1)[0].lower()
+        return command not in {"/backend", "/model"}
 
     def _resolve_message_permission_mode(self, sender_key: str, session_meta: Any) -> str:
         if self._is_group_sender(sender_key):
@@ -787,6 +794,20 @@ class QQOneBotBridge:
         if self._is_group_sender(sender_key):
             return str(getattr(self.config, "qq_group_agent_id", "") or "qq-group").strip() or "qq-group"
         return self.agent_id
+
+    def _resolve_codex_status_context(self, sender_key: str) -> tuple[str, str, str, str]:
+        binding = self._ensure_conversation(sender_key)
+        session_name, session_meta = binding.get_current_session(
+            default_backend=self.config.default_backend,
+            now=self._now_iso(),
+            normalize_backend=self._normalize_backend,
+        )
+        return (
+            self._resolve_message_agent_id(sender_key),
+            session_name,
+            str(getattr(session_meta, "backend", "") or self.config.default_backend),
+            self._resolve_session_workdir(session_meta),
+        )
 
     def _resolve_message_codex_search_enabled(self, sender_key: str) -> bool:
         return self._is_group_sender(sender_key) and _config_bool(self.config, "qq_group_codex_search_enabled", True)
@@ -1234,7 +1255,15 @@ class QQOneBotBridge:
         return session_meta.permission_mode.strip().lower() or "full-access"
 
     def _render_model_status(self, session_name: str, session_meta: BridgeSessionMeta) -> str:
-        return f"Current model\nSession: {session_name}\nModel: {self._resolve_session_model(session_meta)}"
+        mode = self._t("bridge.model.mode.custom") if session_meta.model.strip() else self._t("bridge.model.mode.agent")
+        return self._t(
+            "bridge.model.current",
+            session=session_name,
+            mode=mode,
+            model=self._resolve_session_model(session_meta),
+            agent_model="-",
+            reasoning=session_meta.reasoning_effort.strip() or "-",
+        )
 
     def _render_project_status(self, session_name: str, session_meta: BridgeSessionMeta) -> str:
         return f"Current project\nSession: {session_name}\nDirectory: {self._resolve_session_workdir(session_meta)}"
