@@ -77,6 +77,8 @@ class RuntimeSnapshot:
     qq_logged_in: bool = False
     qq_user_id: str = ""
     qq_nickname: str = ""
+    qq_login_detail: str = ""
+    qq_login_checked_at: str = ""
 
     def to_dict(self) -> JsonObject:
         return asdict(self)

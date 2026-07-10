@@ -37,6 +37,8 @@ class StateModelTests(unittest.TestCase):
                 "qq_logged_in": False,
                 "qq_user_id": "",
                 "qq_nickname": "",
+                "qq_login_detail": "",
+                "qq_login_checked_at": "",
             },
             snapshot.to_dict(),
         )

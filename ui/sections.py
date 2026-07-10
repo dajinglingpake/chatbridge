@@ -333,6 +333,8 @@ def render_home_section(
                     with _panel(ui):
                         ui.label(_tr(t, "ui.web.qq.account", "QQ 当前账号：{account}", account=model.home.qq_account_label)).classes("cb-chip cb-chip-ok w-fit" if model.home.qq_login_ok else "cb-chip cb-chip-warn w-fit")
                         ui.label(_tr(t, "ui.web.account.login_status", "登录状态：{status}", status=model.home.qq_login_status_text)).classes("text-sm cb-muted")
+                        if model.home.qq_login_detail_text:
+                            ui.label(model.home.qq_login_detail_text).classes("text-sm text-orange-700")
                         ui.label(_tr(t, "ui.qq_login.onebot_api", "OneBot HTTP API: http://127.0.0.1:3000")).classes("text-sm cb-muted")
                         ui.label(_tr(t, "ui.qq_login.reverse_http", "反向 HTTP 上报: http://127.0.0.1:5701/")).classes("text-sm cb-muted")
                     with ui.row().classes("gap-2 flex-wrap pt-4"):

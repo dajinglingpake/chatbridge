@@ -56,6 +56,8 @@ ONEBOT_RUNTIME_PROCESS_MARKERS = ("llonebot", "lagrange.onebot", "lagrange-onebo
 ONEBOT_RUNTIME_PORTS = {3000, 6099, 6100, 6101, 6102}
 PROXY_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy")
 AGENT_PROCESS_KEYWORDS = ("codex", "claude", "opencode")
+QQ_LOGIN_STATUS_LOG = LOG_DIR / "qq_login_status.jsonl"
+_QQ_LOGIN_STATUS_AUDIT_LAST_SIGNATURE: tuple[object, ...] | None = None
 AGENT_PROCESS_HOST_NAMES = {
     "bash",
     "bash.exe",
@@ -502,26 +504,120 @@ def _query_onebot_api(action: str, *, timeout: float = 0.8) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+def _compact_login_payload(payload: dict) -> dict:
+    safe_keys = ("isLogin", "isOffline", "online", "good", "loginError", "message", "msg", "status", "retcode")
+    compact = {key: payload.get(key) for key in safe_keys if key in payload}
+    data = payload.get("data")
+    if isinstance(data, dict):
+        compact["data"] = {key: data.get(key) for key in safe_keys if key in data}
+    return compact
+
+
+def _audit_qq_login_status(
+    *,
+    source: str,
+    logged_in: bool,
+    user_id: str,
+    nickname: str,
+    napcat_status: dict | None = None,
+    onebot_status: dict | None = None,
+    error: str = "",
+) -> None:
+    global _QQ_LOGIN_STATUS_AUDIT_LAST_SIGNATURE
+    signature = (
+        source,
+        logged_in,
+        user_id,
+        nickname,
+        json.dumps(_compact_login_payload(napcat_status or {}), sort_keys=True, ensure_ascii=False),
+        json.dumps(_compact_login_payload(onebot_status or {}), sort_keys=True, ensure_ascii=False),
+        error,
+    )
+    if signature == _QQ_LOGIN_STATUS_AUDIT_LAST_SIGNATURE:
+        return
+    _QQ_LOGIN_STATUS_AUDIT_LAST_SIGNATURE = signature
+    record = {
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "source": source,
+        "logged_in": logged_in,
+        "user_id": user_id,
+        "nickname": nickname,
+        "napcat_status": _compact_login_payload(napcat_status or {}),
+        "onebot_status": _compact_login_payload(onebot_status or {}),
+    }
+    if error:
+        record["error"] = error
+    try:
+        ensure_runtime_dirs()
+        with QQ_LOGIN_STATUS_LOG.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+    except OSError:
+        pass
+
+
+def _latest_qq_login_audit() -> tuple[str, str]:
+    try:
+        lines = QQ_LOGIN_STATUS_LOG.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return "", ""
+    for line in reversed(lines):
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        checked_at = str(record.get("at") or "")
+        detail = _describe_qq_login_audit(record)
+        if detail:
+            return detail, checked_at
+    return "", ""
+
+
+def _describe_qq_login_audit(record: dict) -> str:
+    napcat_status = record.get("napcat_status") if isinstance(record.get("napcat_status"), dict) else {}
+    onebot_status = record.get("onebot_status") if isinstance(record.get("onebot_status"), dict) else {}
+    error = str(record.get("error") or "").strip()
+    login_error = str(napcat_status.get("loginError") or "").strip()
+    if login_error:
+        return f"NapCat 登录异常：{login_error}"
+    if error:
+        return f"登录探测异常：{error}"
+    if napcat_status.get("isOffline") is True and record.get("logged_in") is True:
+        return "NapCat 显示离线，但 OneBot API 仍可用"
+    if record.get("logged_in") is False:
+        if napcat_status.get("isOffline") is True:
+            return "NapCat 显示未登录或已离线"
+        data = onebot_status.get("data") if isinstance(onebot_status.get("data"), dict) else {}
+        if data.get("online") is False or data.get("good") is False:
+            return "OneBot API 显示未在线"
+        return "QQ 未登录"
+    return "QQ 登录正常"
+
+
 def get_qq_login_status() -> tuple[bool, str, str]:
+    login_error = ""
     try:
         napcat_status = fetch_napcat_login_status(timeout=0.8)
-    except (OSError, RuntimeError, json.JSONDecodeError, urllib.error.URLError):
+    except (OSError, RuntimeError, json.JSONDecodeError, urllib.error.URLError) as exc:
         napcat_status = {}
+        login_error = f"napcat_status:{type(exc).__name__}"
     if napcat_status.get("isLogin") is True:
         try:
             napcat_info = fetch_napcat_login_info(timeout=0.8)
-        except (OSError, RuntimeError, json.JSONDecodeError, urllib.error.URLError):
+        except (OSError, RuntimeError, json.JSONDecodeError, urllib.error.URLError) as exc:
             napcat_info = {}
+            login_error = f"napcat_info:{type(exc).__name__}"
         user_id = str(napcat_info.get("uin") or napcat_info.get("user_id") or "").strip()
         nickname = str(napcat_info.get("nick") or napcat_info.get("nickname") or "").strip()
+        _audit_qq_login_status(source="napcat", logged_in=True, user_id=user_id, nickname=nickname, napcat_status=napcat_status, error=login_error)
         return True, user_id, nickname
-    if napcat_status.get("isOffline") is True:
-        return False, "", ""
-
     try:
         status_payload = _query_onebot_api("get_status")
         login_payload = _query_onebot_api("get_login_info")
-    except (OSError, RuntimeError, json.JSONDecodeError, urllib.error.URLError):
+    except (OSError, RuntimeError, json.JSONDecodeError, urllib.error.URLError) as exc:
+        error = f"{login_error};onebot:{type(exc).__name__}" if login_error else f"onebot:{type(exc).__name__}"
+        _audit_qq_login_status(source="error", logged_in=False, user_id="", nickname="", napcat_status=napcat_status, error=error)
         return False, "", ""
 
     status_data = status_payload.get("data") if isinstance(status_payload.get("data"), dict) else {}
@@ -531,6 +627,7 @@ def get_qq_login_status() -> tuple[bool, str, str]:
     online = status_data.get("online")
     good = status_data.get("good")
     logged_in = bool(user_id) and online is not False and good is not False
+    _audit_qq_login_status(source="onebot", logged_in=logged_in, user_id=user_id, nickname=nickname, napcat_status=napcat_status, onebot_status=status_payload, error=login_error)
     return logged_in, user_id, nickname
 
 
@@ -948,6 +1045,7 @@ def get_runtime_snapshot(
     qq_bridge = get_managed_status("QQ Bridge", QQ_BRIDGE_SCRIPT, QQ_BRIDGE_PID_FILE, discover=discover_missing_processes)
     onebot_runtime = get_onebot_runtime_status(discover=discover_missing_processes)
     qq_logged_in, qq_user_id, qq_nickname = get_qq_login_status() if include_qq_login_status and onebot_runtime.running else (False, "", "")
+    qq_login_detail, qq_login_checked_at = _latest_qq_login_audit() if include_qq_login_status else ("", "")
     return RuntimeSnapshot(
         hub_running=hub.running,
         bridge_running=bridge.running,
@@ -962,4 +1060,6 @@ def get_runtime_snapshot(
         qq_logged_in=qq_logged_in,
         qq_user_id=qq_user_id,
         qq_nickname=qq_nickname,
+        qq_login_detail=qq_login_detail,
+        qq_login_checked_at=qq_login_checked_at,
     )

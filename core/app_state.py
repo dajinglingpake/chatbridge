@@ -143,16 +143,20 @@ def build_overview_lines(
     active_account_id: str,
     translator: Callable[..., str] | None = None,
 ) -> list[str]:
+    qq_login_line = _t(
+        translator,
+        "ui.overview.qq_login",
+        status=_t(translator, "ui.status.logged_in") if snapshot.qq_logged_in else _t(translator, "ui.status.not_logged_in"),
+        account=(f"{snapshot.qq_nickname} ({snapshot.qq_user_id})" if snapshot.qq_nickname and snapshot.qq_user_id else snapshot.qq_user_id or "-"),
+    )
+    if snapshot.qq_login_detail:
+        checked_at = f" @ {snapshot.qq_login_checked_at}" if snapshot.qq_login_checked_at else ""
+        qq_login_line = f"{qq_login_line}；{snapshot.qq_login_detail}{checked_at}"
     lines = [
         _t(translator, "ui.overview.hub", status=_t(translator, "ui.status.running") if snapshot.hub_running else _t(translator, "ui.status.stopped"), pid=pid_text(snapshot.hub_pid)),
         _t(translator, "ui.overview.bridge", status=_t(translator, "ui.status.running") if snapshot.bridge_running else _t(translator, "ui.status.stopped"), pid=pid_text(snapshot.bridge_pid)),
         _t(translator, "ui.overview.onebot_runtime", status=_t(translator, "ui.status.running") if snapshot.onebot_runtime_running else _t(translator, "ui.status.stopped"), pid=pid_text(snapshot.onebot_runtime_pid)),
-        _t(
-            translator,
-            "ui.overview.qq_login",
-            status=_t(translator, "ui.status.logged_in") if snapshot.qq_logged_in else _t(translator, "ui.status.not_logged_in"),
-            account=(f"{snapshot.qq_nickname} ({snapshot.qq_user_id})" if snapshot.qq_nickname and snapshot.qq_user_id else snapshot.qq_user_id or "-"),
-        ),
+        qq_login_line,
         _t(translator, "ui.overview.qq_bridge", status=_t(translator, "ui.status.running") if snapshot.qq_bridge_running else _t(translator, "ui.status.stopped"), pid=pid_text(snapshot.qq_bridge_pid)),
         _t(translator, "ui.overview.agent_processes", count=len(snapshot.codex_processes)),
         _t(translator, "ui.overview.active_account", account=active_account_id),

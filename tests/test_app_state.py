@@ -138,6 +138,27 @@ class AppStateTests(unittest.TestCase):
         self.assertIn("微信桥状态:", lines)
         self.assertIn("started_at: 2026-01-01T00:00:00", lines)
 
+    def test_build_overview_lines_renders_qq_login_detail(self) -> None:
+        snapshot = RuntimeSnapshot(
+            hub_running=True,
+            hub_pid=101,
+            bridge_running=False,
+            bridge_pid=None,
+            onebot_runtime_running=True,
+            onebot_runtime_pid=303,
+            qq_bridge_running=True,
+            qq_bridge_pid=404,
+            codex_processes=[],
+            log_dir=".runtime/logs",
+            qq_logged_in=False,
+            qq_login_detail="NapCat 登录异常：你的用户身份已失效",
+            qq_login_checked_at="2026-07-10T13:02:00+0800",
+        )
+
+        lines = build_overview_lines(snapshot, BridgeRuntimeState(started_at=""), "acct-1")
+
+        self.assertIn("QQ 登录: 未登录 -；NapCat 登录异常：你的用户身份已失效 @ 2026-07-10T13:02:00+0800", lines)
+
     def test_build_issues_uses_bridge_runtime_error(self) -> None:
         snapshot = RuntimeSnapshot(
             hub_running=True,

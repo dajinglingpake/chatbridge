@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -9,6 +10,7 @@ from unittest.mock import patch
 
 from runtime_stack import (
     _filter_child_process_matches,
+    _latest_qq_login_audit,
     get_qq_login_status,
     get_managed_status,
     get_runtime_snapshot,
@@ -123,6 +125,7 @@ class RuntimeStackTests(unittest.TestCase):
         with (
             patch("runtime_stack.fetch_napcat_login_status", return_value={"isLogin": True, "isOffline": False}),
             patch("runtime_stack.fetch_napcat_login_info", return_value={"uin": "2493227263", "nick": "test"}),
+            patch("runtime_stack._audit_qq_login_status"),
             patch("runtime_stack._query_onebot_api", side_effect=AssertionError("OneBot fallback should be skipped")),
         ):
             logged_in, user_id, nickname = get_qq_login_status()
@@ -130,6 +133,87 @@ class RuntimeStackTests(unittest.TestCase):
         self.assertTrue(logged_in)
         self.assertEqual("2493227263", user_id)
         self.assertEqual("test", nickname)
+
+    def test_qq_login_status_falls_back_to_onebot_when_napcat_reports_offline(self) -> None:
+        with (
+            patch("runtime_stack.fetch_napcat_login_status", return_value={"isLogin": False, "isOffline": True}),
+            patch(
+                "runtime_stack._query_onebot_api",
+                side_effect=[
+                    {"data": {"online": True, "good": True}},
+                    {"data": {"user_id": 2493227263, "nickname": "test"}},
+                ],
+            ),
+            patch("runtime_stack._audit_qq_login_status"),
+        ):
+            logged_in, user_id, nickname = get_qq_login_status()
+
+        self.assertTrue(logged_in)
+        self.assertEqual("2493227263", user_id)
+        self.assertEqual("test", nickname)
+
+    def test_qq_login_status_audits_status_changes(self) -> None:
+        audit_log = self.root / "qq_login_status.jsonl"
+        with (
+            patch("runtime_stack.QQ_LOGIN_STATUS_LOG", audit_log),
+            patch("runtime_stack._QQ_LOGIN_STATUS_AUDIT_LAST_SIGNATURE", None),
+            patch("runtime_stack.fetch_napcat_login_status", return_value={"isLogin": True, "isOffline": False}),
+            patch("runtime_stack.fetch_napcat_login_info", return_value={"uin": "2493227263", "nick": "test"}),
+        ):
+            get_qq_login_status()
+            get_qq_login_status()
+
+        lines = audit_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(1, len(lines))
+        record = json.loads(lines[0])
+        self.assertTrue(record["logged_in"])
+        self.assertEqual("napcat", record["source"])
+        self.assertEqual("2493227263", record["user_id"])
+        self.assertEqual({"isLogin": True, "isOffline": False}, record["napcat_status"])
+
+    def test_qq_login_status_audits_offline_error(self) -> None:
+        audit_log = self.root / "qq_login_status.jsonl"
+        with (
+            patch("runtime_stack.QQ_LOGIN_STATUS_LOG", audit_log),
+            patch("runtime_stack._QQ_LOGIN_STATUS_AUDIT_LAST_SIGNATURE", None),
+            patch("runtime_stack.fetch_napcat_login_status", return_value={"isLogin": False, "isOffline": True, "loginError": "expired"}),
+            patch("runtime_stack._query_onebot_api", side_effect=OSError("offline")),
+        ):
+            logged_in, user_id, nickname = get_qq_login_status()
+
+        self.assertFalse(logged_in)
+        self.assertEqual("", user_id)
+        self.assertEqual("", nickname)
+        record = json.loads(audit_log.read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual("error", record["source"])
+        self.assertFalse(record["logged_in"])
+        self.assertEqual({"isLogin": False, "isOffline": True, "loginError": "expired"}, record["napcat_status"])
+        self.assertEqual("onebot:OSError", record["error"])
+
+    def test_latest_qq_login_audit_describes_login_error(self) -> None:
+        audit_log = self.root / "qq_login_status.jsonl"
+        audit_log.write_text(
+            "\n".join(
+                [
+                    "{broken",
+                    json.dumps(
+                        {
+                            "at": "2026-07-10T13:02:00+0800",
+                            "logged_in": False,
+                            "napcat_status": {"isLogin": False, "isOffline": True, "loginError": "你的用户身份已失效"},
+                            "onebot_status": {},
+                        },
+                        ensure_ascii=False,
+                    ),
+                ]
+            ),
+            encoding="utf-8",
+        )
+        with patch("runtime_stack.QQ_LOGIN_STATUS_LOG", audit_log):
+            detail, checked_at = _latest_qq_login_audit()
+
+        self.assertEqual("NapCat 登录异常：你的用户身份已失效", detail)
+        self.assertEqual("2026-07-10T13:02:00+0800", checked_at)
 
     def test_start_managed_passes_proxy_env_to_child_process(self) -> None:
         pid_file = self.root / "agent.pid"

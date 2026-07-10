@@ -83,6 +83,7 @@ class HomeViewModel:
     qq_login_text: str
     qq_account_label: str
     qq_login_status_text: str
+    qq_login_detail_text: str
     qq_login_ok: bool
     runtime_bridge_mode: str
 
@@ -343,6 +344,9 @@ def build_home_view_model(
     badge = build_badge(snapshot, t)
     _, _, primary_hint = decide_primary_action(snapshot, checks, t)
     qq_account = f"{snapshot.qq_nickname} ({snapshot.qq_user_id})" if snapshot.qq_nickname and snapshot.qq_user_id else snapshot.qq_user_id or "-"
+    qq_login_detail = snapshot.qq_login_detail
+    if qq_login_detail and snapshot.qq_login_checked_at:
+        qq_login_detail = f"{qq_login_detail} @ {snapshot.qq_login_checked_at}"
     return HomeViewModel(
         badge_text=badge.text,
         badge_style=badge.style,
@@ -357,6 +361,7 @@ def build_home_view_model(
         ),
         qq_account_label=qq_account,
         qq_login_status_text=_t(t, "ui.status.logged_in", "已登录") if snapshot.qq_logged_in else _t(t, "ui.status.not_logged_in", "未登录"),
+        qq_login_detail_text=qq_login_detail,
         qq_login_ok=snapshot.qq_logged_in,
         runtime_bridge_mode=infer_bridge_mode(snapshot),
     )
