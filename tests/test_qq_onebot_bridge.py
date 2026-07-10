@@ -573,25 +573,27 @@ class QQOneBotBridgeTests(unittest.TestCase):
         self.assertEqual("send_group_msg", bridge.api_calls[-1][0])
         self.assertIn("群聊只支持普通问题", bridge.api_calls[-1][1]["message"])
 
-    def test_group_model_command_is_handled_locally_without_agent_submission(self) -> None:
-        bridge = FakeQQBridge(self.temp_path)
-        bridge.handle_event(
-            {
-                "post_type": "message",
-                "message_type": "group",
-                "group_id": 20002,
-                "user_id": 10001,
-                "self_id": 900000001,
-                "message": [
-                    {"type": "at", "data": {"qq": "900000001"}},
-                    {"type": "text", "data": {"text": "/model gpt-5"}},
-                ],
-            }
-        )
+    def test_group_session_commands_are_rejected_without_agent_submission(self) -> None:
+        for command in ("/model gpt-5", "/backend claude"):
+            with self.subTest(command=command):
+                bridge = FakeQQBridge(self.temp_path)
+                bridge.handle_event(
+                    {
+                        "post_type": "message",
+                        "message_type": "group",
+                        "group_id": 20002,
+                        "user_id": 10001,
+                        "self_id": 900000001,
+                        "message": [
+                            {"type": "at", "data": {"qq": "900000001"}},
+                            {"type": "text", "data": {"text": command}},
+                        ],
+                    }
+                )
 
-        self.assertEqual([], bridge.submitted)
-        self.assertEqual("send_group_msg", bridge.api_calls[-1][0])
-        self.assertIn("已切换会话模型", bridge.api_calls[-1][1]["message"])
+                self.assertEqual([], bridge.submitted)
+                self.assertEqual("send_group_msg", bridge.api_calls[-1][0])
+                self.assertIn("群聊只支持普通问题", bridge.api_calls[-1][1]["message"])
 
     def test_qq_help_lists_model_and_backend_commands(self) -> None:
         bridge = FakeQQBridge(self.temp_path)

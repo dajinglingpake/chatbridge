@@ -772,13 +772,7 @@ class QQOneBotBridge:
 
     @staticmethod
     def _is_group_control_command(text: str) -> bool:
-        cleaned = str(text or "").strip()
-        if not cleaned.startswith("/"):
-            return False
-        if cleaned.startswith("//"):
-            return True
-        command = cleaned.split(maxsplit=1)[0].lower()
-        return command not in {"/backend", "/model"}
+        return str(text or "").strip().startswith("/")
 
     def _resolve_message_permission_mode(self, sender_key: str, session_meta: Any) -> str:
         if self._is_group_sender(sender_key):
