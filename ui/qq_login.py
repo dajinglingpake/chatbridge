@@ -134,6 +134,9 @@ def install_qq_login_dialog(
                 last_error = ""
                 should_refresh_qr = True
                 while time.monotonic() < deadline:
+                    if current_login_snapshot().qq_logged_in:
+                        event_queue.put(("login_success", ""))
+                        return
                     try:
                         qr_url = fetch_napcat_login_qrcode_url(refresh=should_refresh_qr, timeout=3.0)
                         if qr_url:
@@ -168,6 +171,13 @@ def install_qq_login_dialog(
                     status.text = _tr(t, "ui.qq_login.qr_failed", "二维码获取失败")
                     status.classes(replace="cb-chip cb-chip-danger w-fit")
                     detail.text = message
+                    continue
+                if event_type == "login_success":
+                    snapshot = current_login_snapshot()
+                    if auto_close_enabled["value"]:
+                        finish_login_success(snapshot)
+                        return
+                    show_login_success(snapshot)
                     continue
                 status.text = _tr(t, "ui.qq_login.loading_qr", "正在获取二维码...")
                 status.classes(replace="cb-chip cb-chip-warn w-fit")
