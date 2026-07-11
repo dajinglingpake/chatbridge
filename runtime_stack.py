@@ -51,6 +51,8 @@ HUB_SCRIPT = APP_DIR / "agent_hub.py"
 BRIDGE_SCRIPT = APP_DIR / "weixin_hub_bridge.py"
 QQ_BRIDGE_SCRIPT = APP_DIR / "qq_onebot_bridge.py"
 ONEBOT_RUNTIME_COMMAND_ENV = "CHATBRIDGE_ONEBOT_RUNTIME_COMMAND"
+ONEBOT_PROFILE_ROOT_ENV = "CHATBRIDGE_ONEBOT_PROFILE_ROOT"
+ONEBOT_PROFILE_ISOLATION_ENV = "CHATBRIDGE_ONEBOT_ISOLATE_QQ_PROFILE"
 ONEBOT_API_BASE = "http://127.0.0.1:3000"
 ONEBOT_RUNTIME_PROCESS_MARKERS = ("llonebot", "lagrange.onebot", "lagrange-onebot", "chatbridge-start-lagrange", "chatbridge-start-napcat", "napcat", "napcatqq", "go-cqhttp")
 ONEBOT_RUNTIME_PORTS = {3000, 6099, 6100, 6101, 6102}
@@ -469,11 +471,30 @@ def _onebot_runtime_env(base_env: dict[str, str] | None = None) -> dict[str, str
     env = _managed_subprocess_env(base_env)
     env.setdefault("NAPCAT_WEBUI_SECRET_KEY", NAPCAT_WEBUI_TOKEN)
     env.setdefault("NAPCAT_WEBUI_PREFERRED_PORT", "6099")
+    _apply_onebot_profile_isolation(env)
     if not env.get(NAPCAT_QUICK_LOGIN_ENV, "").strip():
         quick_login_uin = _detect_napcat_quick_login_uin()
         if quick_login_uin:
             env[NAPCAT_QUICK_LOGIN_ENV] = quick_login_uin
     return env
+
+
+def _apply_onebot_profile_isolation(env: dict[str, str]) -> None:
+    if not IS_WINDOWS:
+        return
+    if str(env.get(ONEBOT_PROFILE_ISOLATION_ENV, "1")).strip().lower() in {"0", "false", "no", "off"}:
+        return
+    raw_root = str(env.get(ONEBOT_PROFILE_ROOT_ENV) or "").strip()
+    profile_root = Path(raw_root).expanduser() if raw_root else ONEBOT_RUNTIME_DIR / "qq-profile"
+    profile_root = profile_root.resolve()
+    user_root = profile_root / "User"
+    appdata = user_root / "AppData" / "Roaming"
+    localappdata = user_root / "AppData" / "Local"
+    for path in (appdata, localappdata):
+        path.mkdir(parents=True, exist_ok=True)
+    env["USERPROFILE"] = str(user_root)
+    env["APPDATA"] = str(appdata)
+    env["LOCALAPPDATA"] = str(localappdata)
 
 
 def _detect_napcat_quick_login_uin() -> str:

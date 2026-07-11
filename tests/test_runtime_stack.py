@@ -349,6 +349,44 @@ class RuntimeStackTests(unittest.TestCase):
 
         self.assertEqual("900000001", env["CHATBRIDGE_NAPCAT_QQ"])
 
+    def test_onebot_runtime_env_isolates_windows_qq_profile(self) -> None:
+        profile_root = self.root / "onebot-runtime" / "qq-profile"
+        with (
+            patch("runtime_stack.IS_WINDOWS", True),
+            patch("runtime_stack.ONEBOT_RUNTIME_DIR", self.root / "onebot-runtime"),
+            patch("runtime_stack._managed_subprocess_env", return_value={}),
+            patch("runtime_stack._detect_napcat_quick_login_uin", return_value=""),
+        ):
+            env = _onebot_runtime_env({})
+
+        self.assertEqual(str(profile_root / "User"), env["USERPROFILE"])
+        self.assertEqual(str(profile_root / "User" / "AppData" / "Roaming"), env["APPDATA"])
+        self.assertEqual(str(profile_root / "User" / "AppData" / "Local"), env["LOCALAPPDATA"])
+        self.assertTrue((profile_root / "User" / "AppData" / "Roaming").is_dir())
+        self.assertTrue((profile_root / "User" / "AppData" / "Local").is_dir())
+
+    def test_onebot_runtime_env_allows_custom_profile_root(self) -> None:
+        profile_root = self.root / "custom-profile"
+        with (
+            patch("runtime_stack.IS_WINDOWS", True),
+            patch("runtime_stack._managed_subprocess_env", return_value={"CHATBRIDGE_ONEBOT_PROFILE_ROOT": str(profile_root)}),
+            patch("runtime_stack._detect_napcat_quick_login_uin", return_value=""),
+        ):
+            env = _onebot_runtime_env({})
+
+        self.assertEqual(str(profile_root.resolve() / "User" / "AppData" / "Roaming"), env["APPDATA"])
+
+    def test_onebot_runtime_env_can_disable_profile_isolation(self) -> None:
+        with (
+            patch("runtime_stack.IS_WINDOWS", True),
+            patch("runtime_stack._managed_subprocess_env", return_value={"CHATBRIDGE_ONEBOT_ISOLATE_QQ_PROFILE": "0", "APPDATA": "C:/Users/me/AppData/Roaming"}),
+            patch("runtime_stack._detect_napcat_quick_login_uin", return_value=""),
+        ):
+            env = _onebot_runtime_env({})
+
+        self.assertEqual("C:/Users/me/AppData/Roaming", env["APPDATA"])
+        self.assertNotIn("LOCALAPPDATA", env)
+
     def test_discover_external_agents_skips_cmdline_for_unrelated_processes(self) -> None:
         unrelated = FakeProcess(101, "chrome.exe", ["chrome.exe", "--type=renderer"])
         codex = FakeProcess(202, "Codex.exe", ["Codex.exe", "resume", "session-123"])
