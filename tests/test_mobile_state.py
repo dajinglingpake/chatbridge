@@ -316,6 +316,224 @@ class MobileStateTests(unittest.TestCase):
             self.assertFalse(upload_root.exists())
         mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
 
+    def test_codex_view_image_results_keep_each_snapshot_without_copying_files(self) -> None:
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            upload_root = temp_path / "uploads"
+            sessions_root = temp_path / "codex" / "sessions"
+            sessions_root.mkdir(parents=True)
+            image_path = temp_path / "generated-contact-sheet.png"
+            image_path.write_bytes(b"latest-file-content")
+            first_snapshot = "data:image/png;base64,c25hcHNob3QtMQ=="
+            second_snapshot = "data:image/png;base64,c25hcHNob3QtMg=="
+            jsonl_path = sessions_root / "rollout-2026-07-09T01-43-06-thread-view-image-snapshots.jsonl"
+            events = [
+                {
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "验图完成"}],
+                        "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
+                    }
+                },
+                {
+                    "payload": {
+                        "type": "function_call",
+                        "name": "view_image",
+                        "call_id": "call-1",
+                        "arguments": json.dumps({"path": image_path.as_posix()}),
+                        "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
+                    }
+                },
+                {
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "call-1",
+                        "output": [{"type": "input_image", "image_url": first_snapshot}],
+                    }
+                },
+                {
+                    "payload": {
+                        "type": "function_call",
+                        "name": "view_image",
+                        "call_id": "call-2",
+                        "arguments": json.dumps({"path": image_path.as_posix()}),
+                        "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
+                    }
+                },
+                {
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "call-2",
+                        "output": [{"type": "input_image", "image_url": second_snapshot}],
+                    }
+                },
+            ]
+            jsonl_path.write_text("\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8")
+            thread = {
+                "id": "thread-view-image-snapshots",
+                "messages": [
+                    {"turn_id": "turn-1", "role": "user", "text": "验图"},
+                    {"turn_id": "turn-1", "role": "assistant", "text": "验图完成"},
+                ],
+            }
+
+            with (
+                patch("ui.mobile.MOBILE_UPLOAD_ROOT", upload_root),
+                patch("ui.mobile._codex_sessions_root", return_value=sessions_root),
+            ):
+                tasks = _codex_thread_task_payloads(thread)
+                previews = tasks[0]["output_image_previews"]
+                first_source = str(previews[0]["source"])
+                second_source = str(previews[1]["source"])
+                _empty, route, first_signature, first_thread, first_reference = first_source.split("/", 4)
+                _empty, route_again, second_signature, second_thread, second_reference = second_source.split("/", 4)
+                first_decoded = mobile._decode_signed_codex_image_reference(first_signature, first_thread, first_reference)
+                second_decoded = mobile._decode_signed_codex_image_reference(second_signature, second_thread, second_reference)
+
+                self.assertEqual("mobile-codex-image", route)
+                self.assertEqual(route, route_again)
+                self.assertEqual(2, len(previews))
+                self.assertNotEqual(first_source, second_source)
+                self.assertEqual("thread-view-image-snapshots", first_decoded[0])
+                self.assertEqual("thread-view-image-snapshots", second_decoded[0])
+                self.assertEqual(("image/png", b"snapshot-1"), mobile._codex_view_image_bytes(*first_decoded))
+                self.assertEqual(("image/png", b"snapshot-2"), mobile._codex_view_image_bytes(*second_decoded))
+                self.assertEqual(2, tasks[0]["output"].count("![generated-contact-sheet.png]"))
+
+            self.assertFalse(upload_root.exists())
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+
+    def test_codex_custom_tool_view_image_result_gets_mobile_preview(self) -> None:
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            sessions_root = temp_path / "codex" / "sessions"
+            sessions_root.mkdir(parents=True)
+            image_path = temp_path / "mobile-check.png"
+            image_path.write_bytes(b"current-file-content")
+            snapshot = "data:image/png;base64,Y3VzdG9tLXRvb2wtc25hcHNob3Q="
+            jsonl_path = sessions_root / "rollout-thread-custom-image.jsonl"
+            events = [
+                {
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "检查截图"}],
+                        "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
+                    }
+                },
+                {
+                    "payload": {
+                        "type": "custom_tool_call",
+                        "name": "exec",
+                        "call_id": "call-custom-image",
+                        "input": f'const result = await tools.view_image({{"path":"{image_path.as_posix()}"}}); image(result.image_url);',
+                        "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
+                    }
+                },
+                {
+                    "payload": {
+                        "type": "custom_tool_call_output",
+                        "call_id": "call-custom-image",
+                        "output": [{"type": "input_image", "image_url": snapshot}],
+                    }
+                },
+                {
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "检查完成"}],
+                        "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
+                    }
+                },
+            ]
+            jsonl_path.write_text("\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8")
+            thread = {
+                "id": "thread-custom-image",
+                "messages": [
+                    {"turn_id": "turn-1", "role": "user", "text": "验图"},
+                    {"turn_id": "turn-1", "role": "assistant", "text": "检查截图"},
+                ],
+            }
+
+            with patch("ui.mobile._codex_sessions_root", return_value=sessions_root):
+                tasks = _codex_thread_task_payloads(thread)
+                preview = tasks[0]["output_image_previews"][0]
+                source = str(preview["source"])
+                _empty, route, signature, encoded_thread, encoded_reference = source.split("/", 4)
+                decoded = mobile._decode_signed_codex_image_reference(signature, encoded_thread, encoded_reference)
+
+                self.assertEqual("mobile-codex-image", route)
+                self.assertEqual("mobile-check.png", preview["label"])
+                self.assertEqual(("image/png", b"custom-tool-snapshot"), mobile._codex_view_image_bytes(*decoded))
+                self.assertEqual(
+                    [
+                        {"kind": "text", "text": "检查截图"},
+                        {"kind": "custom_tool_image", "source": source, "label": "mobile-check.png"},
+                        {"kind": "text", "text": "检查完成"},
+                    ],
+                    tasks[0]["output_segments"],
+                )
+
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+
+    def test_codex_function_tool_image_result_gets_mobile_preview(self) -> None:
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+        with TemporaryDirectory() as temp_dir:
+            sessions_root = Path(temp_dir) / "codex" / "sessions"
+            sessions_root.mkdir(parents=True)
+            snapshot = "data:image/png;base64,YnJvd3Nlci10b29sLXNuaXBwZXQ="
+            jsonl_path = sessions_root / "rollout-thread-browser-image.jsonl"
+            events = [
+                {
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "浏览器检查完成"}],
+                        "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
+                    }
+                },
+                {
+                    "payload": {
+                        "type": "function_call",
+                        "name": "js",
+                        "call_id": "call-browser-image",
+                        "arguments": json.dumps({"code": "await page.screenshot()"}),
+                        "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
+                    }
+                },
+                {
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "call-browser-image",
+                        "output": [{"type": "input_image", "image_url": snapshot}],
+                    }
+                },
+            ]
+            jsonl_path.write_text("\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8")
+            thread = {
+                "id": "thread-browser-image",
+                "messages": [
+                    {"turn_id": "turn-1", "role": "user", "text": "验图"},
+                    {"turn_id": "turn-1", "role": "assistant", "text": "浏览器检查完成"},
+                ],
+            }
+
+            with patch("ui.mobile._codex_sessions_root", return_value=sessions_root):
+                tasks = _codex_thread_task_payloads(thread)
+                source = str(tasks[0]["output_image_previews"][0]["source"])
+                _empty, _route, signature, encoded_thread, encoded_reference = source.split("/", 4)
+                decoded = mobile._decode_signed_codex_image_reference(signature, encoded_thread, encoded_reference)
+
+                self.assertEqual("markdown_image", tasks[0]["output_image_previews"][0]["kind"])
+                self.assertIn("![image]", str(tasks[0]["output"]))
+                self.assertEqual([], tasks[0]["output_segments"])
+                self.assertEqual(("image/png", b"browser-tool-snippet"), mobile._codex_view_image_bytes(*decoded))
+
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+
     def test_codex_thread_payloads_use_turn_uuid_time_when_messages_have_no_at(self) -> None:
         turn_id = "019f28de-979b-7f91-aa60-f1ad2247bb4c"
         expected = datetime.fromtimestamp(int(turn_id.replace("-", "")[:12], 16) / 1000).isoformat(timespec="seconds")

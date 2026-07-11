@@ -17,9 +17,6 @@ from core.view_models import WebConsoleViewModel
 
 
 Translator = Callable[..., str]
-STREAM_AUTO_HISTORY_LIMIT = 60
-
-
 class UIEventLike(Protocol):
     value: object
 
@@ -785,7 +782,7 @@ def _stream_rewrite_markdown_links(value: str, copy_title: str) -> str:
 
 def _stream_markdown_image_destination(destination: str) -> str:
     href = _stream_markdown_href_candidate(destination)
-    if href.lower().startswith(("data:image/", "http://", "https://", "/mobile-upload/")):
+    if href.lower().startswith(("data:image/", "http://", "https://", "/mobile-upload/", "/mobile-codex-image/")):
         return href
     try:
         from ui.mobile import _image_preview_payload
@@ -1009,6 +1006,31 @@ def _stream_image_previews(value: object) -> list[dict[str, str]]:
     return previews
 
 
+def _stream_output_segments(value: object) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    segments: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "").strip()
+        if kind == "text":
+            text = _stream_text(item.get("text"), limit=20000)
+            if text:
+                segments.append({"kind": kind, "text": text})
+        elif kind == "custom_tool_image":
+            source = str(item.get("source") or "").strip()
+            if source:
+                segments.append(
+                    {
+                        "kind": kind,
+                        "source": source,
+                        "label": str(item.get("label") or "").strip(),
+                    }
+                )
+    return segments
+
+
 def _stream_activity_items(value: object) -> list[dict[str, object]]:
     if not isinstance(value, list):
         return []
@@ -1071,7 +1093,7 @@ def _stream_has_codex_activity(items: list[dict[str, object]]) -> bool:
     return any(str(item.get("event") or "").startswith("codex_") for item in items)
 
 def _stream_image_is_previewable(value: str) -> bool:
-    return value.lower().startswith(("data:image/", "http://", "https://", "/mobile-upload/", "/mobile-local-image/"))
+    return value.lower().startswith(("data:image/", "http://", "https://", "/mobile-upload/", "/mobile-local-image/", "/mobile-codex-image/"))
 
 
 def _stream_attachment_label(value: str) -> str:
@@ -1084,6 +1106,17 @@ def _stream_lightbox_props(source: str, label: str, t: Translator) -> str:
     encoded_label = quote(label, safe="")
     preview_title = quote(_tr(t, "ui.web.mobile.open_image_preview", "打开图片预览"), safe="")
     return f"data-lightbox-src={encoded_source} data-lightbox-label={encoded_label} title={preview_title} role=button tabindex=0"
+
+
+def _render_stream_custom_tool_image(ui: UIFactoryLike, t: Translator, preview: dict[str, str]) -> None:
+    preview_source = str(preview.get("source") or "").strip()
+    if not preview_source:
+        return
+    preview_label = str(preview.get("label") or "").strip() or _stream_attachment_label(preview_source)
+    with ui.element("details").classes("cb-stream-tool-image-details"):
+        with ui.element("summary").classes("cb-stream-tool-image-summary"):
+            ui.label(_tr(t, "ui.web.mobile.view_image", "查看图片"))
+        ui.image(preview_source).props(_stream_lightbox_props(preview_source, preview_label, t)).classes("cb-stream-image-attachment cb-stream-image-lightbox-trigger")
 
 
 def _stream_context_left_percent(value: object) -> int | None:
@@ -1342,33 +1375,9 @@ def _render_mobile_stream_messages(
     displayed_session_count = int(context.get("displayed_session_count") or 0)
     session_total_count = int(context.get("session_total_count") or 0)
     latest_task_id = str(context.get("latest_task_id") or "")
-    should_auto_load_older = has_older_session_tasks and displayed_session_count < STREAM_AUTO_HISTORY_LIMIT
 
     with ui.element("div").props("data-stream-pending=1").classes("cb-agent-stream cb-chat-scroll"):
         with ui.column().classes("cb-agent-stream-content"):
-            if should_auto_load_older:
-                ui.button(
-                    "",
-                    on_click=lambda session_name=active_session: on_load_older(session_name),
-                    icon="expand_less",
-                ).props(
-                    "flat dense data-load-older-ready=1 data-stream-auto-load-older=1 aria-hidden=true tabindex=-1"
-                ).classes("cb-stream-auto-load-older-trigger hidden").on(
-                    "click",
-                    js_handler=f"""
-                    () => {{
-                        const scroller = document.querySelector('.cb-agent-stream');
-                        if (!scroller) return;
-                        window.__cbStreamLoadOlderAnchor = {{
-                            key: {active_session!r},
-                            scrollHeight: scroller.scrollHeight,
-                            scrollTop: scroller.scrollTop,
-                            stickToBottom: Math.max(0, scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight) <= 120
-                                || Date.now() < Number(window.__cbStreamForceBottomUntil || 0),
-                        }};
-                    }}
-                    """,
-                )
             if has_older_session_tasks:
                 load_older_label = _tr(
                     t,
@@ -1412,9 +1421,12 @@ def _render_mobile_stream_messages(
                     image_items = _stream_image_items(task.get("images"))
                     image_previews = _stream_image_previews(task.get("image_previews"))
                     output_image_previews = _stream_image_previews(task.get("output_image_previews"))
+                    output_segments = _stream_output_segments(task.get("output_segments"))
                     error_text = _stream_text(task.get("error"), limit=8000)
                     progress_text = _stream_text(task.get("progress_text"), limit=4000)
                     output_text = _stream_text(task.get("output"), limit=20000)
+                    if error_text:
+                        output_segments = []
                     raw_activity_items = task.get("activity_items")
                     has_codex_activity = _stream_has_codex_activity(raw_activity_items if isinstance(raw_activity_items, list) else [])
                     activity_items = _stream_activity_items(raw_activity_items)
@@ -1430,7 +1442,8 @@ def _render_mobile_stream_messages(
                     if not assistant_text and status in {"running", "queued"}:
                         assistant_text = _tr(t, "ui.web.mobile.stream_working", "正在处理")
                         is_working_placeholder = True
-                    turn_classes = "cb-stream-turn cb-stream-turn-with-footer" if assistant_text or should_show_activity else "cb-stream-turn"
+                    assistant_has_content = bool(assistant_text or output_segments)
+                    turn_classes = "cb-stream-turn cb-stream-turn-with-footer" if assistant_has_content or should_show_activity else "cb-stream-turn"
                     with ui.element("div").classes(turn_classes):
                         if prompt_text:
                             with ui.element("div").classes("cb-stream-message cb-stream-user"):
@@ -1459,10 +1472,10 @@ def _render_mobile_stream_messages(
                                             icon="content_copy",
                                             color=None,
                                         ).props("flat dense round").classes("cb-stream-copy-button")
-                        if assistant_text or should_show_activity:
+                        if assistant_has_content or should_show_activity:
                             with ui.element("div").classes("cb-stream-message cb-stream-assistant"):
                                 with ui.element("div").classes("cb-stream-assistant-content"):
-                                    if progress_text and (output_text or error_text):
+                                    if progress_text and (output_text or error_text or output_segments):
                                         with ui.element("div").classes("cb-stream-tool-block cb-stream-progress"):
                                             ui.label(_tr(t, "ui.web.mobile.stream_progress", "进度")).classes("cb-stream-tool-label")
                                             ui.markdown(_stream_markdown(progress_text, t)).classes("cb-stream-tool-body cb-stream-markdown")
@@ -1492,16 +1505,27 @@ def _render_mobile_stream_messages(
                                     body_classes = "cb-stream-body"
                                     if status == "failed" and error_text:
                                         body_classes = f"{body_classes} cb-stream-error"
-                                    elif progress_text and not output_text:
+                                    elif progress_text and not output_text and not output_segments:
                                         body_classes = f"{body_classes} cb-stream-progress"
-                                    if assistant_text:
+                                    if output_segments:
+                                        for segment in output_segments:
+                                            segment_kind = str(segment.get("kind") or "")
+                                            if segment_kind == "text":
+                                                ui.markdown(_stream_markdown(str(segment.get("text") or ""), t)).classes(f"{body_classes} cb-stream-markdown")
+                                            elif segment_kind == "custom_tool_image":
+                                                with ui.element("div").classes("cb-stream-output-tool-image"):
+                                                    _render_stream_custom_tool_image(ui, t, segment)
+                                    elif assistant_text:
                                         output_link_previews = [preview for preview in output_image_previews if preview.get("kind") != "markdown_image"]
                                         if output_link_previews:
                                             with ui.element("div").classes("cb-stream-attachments"):
                                                 for preview in output_link_previews:
                                                     preview_source = preview.get("source") or ""
                                                     preview_label = preview.get("label") or _stream_attachment_label(preview_source)
-                                                    if _stream_image_is_previewable(preview_source) or preview_source.startswith(("/mobile-upload/", "/mobile-local-image/")):
+                                                    preview_kind = str(preview.get("kind") or "")
+                                                    if preview_kind == "custom_tool_image":
+                                                        _render_stream_custom_tool_image(ui, t, preview)
+                                                    elif _stream_image_is_previewable(preview_source) or preview_source.startswith(("/mobile-upload/", "/mobile-local-image/")):
                                                         ui.image(preview_source).props(_stream_lightbox_props(preview_source, preview_label, t)).classes("cb-stream-image-attachment cb-stream-image-lightbox-trigger")
                                         markdown = ui.markdown(_stream_markdown(assistant_text, t)).classes(f"{body_classes} cb-stream-markdown")
                                         if status in {"running", "queued"}:
@@ -1527,12 +1551,13 @@ def _render_mobile_stream_messages(
                                                         icon="stop",
                                                     ).props(f'flat dense round title="{stop_label}" aria-label="{stop_label}" data-task-id={task_id}').classes("cb-stream-stop-button")
                                             else:
-                                                ui.button(
-                                                    "",
-                                                    on_click=lambda value=assistant_text: on_copy_text(value),
-                                                    icon="content_copy",
-                                                    color=None,
-                                                ).props("flat dense round").classes("cb-stream-copy-button")
+                                                if assistant_text:
+                                                    ui.button(
+                                                        "",
+                                                        on_click=lambda value=assistant_text: on_copy_text(value),
+                                                        icon="content_copy",
+                                                        color=None,
+                                                    ).props("flat dense round").classes("cb-stream-copy-button")
                                                 _render_stream_footer_label(
                                                     ui,
                                                     _stream_footer_label(task, status, t),

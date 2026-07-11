@@ -33,9 +33,19 @@ ASYNC_SERVICE_ACTIONS = {
     "restart-qq-stack",
 }
 STREAM_HISTORY_PAGE_SIZE = 20
+STREAM_CODEX_HISTORY_INITIAL_SIZE = 60
 STREAM_SIDEBAR_PAGE_SIZE = 40
 WEB_THEME_OPTIONS = ("dark", "light", "forest")
 STREAM_UI_LOG_PATH = APP_DIR / ".runtime" / "logs" / "ui_stream_refresh.jsonl"
+
+
+def _stream_initial_history_limit(session_name: str) -> int:
+    return (
+        STREAM_CODEX_HISTORY_INITIAL_SIZE
+        if codex_thread_id_from_session_name(str(session_name or "").strip())
+        else STREAM_HISTORY_PAGE_SIZE
+    )
+
 
 def _append_stream_ui_log(event: str, **fields: object) -> None:
     try:
@@ -1194,6 +1204,37 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         .cb-stream-image-attachment .q-img__image {
             object-fit: contain !important;
         }
+        .cb-stream-tool-image-details {
+            width: min(72vw, 20rem);
+            max-width: 100%;
+        }
+        .cb-stream-output-tool-image {
+            margin: 0.4rem 0 0.6rem;
+        }
+        .cb-stream-tool-image-summary {
+            display: flex;
+            align-items: center;
+            padding: 0.3rem 0;
+            cursor: pointer;
+            color: var(--cb-accent-bright);
+            font-weight: 600;
+            list-style: none;
+        }
+        .cb-stream-tool-image-summary::-webkit-details-marker {
+            display: none;
+        }
+        .cb-stream-tool-image-summary::before {
+            content: ">";
+            display: inline-block;
+            margin-right: 0.4rem;
+            transition: transform 120ms ease;
+        }
+        .cb-stream-tool-image-details[open] .cb-stream-tool-image-summary::before {
+            transform: rotate(90deg);
+        }
+        .cb-stream-tool-image-details[open] .cb-stream-tool-image-summary {
+            margin-bottom: 0.5rem;
+        }
         .cb-stream-image-lightbox-trigger {
             cursor: zoom-in;
             transition: transform 120ms ease, border-color 120ms ease;
@@ -2300,13 +2341,14 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
 
     def _stream_session_task_limit(session_name: str) -> int:
         cleaned_session_name = str(session_name or "").strip() or "default"
+        initial_limit = _stream_initial_history_limit(cleaned_session_name)
         limits = state["stream_session_task_limits"]
         if not isinstance(limits, dict):
-            return STREAM_HISTORY_PAGE_SIZE
+            return initial_limit
         try:
-            return max(STREAM_HISTORY_PAGE_SIZE, int(limits.get(cleaned_session_name) or STREAM_HISTORY_PAGE_SIZE))
+            return max(initial_limit, int(limits.get(cleaned_session_name) or initial_limit))
         except (TypeError, ValueError):
-            return STREAM_HISTORY_PAGE_SIZE
+            return initial_limit
 
     def _stream_global_task_limit(session_name: str) -> int:
         return 0 if str(session_name or "").strip() else 1
@@ -3553,33 +3595,6 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     document.querySelector('.cb-agent-panel')?.removeAttribute('data-stream-pending');
                     document.querySelector('.cb-agent-stream')?.removeAttribute('data-stream-pending');
                 };
-                const maybeLoadOlder = (scroller) => {
-                    const trigger = document.querySelector('[data-stream-auto-load-older="1"]');
-                    if (!trigger) return;
-                    const now = Date.now();
-                    const nextAllowedAt = Math.max(
-                        Number(window.__cbStreamSuppressLoadOlderUntil || 0),
-                        Number(window.__cbStreamAutoLoadOlderUntil || 0),
-                    );
-                    if (now < nextAllowedAt) {
-                        window.clearTimeout(Number(window.__cbStreamAutoLoadOlderTimer || 0));
-                        window.__cbStreamAutoLoadOlderTimer = window.setTimeout(() => {
-                            const nextScroller = document.querySelector('.cb-agent-stream');
-                            if (nextScroller) maybeLoadOlder(nextScroller);
-                        }, Math.max(100, nextAllowedAt - now + 20));
-                        return;
-                    }
-                    if (scroller.scrollHeight <= scroller.clientHeight + 2 || scroller.scrollTop > 80) return;
-                    const key = window.__cbStreamActiveKey || window.__cbStreamDesiredActiveKey || activeKey || readRenderedActiveKey();
-                    window.__cbStreamAutoLoadOlderUntil = now + 1500;
-                    window.__cbStreamLoadOlderAnchor = {
-                        key,
-                        scrollHeight: scroller.scrollHeight,
-                        scrollTop: scroller.scrollTop,
-                        stickToBottom: readDelta(scroller) <= nearBottomLimit || Date.now() < Number(window.__cbStreamForceBottomUntil || 0),
-                    };
-                    trigger.click();
-                };
                 const setupFooterLabelReveal = () => {
                     if (window.__cbStreamFooterRevealDelegateReady === '1') return;
                     window.__cbStreamFooterRevealDelegateReady = '1';
@@ -4310,7 +4325,6 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                         window.__cbStreamWasNearBottom = state.nearBottom;
                         window.__cbStreamUserScrolledAway = state.userScrolledAway;
                         window.__cbStreamComposerFocusedKey = '';
-                        window.__cbStreamSuppressLoadOlderUntil = Date.now() + 800;
                         window.__cbStreamForceBottomUntil = Date.now() + 1200;
                     }
                     if (scroller.dataset.cbScrollReady !== '1') {
@@ -4344,7 +4358,6 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                         }
                         delete window.__cbStreamLoadOlderAnchor;
                         updateScrollState(scroller);
-                        maybeLoadOlder(scroller);
                         revealPositionedStream();
                         return;
                     }
@@ -4352,7 +4365,6 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                         state.delta = 0;
                         state.nearBottom = true;
                         state.userScrolledAway = false;
-                        window.__cbStreamSuppressLoadOlderUntil = Date.now() + 800;
                     }
                     const shouldStickToBottom = forceBottom || Date.now() < Number(window.__cbStreamForceBottomUntil || 0) || state.nearBottom === true || !Number.isFinite(previousDelta);
                     if (preserveTop && !shouldStickToBottom) {
@@ -4361,7 +4373,6 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                         state.delta = readDelta(scroller);
                         state.nearBottom = false;
                         state.userScrolledAway = true;
-                        window.__cbStreamSuppressLoadOlderUntil = Date.now() + 800;
                         updateScrollState(scroller);
                         revealPositionedStream();
                         return;
@@ -4373,7 +4384,6 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                         scroller.scrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight - previousDelta);
                     }
                     updateScrollState(scroller);
-                    maybeLoadOlder(scroller);
                     revealPositionedStream();
                 };
                 const focusComposerIfNeeded = () => {

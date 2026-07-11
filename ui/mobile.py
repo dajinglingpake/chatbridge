@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 from dataclasses import dataclass
 import hashlib
 import heapq
@@ -22,7 +23,7 @@ from urllib.parse import quote, unquote, urlsplit
 
 import qrcode
 from starlette.requests import Request
-from starlette.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response, StreamingResponse
 
 from bridge_config import APP_DIR
 from core.app_service import (
@@ -499,6 +500,17 @@ def install_mobile_routes(app: Any, *, host: str, port: int) -> None:
             return PlainTextResponse("not found", status_code=404)
         media_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
         return FileResponse(target, media_type=media_type)
+
+    @app.get("/mobile-codex-image/{signature}/{encoded_thread_id}/{encoded_reference}")
+    async def mobile_codex_image(signature: str, encoded_thread_id: str, encoded_reference: str):
+        decoded = _decode_signed_codex_image_reference(signature, encoded_thread_id, encoded_reference)
+        if decoded is None:
+            return PlainTextResponse("not found", status_code=404)
+        media = _codex_view_image_bytes(*decoded)
+        if media is None:
+            return PlainTextResponse("not found", status_code=404)
+        media_type, content = media
+        return Response(content=content, media_type=media_type)
 
     @app.get("/api/mobile/events")
     async def mobile_events(request: Request) -> StreamingResponse:
@@ -1227,7 +1239,20 @@ def _payload_activity_signature(value: object) -> tuple[int, str, str, int]:
     )
 
 
-def _payload_task_signature_part(task: dict[str, object]) -> tuple[str, str, str, str, str, int, int, int, str, int, str, int, str, tuple[int, str, str, int]]:
+def _payload_output_segments_signature(value: object) -> tuple[tuple[str, str, str], ...]:
+    segments = value if isinstance(value, list) else []
+    return tuple(
+        (
+            str(segment.get("kind") or ""),
+            str(segment.get("text") or ""),
+            str(segment.get("source") or ""),
+        )
+        for segment in segments
+        if isinstance(segment, dict)
+    )
+
+
+def _payload_task_signature_part(task: dict[str, object]) -> tuple[object, ...]:
     image_previews = task.get("image_previews") if isinstance(task.get("image_previews"), list) else []
     output_image_previews = task.get("output_image_previews") if isinstance(task.get("output_image_previews"), list) else []
     return (
@@ -1244,6 +1269,7 @@ def _payload_task_signature_part(task: dict[str, object]) -> tuple[str, str, str
         str(image_previews[-1].get("source") or "") if image_previews and isinstance(image_previews[-1], dict) else "",
         len(output_image_previews),
         str(output_image_previews[-1].get("source") or "") if output_image_previews and isinstance(output_image_previews[-1], dict) else "",
+        _payload_output_segments_signature(task.get("output_segments")),
         _payload_activity_signature(task.get("activity_items")),
     )
 
@@ -1278,6 +1304,42 @@ def _decode_signed_local_image_path(signature: str, encoded_path: str) -> Path |
         return None
     return path
 
+
+def _encode_signed_reference_part(value: str) -> str:
+    return base64.urlsafe_b64encode(value.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _decode_signed_reference_part(value: str) -> str | None:
+    try:
+        padding = "=" * (-len(value) % 4)
+        return base64.urlsafe_b64decode(f"{value}{padding}".encode("ascii")).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return None
+
+
+def _codex_image_reference_signature(thread_id: str, reference: str) -> str:
+    token = _load_or_create_access_token()
+    value = f"codex-image:{thread_id}:{reference}"
+    return hmac.new(token.encode("utf-8"), value.encode("utf-8"), hashlib.sha256).hexdigest()[:24]
+
+
+def _signed_codex_image_source(thread_id: str, reference: str) -> str:
+    encoded_thread_id = _encode_signed_reference_part(thread_id)
+    encoded_reference = _encode_signed_reference_part(reference)
+    signature = _codex_image_reference_signature(thread_id, reference)
+    return f"/mobile-codex-image/{signature}/{encoded_thread_id}/{encoded_reference}"
+
+
+def _decode_signed_codex_image_reference(signature: str, encoded_thread_id: str, encoded_reference: str) -> tuple[str, str] | None:
+    thread_id = _decode_signed_reference_part(encoded_thread_id)
+    reference = _decode_signed_reference_part(encoded_reference)
+    if not thread_id or not reference or not re.fullmatch(r"[A-Za-z0-9_.-]+", thread_id):
+        return None
+    if not hmac.compare_digest(str(signature or ""), _codex_image_reference_signature(thread_id, reference)):
+        return None
+    return thread_id, reference
+
+
 def _image_preview_payload(value: str) -> dict[str, str]:
     cleaned = str(value or "").strip()
     label = cleaned.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] or cleaned
@@ -1285,7 +1347,7 @@ def _image_preview_payload(value: str) -> dict[str, str]:
     rewritten_upload = _local_mobile_upload_source(cleaned)
     if rewritten_upload:
         return {"source": rewritten_upload, "label": label}
-    if lowered.startswith(("/mobile-upload/", "/mobile-local-image/")):
+    if lowered.startswith(("/mobile-upload/", "/mobile-local-image/", "/mobile-codex-image/")):
         return {"source": cleaned, "label": label}
     if lowered.startswith(("data:image/", "http://", "https://")):
         return {"source": cleaned, "label": label}
@@ -1369,10 +1431,10 @@ def _find_codex_rollout_jsonl(thread_id: str) -> Path | None:
         return None
     return max(matches, key=lambda path: path.stat().st_mtime_ns)
 
-def _codex_raw_view_image_payload(thread_id: str) -> dict[str, dict[str, object]]:
+def _codex_raw_view_image_payload(thread_id: str) -> dict[str, object]:
     cleaned = str(thread_id or "").strip()
     if not cleaned:
-        return {"previews": {}, "outputs": {}}
+        return {"previews": {}, "outputs": {}, "output_segments": {}, "image_refs": {}}
     path = _find_codex_rollout_jsonl(cleaned)
     try:
         path_signature = (str(path), path.stat().st_mtime_ns, path.stat().st_size) if path else ("", 0, 0)
@@ -1387,61 +1449,168 @@ def _codex_raw_view_image_payload(thread_id: str) -> dict[str, dict[str, object]
                 str(turn_id): str(output)
                 for turn_id, output in (cached.get("outputs") or {}).items()
             } if isinstance(cached.get("outputs"), dict) else {},
+            "output_segments": _copy_codex_output_segments_by_turn(cached.get("output_segments")),
+            "image_refs": _copy_codex_image_refs(cached.get("image_refs")),
         }
     previews_by_turn: dict[str, list[dict[str, str]]] = {}
-    seen_by_turn: dict[str, set[str]] = {}
-    events_by_turn: dict[str, list[str]] = {}
-    text_seen_by_turn: set[str] = set()
+    events_by_turn: dict[str, list[dict[str, object]]] = {}
+    image_events: list[dict[str, object]] = []
+    pending_image_events: dict[str, dict[str, object]] = {}
+    image_refs: dict[str, dict[str, object]] = {}
     if path is not None:
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
+            with path.open("rb") as handle:
+                while True:
+                    line_offset = handle.tell()
+                    line = handle.readline()
+                    if not line:
+                        break
+                    try:
+                        item = json.loads(line)
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        continue
+                    payload = item.get("payload") if isinstance(item, dict) and isinstance(item.get("payload"), dict) else {}
+                    metadata = payload.get("internal_chat_message_metadata_passthrough")
+                    turn_id = str(metadata.get("turn_id") or "").strip() if isinstance(metadata, dict) else ""
+                    event_type = str(payload.get("type") or "")
+                    if event_type == "message" and payload.get("role") == "assistant":
+                        if not turn_id:
+                            continue
+                        text = _codex_raw_message_text(payload)
+                        if text:
+                            events_by_turn.setdefault(turn_id, []).append({"text": text})
+                        continue
+                    if event_type == "function_call" and payload.get("name") == "view_image":
+                        if not turn_id:
+                            continue
+                        arguments = payload.get("arguments")
+                        if isinstance(arguments, str):
+                            try:
+                                arguments = json.loads(arguments)
+                            except json.JSONDecodeError:
+                                arguments = {}
+                        image_path = str(arguments.get("path") or "").strip() if isinstance(arguments, dict) else ""
+                        event = {"turn_id": turn_id, "image_path": image_path, "previews": []}
+                        events_by_turn.setdefault(turn_id, []).append(event)
+                        image_events.append(event)
+                        event["registered"] = True
+                        call_id = str(payload.get("call_id") or "").strip()
+                        if call_id:
+                            pending_image_events[call_id] = event
+                        continue
+                    if event_type == "function_call":
+                        if not turn_id:
+                            continue
+                        call_id = str(payload.get("call_id") or "").strip()
+                        if not call_id:
+                            continue
+                        pending_image_events[call_id] = {
+                            "turn_id": turn_id,
+                            "image_path": "",
+                            "previews": [],
+                        }
+                        continue
+                    if event_type == "custom_tool_call":
+                        if not turn_id:
+                            continue
+                        call_id = str(payload.get("call_id") or "").strip()
+                        if not call_id:
+                            continue
+                        image_path = _codex_custom_tool_view_image_path(payload)
+                        event = {
+                            "turn_id": turn_id,
+                            "image_path": image_path,
+                            "kind": "custom_tool_image",
+                            "previews": [],
+                        }
+                        if image_path:
+                            events_by_turn.setdefault(turn_id, []).append(event)
+                            image_events.append(event)
+                            event["registered"] = True
+                        pending_image_events[call_id] = event
+                        continue
+                    if event_type not in {"function_call_output", "custom_tool_call_output"}:
+                        continue
+                    call_id = str(payload.get("call_id") or "").strip()
+                    event = pending_image_events.get(call_id)
+                    if event is None:
+                        continue
+                    previews = _codex_view_image_output_previews(
+                        thread_id=cleaned,
+                        call_id=call_id,
+                        output=payload.get("output"),
+                        image_path=str(event.get("image_path") or ""),
+                        rollout_path=path,
+                        line_offset=line_offset,
+                        image_refs=image_refs,
+                    )
+                    if previews:
+                        preview_kind = str(event.get("kind") or "").strip()
+                        if preview_kind:
+                            for preview in previews:
+                                preview["kind"] = preview_kind
+                        event["previews"] = previews
+                        if not event.get("registered"):
+                            event_turn_id = str(event.get("turn_id") or "").strip()
+                            if event_turn_id:
+                                events_by_turn.setdefault(event_turn_id, []).append(event)
+                                image_events.append(event)
+                                event["registered"] = True
+                        pending_image_events.pop(call_id, None)
         except OSError:
-            lines = []
-        for line in lines:
-            try:
-                item = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            payload = item.get("payload") if isinstance(item, dict) and isinstance(item.get("payload"), dict) else {}
-            metadata = payload.get("internal_chat_message_metadata_passthrough")
-            turn_id = str(metadata.get("turn_id") or "").strip() if isinstance(metadata, dict) else ""
-            if not turn_id:
-                continue
-            if payload.get("type") == "message" and payload.get("role") == "assistant":
-                text = _codex_raw_message_text(payload)
-                if text:
-                    events_by_turn.setdefault(turn_id, []).append(text)
-                    text_seen_by_turn.add(turn_id)
-                continue
-            if payload.get("type") != "function_call" or payload.get("name") != "view_image":
-                continue
-            arguments = payload.get("arguments")
-            if isinstance(arguments, str):
-                try:
-                    arguments = json.loads(arguments)
-                except json.JSONDecodeError:
-                    arguments = {}
-            if not isinstance(arguments, dict):
-                continue
-            image_path = str(arguments.get("path") or "").strip()
-            if not image_path:
-                continue
-            preview = _image_preview_payload(image_path)
-            source = str(preview.get("source") or "").strip()
-            if not source:
-                continue
-            seen = seen_by_turn.setdefault(turn_id, set())
-            if source in seen:
-                continue
-            seen.add(source)
-            preview["kind"] = "view_image"
-            previews_by_turn.setdefault(turn_id, []).append(preview)
-            events_by_turn.setdefault(turn_id, []).append(_markdown_image_for_preview(preview))
-    outputs_by_turn = {
-        turn_id: "\n\n".join(part for part in parts if str(part).strip()).strip()
-        for turn_id, parts in events_by_turn.items()
-        if turn_id in text_seen_by_turn and previews_by_turn.get(turn_id)
-    }
+            pass
+    for event in image_events:
+        previews = event.get("previews") if isinstance(event.get("previews"), list) else []
+        if not previews:
+            image_path = str(event.get("image_path") or "").strip()
+            fallback = _image_preview_payload(image_path) if image_path else {}
+            if str(fallback.get("source") or "").strip():
+                fallback["kind"] = str(event.get("kind") or "view_image")
+                previews = [fallback]
+                event["previews"] = previews
+        turn_id = str(event.get("turn_id") or "").strip()
+        for preview in previews:
+            if isinstance(preview, dict):
+                previews_by_turn.setdefault(turn_id, []).append(dict(preview))
+    outputs_by_turn: dict[str, str] = {}
+    output_segments_by_turn: dict[str, list[dict[str, str]]] = {}
+    for turn_id, events in events_by_turn.items():
+        if not previews_by_turn.get(turn_id):
+            continue
+        parts: list[str] = []
+        output_segments: list[dict[str, str]] = []
+        has_custom_tool_image = False
+        for event in events:
+            text = str(event.get("text") or "").strip()
+            if text:
+                parts.append(text)
+                output_segments.append({"kind": "text", "text": text})
+            previews = event.get("previews") if isinstance(event.get("previews"), list) else []
+            for preview in previews:
+                if not isinstance(preview, dict):
+                    continue
+                if str(preview.get("kind") or "") == "custom_tool_image":
+                    source = str(preview.get("source") or "").strip()
+                    if not source:
+                        continue
+                    output_segments.append(
+                        {
+                            "kind": "custom_tool_image",
+                            "source": source,
+                            "label": str(preview.get("label") or "image").strip() or "image",
+                        }
+                    )
+                    has_custom_tool_image = True
+                    continue
+                markdown_image = _markdown_image_for_preview(preview)
+                if markdown_image:
+                    parts.append(markdown_image)
+                    output_segments.append({"kind": "text", "text": markdown_image})
+        output = "\n\n".join(part for part in parts if part).strip()
+        if output:
+            outputs_by_turn[turn_id] = output
+        if has_custom_tool_image:
+            output_segments_by_turn[turn_id] = output_segments
     _CODEX_VIEW_IMAGE_PREVIEW_CACHE[cleaned] = {
         "signature": path_signature,
         "previews": {
@@ -1449,8 +1618,138 @@ def _codex_raw_view_image_payload(thread_id: str) -> dict[str, dict[str, object]
             for turn_id, previews in previews_by_turn.items()
         },
         "outputs": dict(outputs_by_turn),
+        "output_segments": _copy_codex_output_segments_by_turn(output_segments_by_turn),
+        "image_refs": _copy_codex_image_refs(image_refs),
     }
-    return {"previews": previews_by_turn, "outputs": outputs_by_turn}
+    return {
+        "previews": previews_by_turn,
+        "outputs": outputs_by_turn,
+        "output_segments": output_segments_by_turn,
+        "image_refs": image_refs,
+    }
+
+
+def _codex_custom_tool_view_image_path(payload: dict[str, object]) -> str:
+    source = str(payload.get("input") or "")
+    match = re.search(
+        r"(?:tools\.)?view_image\s*\(\s*\{\s*(?:[\"']path[\"']|path)\s*:\s*([\"'])(.*?)\1",
+        source,
+    )
+    return str(match.group(2) or "").strip() if match else ""
+
+
+def _codex_view_image_output_previews(
+    *,
+    thread_id: str,
+    call_id: str,
+    output: object,
+    image_path: str,
+    rollout_path: Path,
+    line_offset: int,
+    image_refs: dict[str, dict[str, object]],
+) -> list[dict[str, str]]:
+    previews: list[dict[str, str]] = []
+    label = image_path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] or "image"
+    for image_index, image_url in enumerate(_codex_output_image_urls(output)):
+        if image_url.lower().startswith("data:image/"):
+            reference = f"{call_id}:{line_offset}:{image_index}"
+            image_refs[reference] = {
+                "path": str(rollout_path),
+                "offset": line_offset,
+                "image_index": image_index,
+                "call_id": call_id,
+            }
+            source = _signed_codex_image_source(thread_id, reference)
+        else:
+            source = str(_image_preview_payload(image_url).get("source") or "").strip()
+        if not source:
+            continue
+        previews.append({"source": source, "label": label, "kind": "view_image"})
+    return previews
+
+
+def _codex_output_image_urls(output: object) -> list[str]:
+    urls: list[str] = []
+
+    def append_candidate(value: object) -> None:
+        if isinstance(value, dict):
+            value = value.get("url") or value.get("href") or value.get("image_url")
+        if not isinstance(value, str):
+            return
+        cleaned = value.strip()
+        if cleaned.lower().startswith(("data:image/", "http://", "https://")):
+            urls.append(cleaned)
+
+    def visit(value: object) -> None:
+        if isinstance(value, list):
+            for item in value:
+                visit(item)
+            return
+        if not isinstance(value, dict):
+            return
+        for key in ("image_url", "url", "data_url"):
+            append_candidate(value.get(key))
+        for key in ("content", "items"):
+            nested = value.get(key)
+            if isinstance(nested, (list, dict)):
+                visit(nested)
+
+    visit(output)
+    return urls
+
+
+def _copy_codex_image_refs(value: object) -> dict[str, dict[str, object]]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(reference): dict(payload)
+        for reference, payload in value.items()
+        if isinstance(payload, dict)
+    }
+
+
+def _codex_view_image_bytes(thread_id: str, reference: str) -> tuple[str, bytes] | None:
+    cached = _CODEX_VIEW_IMAGE_PREVIEW_CACHE.get(thread_id)
+    image_refs = cached.get("image_refs") if isinstance(cached, dict) and isinstance(cached.get("image_refs"), dict) else {}
+    if reference not in image_refs:
+        payload = _codex_raw_view_image_payload(thread_id)
+        image_refs = payload.get("image_refs") if isinstance(payload.get("image_refs"), dict) else {}
+    image_ref = image_refs.get(reference)
+    if not isinstance(image_ref, dict):
+        return None
+    try:
+        rollout_path = Path(str(image_ref.get("path") or ""))
+        line_offset = int(image_ref.get("offset"))
+        image_index = int(image_ref.get("image_index"))
+    except (OSError, TypeError, ValueError):
+        return None
+    if line_offset < 0 or image_index < 0:
+        return None
+    try:
+        with rollout_path.open("rb") as handle:
+            handle.seek(line_offset)
+            item = json.loads(handle.readline())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    item_payload = item.get("payload") if isinstance(item, dict) and isinstance(item.get("payload"), dict) else {}
+    if str(item_payload.get("call_id") or "") != str(image_ref.get("call_id") or ""):
+        return None
+    image_urls = _codex_output_image_urls(item_payload.get("output"))
+    if image_index >= len(image_urls):
+        return None
+    return _decode_codex_data_image_url(image_urls[image_index])
+
+
+def _decode_codex_data_image_url(value: str) -> tuple[str, bytes] | None:
+    header, separator, encoded = str(value or "").partition(",")
+    media_type = header[5:].split(";", 1)[0].strip().lower() if header.lower().startswith("data:") else ""
+    if not separator or not media_type.startswith("image/") or ";base64" not in header.lower():
+        return None
+    try:
+        content = base64.b64decode("".join(encoded.split()), validate=True)
+    except (binascii.Error, ValueError, TypeError):
+        return None
+    return (media_type, content) if content else None
 
 def _copy_preview_map(value: object) -> dict[str, list[dict[str, str]]]:
     if not isinstance(value, dict):
@@ -1461,8 +1760,45 @@ def _copy_preview_map(value: object) -> dict[str, list[dict[str, str]]]:
         if isinstance(items, list)
     }
 
+
+def _copy_codex_output_segments_by_turn(value: object) -> dict[str, list[dict[str, str]]]:
+    if not isinstance(value, dict):
+        return {}
+    copied: dict[str, list[dict[str, str]]] = {}
+    for turn_id, segments in value.items():
+        if not isinstance(segments, list):
+            continue
+        result: list[dict[str, str]] = []
+        for segment in segments:
+            if not isinstance(segment, dict):
+                continue
+            kind = str(segment.get("kind") or "").strip()
+            if kind == "text":
+                text = str(segment.get("text") or "").strip()
+                if text:
+                    result.append({"kind": kind, "text": text})
+            elif kind == "custom_tool_image":
+                source = str(segment.get("source") or "").strip()
+                if source:
+                    result.append(
+                        {
+                            "kind": kind,
+                            "source": source,
+                            "label": str(segment.get("label") or "image").strip() or "image",
+                        }
+                    )
+        if result:
+            copied[str(turn_id)] = result
+    return copied
+
+
 def _codex_raw_view_image_previews_by_turn(thread_id: str) -> dict[str, list[dict[str, str]]]:
     return _copy_preview_map(_codex_raw_view_image_payload(thread_id).get("previews"))
+
+
+def _codex_raw_output_segments_by_turn(thread_id: str) -> dict[str, list[dict[str, str]]]:
+    return _copy_codex_output_segments_by_turn(_codex_raw_view_image_payload(thread_id).get("output_segments"))
+
 
 def _codex_raw_output_with_view_images_by_turn(thread_id: str) -> dict[str, str]:
     outputs = _codex_raw_view_image_payload(thread_id).get("outputs")
@@ -1483,6 +1819,8 @@ def _codex_raw_message_text(payload: dict[str, object]) -> str:
     return str(payload.get("text") or "").strip()
 
 def _markdown_image_for_preview(preview: dict[str, str]) -> str:
+    if str(preview.get("kind") or "") == "custom_tool_image":
+        return ""
     source = str(preview.get("source") or "").strip()
     label = str(preview.get("label") or "image").replace("[", "\\[").replace("]", "\\]")
     return f"![{label}]({source})" if source else ""
@@ -2138,6 +2476,9 @@ def _copy_codex_thread_task_payloads(tasks: list[dict[str, object]]) -> list[dic
         activity_items = item.get("activity_items")
         if isinstance(activity_items, list):
             item["activity_items"] = [dict(activity) if isinstance(activity, dict) else activity for activity in activity_items]
+        output_segments = item.get("output_segments")
+        if isinstance(output_segments, list):
+            item["output_segments"] = [dict(segment) if isinstance(segment, dict) else segment for segment in output_segments]
         copied.append(item)
     return copied
 
@@ -2175,6 +2516,7 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
     selected_turn_set = set(selected_turns)
     view_image_previews_by_turn = _codex_raw_view_image_previews_by_turn(thread_id)
     raw_output_with_images_by_turn = _codex_raw_output_with_view_images_by_turn(thread_id)
+    raw_output_segments_by_turn = _codex_raw_output_segments_by_turn(thread_id)
     by_turn: dict[str, dict[str, list[object]]] = {
         turn_id: {"user": [], "assistant": [], "reasoning": [], "activity": []}
         for turn_id in selected_turns
@@ -2232,22 +2574,22 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
         prompt_image_previews = [_image_preview_payload(item) for item in prompt_images]
         raw_output_with_images = raw_output_with_images_by_turn.get(turn_id, "")
         output = raw_output_with_images or "\n\n".join(str(part) for part in parts["assistant"]).strip()
+        output_segments = [dict(segment) for segment in raw_output_segments_by_turn.get(turn_id, []) if isinstance(segment, dict)]
         output_image_previews = _output_image_previews(output)
         seen_output_sources = {
             str(preview.get("source") or "").strip()
             for preview in output_image_previews
             if isinstance(preview, dict)
         }
-        if not raw_output_with_images:
-            for preview in view_image_previews_by_turn.get(turn_id, []):
-                source = str(preview.get("source") or "").strip() if isinstance(preview, dict) else ""
-                if not source or source in seen_output_sources:
-                    continue
-                seen_output_sources.add(source)
-                output_image_previews.append(dict(preview))
+        for preview in view_image_previews_by_turn.get(turn_id, []):
+            source = str(preview.get("source") or "").strip() if isinstance(preview, dict) else ""
+            if not source or source in seen_output_sources:
+                continue
+            seen_output_sources.add(source)
+            output_image_previews.append(dict(preview))
         reasoning = "\n\n".join(str(part) for part in parts["reasoning"]).strip()
         activity_items = [item for item in parts["activity"] if isinstance(item, dict)]
-        if not prompt and not output and not reasoning and not activity_items and not output_image_previews:
+        if not prompt and not output and not output_segments and not reasoning and not activity_items and not output_image_previews:
             continue
         summary = output or reasoning or prompt
         if not summary and activity_items:
@@ -2275,6 +2617,7 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
                 "images": prompt_images,
                 "image_previews": [*prompt_image_previews, *output_image_previews],
                 "output_image_previews": output_image_previews,
+                "output_segments": output_segments,
                 "output": output,
                 "error": "",
                 "progress_text": reasoning,

@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from ui.app import group_codex_threads_by_workspace
+from ui.app import _stream_initial_history_limit, group_codex_threads_by_workspace
 from ui.sections import _stream_client_time, _stream_display_time, _stream_image_is_previewable, _stream_markdown, _stream_task_sort_key, _stream_task_uses_utc_naive_time, _stream_text, render_mobile_stream_section
 
 
@@ -294,7 +294,7 @@ class StreamComposerTests(unittest.TestCase):
         self.assertEqual(["only prompt"], body_texts)
         self.assertEqual([], assistant_blocks)
 
-    def test_stream_shows_manual_load_older_when_auto_load_is_available(self) -> None:
+    def test_stream_shows_manual_load_older_without_auto_loader(self) -> None:
         ui = FakeUI()
         tasks = [
             {
@@ -323,7 +323,7 @@ class StreamComposerTests(unittest.TestCase):
         auto_buttons = [item for item in ui.elements if "cb-stream-auto-load-older-trigger" in item.class_text]
         manual_buttons = [item for item in ui.elements if "cb-stream-load-older-button" in item.class_text]
 
-        self.assertEqual(1, len(auto_buttons))
+        self.assertEqual([], auto_buttons)
         self.assertEqual(1, len(manual_buttons))
 
     def test_stream_uses_explicit_order_when_timestamps_match(self) -> None:
@@ -878,7 +878,7 @@ class StreamComposerTests(unittest.TestCase):
         self.assertEqual(0, len(buttons))
         self.assertEqual([], new_session_calls)
 
-    def test_older_history_keeps_manual_button_with_hidden_auto_loader(self) -> None:
+    def test_older_history_keeps_manual_button_without_auto_loader(self) -> None:
         ui = FakeUI()
         mobile_state = {
             "counts": {"running": 0, "queued": 0},
@@ -924,12 +924,9 @@ class StreamComposerTests(unittest.TestCase):
 
         self.assertEqual(1, len(load_older_buttons))
         self.assertEqual(1, len(load_older_wrappers))
-        self.assertEqual(1, len(auto_load_triggers))
-        self.assertIn("data-load-older-ready=1", auto_load_triggers[0].props_text)
-        self.assertIn("data-stream-auto-load-older=1", auto_load_triggers[0].props_text)
-        self.assertIn("hidden", auto_load_triggers[0].class_text.split())
+        self.assertEqual([], auto_load_triggers)
 
-    def test_older_history_button_appears_after_auto_history_limit(self) -> None:
+    def test_older_history_always_uses_manual_button(self) -> None:
         ui = FakeUI()
         tasks = [
             {
@@ -982,9 +979,15 @@ class StreamComposerTests(unittest.TestCase):
         source = Path("ui/app.py").read_text(encoding="utf-8")
 
         self.assertIn("STREAM_HISTORY_PAGE_SIZE = 20", source)
+        self.assertIn("STREAM_CODEX_HISTORY_INITIAL_SIZE = 60", source)
         self.assertIn("limits[cleaned_session_name] = _stream_session_task_limit(cleaned_session_name) + STREAM_HISTORY_PAGE_SIZE", source)
         sections_source = Path("ui/sections.py").read_text(encoding="utf-8")
-        self.assertIn("STREAM_AUTO_HISTORY_LIMIT = 60", sections_source)
+        self.assertNotIn("STREAM_AUTO_HISTORY_LIMIT", sections_source)
+        self.assertNotIn("data-stream-auto-load-older", sections_source)
+
+    def test_codex_stream_uses_larger_initial_history_window(self) -> None:
+        self.assertEqual(20, _stream_initial_history_limit("qq-private-10001"))
+        self.assertEqual(60, _stream_initial_history_limit("codex:thread-001"))
 
     def test_latest_task_activity_log_hides_routine_lifecycle_items(self) -> None:
         ui = FakeUI()
@@ -1279,8 +1282,81 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("stage.addEventListener('wheel'", source)
         self.assertTrue(_stream_image_is_previewable("/mobile-local-image/sig/path"))
         self.assertTrue(_stream_image_is_previewable("/mobile-upload/web/image.png"))
+        self.assertTrue(_stream_image_is_previewable("/mobile-codex-image/sig/thread/reference"))
         self.assertNotIn("width: 6.5rem;", source)
         self.assertNotIn("width: 5.5rem;", source)
+
+    def test_custom_tool_image_preview_uses_collapsible_lightbox_in_output_order(self) -> None:
+        ui = FakeUI()
+        mobile_state = {
+            "counts": {"running": 0, "queued": 0},
+            "updated_at": "2026-07-04T05:20:00",
+            "agents": [{"id": "codex", "name": "Codex", "backend": "codex"}],
+            "tasks": [
+                {
+                    "id": "task-tool-image",
+                    "agent_id": "codex",
+                    "agent_name": "Codex",
+                    "backend": "codex",
+                    "session_name": "focus",
+                    "status": "succeeded",
+                    "created_at": "2026-07-04T05:20:00",
+                    "prompt": "验图",
+                    "output": "检查前\n\n检查后",
+                    "output_image_previews": [
+                        {
+                            "source": "/mobile-codex-image/signature/thread/reference",
+                            "label": "check.png",
+                            "kind": "custom_tool_image",
+                        }
+                    ],
+                    "output_segments": [
+                        {"kind": "text", "text": "检查前"},
+                        {
+                            "kind": "custom_tool_image",
+                            "source": "/mobile-codex-image/signature/thread/reference",
+                            "label": "check.png",
+                        },
+                        {"kind": "text", "text": "检查后"},
+                    ],
+                    "summary": "检查后",
+                }
+            ],
+            "session_task_counts": {"focus": 1},
+        }
+
+        render_mobile_stream_section(
+            ui,
+            _translator,
+            mobile_state,
+            "focus",
+            [],
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+        )
+
+        details = [item for item in ui.elements if "cb-stream-tool-image-details" in item.class_text]
+        summaries = [item for item in ui.elements if "cb-stream-tool-image-summary" in item.class_text]
+        labels = [item for item in ui.elements if item.text == "查看图片"]
+        images = [item for item in ui.elements if item.kind == "image"]
+        markdowns = [item for item in ui.elements if item.kind == "markdown"]
+        inline_wrappers = [item for item in ui.elements if "cb-stream-output-tool-image" in item.class_text]
+
+        self.assertEqual(1, len(details))
+        self.assertEqual(1, len(summaries))
+        self.assertEqual(1, len(labels))
+        self.assertEqual(1, len(images))
+        self.assertEqual(["检查前", "检查后"], [item.text for item in markdowns])
+        self.assertEqual(1, len(inline_wrappers))
+        self.assertLess(ui.elements.index(markdowns[0]), ui.elements.index(details[0]))
+        self.assertLess(ui.elements.index(details[0]), ui.elements.index(markdowns[1]))
+        self.assertIn("cb-stream-image-lightbox-trigger", images[0].class_text)
+        self.assertIn("data-lightbox-src=%2Fmobile-codex-image%2Fsignature%2Fthread%2Freference", images[0].props_text)
 
     def test_pending_image_attachment_uses_paseo_like_composer_pill(self) -> None:
         ui = FakeUI()
@@ -2108,29 +2184,15 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("scrollWindowToBottom();", source)
         self.assertIn("if (source === 'user' && isProgrammaticScroll())", source)
         self.assertIn("window.__cbStreamForceBottomUntil = 0;", source)
-        self.assertIn("window.__cbStreamSuppressLoadOlderUntil = Date.now() + 800;", source)
         self.assertIn("source = 'script';", source)
         self.assertIn("scrollToBottom(scroller);", source)
         self.assertIn("window.__cbStreamProgrammaticScrollUntil = Date.now() + 250;", source)
         self.assertIn("window.__cbStreamLoadOlderAnchor = {", source)
         self.assertIn("scroller.scrollHeight - Number(loadOlderAnchor.scrollHeight) + Number(loadOlderAnchor.scrollTop)", source)
         self.assertIn("window.__cbStreamLoadOlderAnchor = {", sections_source)
-        self.assertIn("const maybeLoadOlder = (scroller) => {", source)
-        self.assertIn("document.querySelector('[data-stream-auto-load-older=\"1\"]')", source)
-        self.assertIn("window.__cbStreamAutoLoadOlderUntil = now + 1500;", source)
-        self.assertIn("window.__cbStreamAutoLoadOlderTimer", source)
-        self.assertIn("Math.max(100, nextAllowedAt - now + 20)", source)
-        self.assertIn("if (scroller.scrollHeight <= scroller.clientHeight + 2 || scroller.scrollTop > 80) return;", source)
-        self.assertIn("stickToBottom: readDelta(scroller) <= nearBottomLimit", source)
         self.assertIn("if (loadOlderAnchor.stickToBottom === true)", source)
-        self.assertIn("maybeLoadOlder(scroller);\n                        revealPositionedStream();\n                        return;", source)
-        sections_source = Path("ui/sections.py").read_text(encoding="utf-8")
-        self.assertIn("stickToBottom: Math.max(0, scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight) <= 120", sections_source)
-        self.assertIn("maybeLoadOlder(scroller);", source)
-        self.assertNotIn("scroller.scrollTop > 96", source)
-        scroll_listener_start = source.index("scroller.addEventListener('scroll'")
-        scroll_listener_end = source.index("return streamChanged;", scroll_listener_start)
-        self.assertNotIn("maybeLoadOlder(scroller);", source[scroll_listener_start:scroll_listener_end])
+        self.assertNotIn("maybeLoadOlder", source)
+        self.assertNotIn("data-stream-auto-load-older", sections_source)
         self.assertNotIn("button.click();", source[source.index("def scroll_stream_to_bottom"):source.index("def install_stream_refresh_timer")])
 
     def test_stream_switch_resets_scroll_state_to_bottom(self) -> None:
@@ -2466,7 +2528,7 @@ class StreamComposerTests(unittest.TestCase):
         stream_turn_body = stream_turn_rule.group("body") if stream_turn_rule else ""
         self.assertNotIn("content-visibility: auto;", stream_turn_body)
         self.assertNotIn("contain-intrinsic-size: auto 18rem;", stream_turn_body)
-        self.assertIn('"cb-stream-turn cb-stream-turn-with-footer" if assistant_text or should_show_activity else "cb-stream-turn"', sections_source)
+        self.assertIn('"cb-stream-turn cb-stream-turn-with-footer" if assistant_has_content or should_show_activity else "cb-stream-turn"', sections_source)
         self.assertIn(".cb-stream-turn-footer", source)
         self.assertIn("gap: 0.5rem;", source)
         self.assertIn("font-size: 13px;", source)
