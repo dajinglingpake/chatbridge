@@ -106,6 +106,15 @@ def install_qq_login_dialog(
             logged_in, user_id, nickname = get_qq_login_status()
             return SimpleNamespace(qq_logged_in=logged_in, qq_user_id=user_id, qq_nickname=nickname)
 
+        def resolve_qr_action(*, force_restart: bool) -> str:
+            if force_restart:
+                return "restart-onebot-runtime"
+            login_snapshot = current_login_snapshot()
+            if login_snapshot.qq_logged_in:
+                return "prepare-qq-login"
+            runtime_snapshot = get_runtime_snapshot(include_agent_processes=False)
+            return "restart-onebot-runtime" if runtime_snapshot.onebot_runtime_running else "prepare-qq-login"
+
         def start_worker(*, force_restart: bool = False) -> None:
             if worker_running["value"]:
                 return
@@ -120,7 +129,7 @@ def install_qq_login_dialog(
             placeholder.visible = True
 
             def worker() -> None:
-                result = run_named_action("restart-onebot-runtime" if force_restart else "prepare-qq-login")
+                result = run_named_action(resolve_qr_action(force_restart=force_restart))
                 deadline = time.monotonic() + 25.0
                 last_error = ""
                 should_refresh_qr = True

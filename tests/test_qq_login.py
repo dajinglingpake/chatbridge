@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from ui.qq_login import install_qq_login_dialog
@@ -129,6 +130,7 @@ class QQLoginDialogTests(unittest.TestCase):
             patch("ui.qq_login.run_named_action") as mocked_run,
             patch("ui.qq_login.fetch_napcat_login_qrcode_url", return_value="https://example.test/qr") as mocked_fetch,
             patch("ui.qq_login.get_qq_login_status", return_value=(False, "", "")),
+            patch("ui.qq_login.get_runtime_snapshot", return_value=SimpleNamespace(onebot_runtime_running=False)),
         ):
             mocked_run.return_value.message = "started"
             dialog()
@@ -139,6 +141,52 @@ class QQLoginDialogTests(unittest.TestCase):
         mocked_run.assert_called_once_with("prepare-qq-login")
         mocked_fetch.assert_called_once_with(refresh=True, timeout=3.0)
         self.assertIn("QQ 登录二维码已生成", notifications)
+
+    def test_get_qr_button_restarts_stale_running_onebot_runtime(self) -> None:
+        ui = FakeUI()
+        dialog = install_qq_login_dialog(ui, lambda _message: None, _translator)
+
+        with (
+            patch("ui.qq_login.threading.Thread", FakeThread),
+            patch("ui.qq_login.run_named_action") as mocked_run,
+            patch("ui.qq_login.fetch_napcat_login_qrcode_url", return_value="https://example.test/qr"),
+            patch("ui.qq_login.get_qq_login_status", return_value=(False, "2493227263", "纳西妲")),
+            patch("ui.qq_login.get_runtime_snapshot", return_value=SimpleNamespace(onebot_runtime_running=True)),
+        ):
+            mocked_run.return_value.message = "restarted"
+            dialog()
+            get_button = next(element for element in ui.elements if element.kind == "button" and element.text == "获取二维码")
+            get_button.attrs["on_click"]()
+            ui.timers[-1].attrs["callback"]()
+
+        mocked_run.assert_called_once_with("restart-onebot-runtime")
+
+    def test_qr_failure_keeps_dialog_open_without_stale_image(self) -> None:
+        ui = FakeUI()
+        dialog = install_qq_login_dialog(ui, lambda _message: None, _translator)
+
+        with (
+            patch("ui.qq_login.threading.Thread", FakeThread),
+            patch("ui.qq_login.time.monotonic", side_effect=[0.0, 30.0]),
+            patch("ui.qq_login.run_named_action") as mocked_run,
+            patch("ui.qq_login.fetch_napcat_login_qrcode_url", return_value=""),
+            patch("ui.qq_login.get_qq_login_status", return_value=(False, "", "")),
+            patch("ui.qq_login.get_runtime_snapshot", return_value=SimpleNamespace(onebot_runtime_running=True)),
+        ):
+            mocked_run.return_value.message = "二维码已过期，请刷新"
+            dialog()
+            get_button = next(element for element in ui.elements if element.kind == "button" and element.text == "获取二维码")
+            get_button.attrs["on_click"]()
+            ui.timers[-1].attrs["callback"]()
+
+        dialog_element = next(element for element in ui.elements if element.kind == "dialog")
+        qr_image = next(element for element in ui.elements if element.kind == "image")
+        labels = [element.text for element in ui.elements if element.kind == "label"]
+        self.assertFalse(dialog_element.attrs.get("closed", False))
+        self.assertEqual("", qr_image.source)
+        self.assertIn("二维码获取失败", labels)
+        self.assertEqual("重新获取二维码", get_button.text)
+        mocked_run.assert_called_once_with("restart-onebot-runtime")
 
     def test_opening_dialog_shows_existing_login_without_starting_stack(self) -> None:
         ui = FakeUI()
@@ -163,7 +211,8 @@ class QQLoginDialogTests(unittest.TestCase):
             patch("ui.qq_login.threading.Thread", FakeThread),
             patch("ui.qq_login.run_named_action") as mocked_run,
             patch("ui.qq_login.fetch_napcat_login_qrcode_url", return_value="https://example.test/qr"),
-            patch("ui.qq_login.get_qq_login_status", side_effect=[(False, "", ""), (False, "", ""), (True, "12345", "Alice")]),
+            patch("ui.qq_login.get_qq_login_status", side_effect=[(False, "", ""), (False, "", ""), (True, "12345", "Alice"), (True, "12345", "Alice")]),
+            patch("ui.qq_login.get_runtime_snapshot", return_value=SimpleNamespace(onebot_runtime_running=False)),
         ):
             mocked_run.return_value.message = "started"
             dialog()

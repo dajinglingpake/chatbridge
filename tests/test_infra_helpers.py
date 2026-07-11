@@ -220,6 +220,47 @@ class InfraHelperTests(unittest.TestCase):
         self.assertEqual([101, 102], stopped)
         self.assertEqual([(101,), (102,)], [call.args for call in terminate.call_args_list])
 
+    def test_ui_startup_closes_previous_server_processes_on_same_port(self) -> None:
+        old_parent = FakeUiProcess(101, ["python.exe", "main.py", "--host", "0.0.0.0", "--port", "8765"], 1, name="python.exe")
+        old_child = FakeUiProcess(102, ["python.exe", "main.py", "--host", "0.0.0.0", "--port", "8765"], 101, name="python.exe")
+        current_child = FakeUiProcess(202, ["python.exe", "main.py", "--host", "0.0.0.0", "--port", "8765"], 201, name="python.exe")
+        other_port = FakeUiProcess(301, ["python.exe", "main.py", "--host", "0.0.0.0", "--port", "8766"], 1, name="python.exe")
+        other_project = FakeUiProcess(302, ["python.exe", "main.py", "--host", "0.0.0.0", "--port", "8765"], 1, cwd="I:/AI/other", name="python.exe")
+        native_ui = FakeUiProcess(303, ["pythonw.exe", "main.py", "--native", "--port", "8765"], 1)
+        fake_psutil = FakeUiPsutil([old_parent, old_child, current_child, other_port, other_project, native_ui], parents=[201])
+
+        with patch.object(ui_main, "psutil", fake_psutil), patch.object(ui_main.os, "getpid", return_value=202):
+            with patch.object(ui_main, "_terminate_process_only") as terminate:
+                stopped = ui_main._close_previous_ui_server_instances(8765, Path("I:/AI/chatbridge/main.py"))
+
+        self.assertEqual([101, 102], stopped)
+        self.assertEqual([(101,), (102,)], [call.args for call in terminate.call_args_list])
+
+    def test_ui_startup_matches_default_server_port(self) -> None:
+        old_default = FakeUiProcess(101, ["python.exe", "main.py"], 1, name="python.exe")
+        other_project = FakeUiProcess(301, ["python.exe", "main.py"], 1, cwd="I:/AI/other", name="python.exe")
+        fake_psutil = FakeUiPsutil([old_default, other_project], parents=[])
+
+        with patch.object(ui_main, "psutil", fake_psutil), patch.object(ui_main.os, "getpid", return_value=202):
+            with patch.object(ui_main, "_terminate_process_only") as terminate:
+                stopped = ui_main._close_previous_ui_server_instances(8765, Path("I:/AI/chatbridge/main.py"))
+
+        self.assertEqual([101], stopped)
+        self.assertEqual([(101,)], [call.args for call in terminate.call_args_list])
+
+    def test_ui_entry_always_closes_previous_native_instances(self) -> None:
+        with (
+            patch.object(ui_main, "ensure_ui_dependencies"),
+            patch.object(ui_main, "_close_previous_native_ui_instances", return_value=[101]) as close_native,
+            patch.object(ui_main, "_close_previous_ui_server_instances", return_value=[]) as close_server,
+            patch("ui.app.run_ui") as run_ui,
+        ):
+            ui_main.run_ui_entry(host="127.0.0.1", port=8765, native=False, launcher_path=Path("I:/AI/chatbridge/main.py"))
+
+        close_native.assert_called_once_with(Path("I:/AI/chatbridge/main.py"))
+        close_server.assert_called_once_with(8765, Path("I:/AI/chatbridge/main.py"))
+        run_ui.assert_called_once()
+
     def test_native_ui_pid_file_records_current_ui_family_only(self) -> None:
         current_root = FakeUiProcess(201, ["pythonw.exe", "I:/AI/chatbridge/main.py", "--native"], 1)
         current_child = FakeUiProcess(202, ["pythonw.exe", "I:/AI/chatbridge/main.py", "--native"], 201)

@@ -411,6 +411,28 @@ def _is_native_ui_script_arg(value: str) -> bool:
     normalized = value.strip("\"'").replace("\\", "/").lower()
     return normalized in {"main.py", "./main.py", "ui_main.py", "./ui_main.py"} or normalized.endswith(("/main.py", "/ui_main.py"))
 
+def _cmdline_port_matches(cmdline: list[str], port: int) -> bool:
+    expected = str(int(port))
+    for index, item in enumerate(cmdline):
+        cleaned = item.strip("\"'")
+        if cleaned == "--port" and index + 1 < len(cmdline):
+            return cmdline[index + 1].strip("\"'") == expected
+        if cleaned.startswith("--port="):
+            return cleaned.split("=", 1)[1] == expected
+    return int(port) == 8765
+
+def _is_ui_server_process(proc: object, script_paths: set[str], port: int) -> bool:
+    cmdline = _process_cmdline(proc)
+    if "--native" in cmdline:
+        return False
+    if not _cmdline_port_matches(cmdline, port):
+        return False
+    joined = " ".join(cmdline).lower()
+    normalized = joined.replace("\\", "/")
+    if any(path in joined or path in normalized for path in script_paths):
+        return True
+    return _is_project_dir(_process_cwd(proc)) and any(_is_native_ui_script_arg(item) for item in cmdline)
+
 def _native_window_parent_pid(proc: object) -> int | None:
     joined = " ".join(_process_cmdline(proc))
     marker = "spawn_main(parent_pid="
@@ -532,6 +554,24 @@ def _terminate_process_only(pid: int) -> None:
         )
         return
 
+def _close_previous_ui_server_instances(port: int, launcher_path: Path | None = None) -> list[int]:
+    if psutil is None:
+        return []
+    script_paths = _native_ui_script_paths(launcher_path)
+    current_family = _current_process_family_pids()
+    stopped: list[int] = []
+    stopped_set: set[int] = set()
+    for proc in psutil.process_iter(["pid", "ppid", "name", "cmdline", "cwd"]):
+        pid = int(getattr(proc, "pid", 0) or proc.info.get("pid") or 0)
+        if not pid or pid in current_family or pid in stopped_set:
+            continue
+        if not _is_ui_server_process(proc, script_paths, port):
+            continue
+        _terminate_process_only(pid)
+        stopped.append(pid)
+        stopped_set.add(pid)
+    return stopped
+
 def _close_previous_native_ui_instances(launcher_path: Path | None = None) -> list[int]:
     if psutil is None:
         return []
@@ -591,11 +631,14 @@ def run_ui_entry(
     launcher_path: Path | None = None,
 ) -> None:
     ensure_ui_dependencies(launcher_path=launcher_path)
+    stopped_pids = _close_previous_native_ui_instances(launcher_path)
+    if stopped_pids:
+        print(f"[chatbridge] Closed previous Native UI PIDs: {', '.join(str(pid) for pid in stopped_pids)}", file=sys.stderr)
     if native:
-        stopped_pids = _close_previous_native_ui_instances(launcher_path)
-        if stopped_pids:
-            print(f"[chatbridge] Closed previous Native UI PIDs: {', '.join(str(pid) for pid in stopped_pids)}", file=sys.stderr)
         _write_native_ui_pid_file(_current_native_ui_pids(_native_ui_script_paths(launcher_path)))
+    stopped_server_pids = _close_previous_ui_server_instances(port, launcher_path)
+    if stopped_server_pids:
+        print(f"[chatbridge] Closed previous UI server PIDs: {', '.join(str(pid) for pid in stopped_server_pids)}", file=sys.stderr)
     from ui.app import run_ui
 
     _print_access_urls(host, port, native)
