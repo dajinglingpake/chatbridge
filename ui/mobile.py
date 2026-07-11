@@ -2444,12 +2444,17 @@ def _codex_message_sort_key(index: int, message: dict[str, object], turn_order_l
 
 def _codex_thread_turn_count(thread: dict[str, object]) -> int:
     messages = thread.get("messages") if isinstance(thread.get("messages"), list) else []
-    turn_ids = {
-        str(message.get("turn_id") or message.get("id") or "").strip()
-        for message in messages
-        if isinstance(message, dict) and str(message.get("turn_id") or message.get("id") or "").strip()
-    }
-    return len(turn_ids)
+    turns: dict[str, int] = {}
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        turn_id = str(message.get("turn_id") or message.get("id") or "").strip()
+        if not turn_id:
+            continue
+        turns.setdefault(turn_id, 0)
+        if str(message.get("role") or "").strip() == "user" and str(message.get("text") or "").strip():
+            turns[turn_id] += 1
+    return sum(user_message_count or 1 for user_message_count in turns.values())
 
 
 def _codex_thread_turn_count_cached(thread_id: str, thread: dict[str, object]) -> int:
@@ -2517,10 +2522,19 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
     view_image_previews_by_turn = _codex_raw_view_image_previews_by_turn(thread_id)
     raw_output_with_images_by_turn = _codex_raw_output_with_view_images_by_turn(thread_id)
     raw_output_segments_by_turn = _codex_raw_output_segments_by_turn(thread_id)
-    by_turn: dict[str, dict[str, list[object]]] = {
-        turn_id: {"user": [], "assistant": [], "reasoning": [], "activity": []}
-        for turn_id in selected_turns
-    }
+    def new_display_turn(*, created_at: str = "", item_order: int = 0, message_id: str = "") -> dict[str, object]:
+        return {
+            "created_at": created_at,
+            "item_order": item_order,
+            "message_id": message_id,
+            "user": [],
+            "assistant": [],
+            "reasoning": [],
+            "activity": [],
+        }
+
+    display_turns_by_turn: dict[str, list[dict[str, object]]] = {turn_id: [] for turn_id in selected_turns}
+    preambles_by_turn: dict[str, dict[str, object]] = {turn_id: new_display_turn() for turn_id in selected_turns}
     created_base = str(thread.get("created_at") or thread.get("updated_at") or "").strip()
     updated_base = str(thread.get("updated_at") or "").strip()
     turn_created_at: dict[str, str] = {}
@@ -2550,84 +2564,123 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
         turn_id = str(message.get("turn_id") or message.get("id") or "").strip()
         role = str(message.get("role") or "").strip()
         text = str(message.get("text") or "").strip()
-        if role in {"user", "assistant", "reasoning"} and text:
-            by_turn[turn_id][role].append(text)
+        fallback_at = _codex_message_at(message) or turn_created_at.get(turn_id, "") or turn_fallback_at.get(turn_id, "") or created_base
+        display_turns = display_turns_by_turn[turn_id]
+        if role == "user" and text:
+            display_turn = new_display_turn(
+                created_at=fallback_at,
+                item_order=_codex_message_int(message.get("item_order")),
+                message_id=str(message.get("id") or "").strip(),
+            )
+            if not display_turns:
+                preamble = preambles_by_turn[turn_id]
+                for key in ("assistant", "reasoning", "activity"):
+                    display_turn[key].extend(preamble[key])
+                if preamble["created_at"] and not display_turn["created_at"]:
+                    display_turn["created_at"] = preamble["created_at"]
+                if preamble["message_id"] and not display_turn["message_id"]:
+                    display_turn["message_id"] = preamble["message_id"]
+            display_turn["user"].append(text)
+            display_turns.append(display_turn)
+            continue
+
+        display_turn = display_turns[-1] if display_turns else preambles_by_turn[turn_id]
+        if fallback_at and not display_turn["created_at"]:
+            display_turn["created_at"] = fallback_at
+        if not display_turn["message_id"]:
+            display_turn["message_id"] = str(message.get("id") or "").strip()
+        if role in {"assistant", "reasoning"} and text:
+            display_turn[role].append(text)
         elif role == "activity":
-            activity = _codex_message_activity_item(message, fallback_at=_codex_message_at(message) or turn_created_at.get(turn_id, "") or turn_fallback_at.get(turn_id, "") or created_base)
+            activity = _codex_message_activity_item(message, fallback_at=fallback_at)
             if activity is not None:
-                by_turn[turn_id]["activity"].append(activity)
+                display_turn["activity"].append(activity)
+
     tasks: list[dict[str, object]] = []
     cwd = str(thread.get("cwd") or "").strip()
     thread_error = str(thread.get("error") or "").strip()
     for turn_id in selected_turns:
-        parts = by_turn[turn_id]
-        created_at = turn_created_at.get(turn_id, "") or turn_fallback_at.get(turn_id, "") or created_base
-        prompt = "\n\n".join(str(part) for part in parts["user"]).strip()
-        prompt_images: list[str] = []
-        seen_prompt_images: set[str] = set()
-        for part in parts["user"]:
-            for image_path in _text_local_image_paths(str(part)):
-                if image_path in seen_prompt_images:
-                    continue
-                seen_prompt_images.add(image_path)
-                prompt_images.append(image_path)
-        prompt_image_previews = [_image_preview_payload(item) for item in prompt_images]
-        raw_output_with_images = raw_output_with_images_by_turn.get(turn_id, "")
-        output = raw_output_with_images or "\n\n".join(str(part) for part in parts["assistant"]).strip()
-        output_segments = [dict(segment) for segment in raw_output_segments_by_turn.get(turn_id, []) if isinstance(segment, dict)]
-        output_image_previews = _output_image_previews(output)
-        seen_output_sources = {
-            str(preview.get("source") or "").strip()
-            for preview in output_image_previews
-            if isinstance(preview, dict)
-        }
-        for preview in view_image_previews_by_turn.get(turn_id, []):
-            source = str(preview.get("source") or "").strip() if isinstance(preview, dict) else ""
-            if not source or source in seen_output_sources:
-                continue
-            seen_output_sources.add(source)
-            output_image_previews.append(dict(preview))
-        reasoning = "\n\n".join(str(part) for part in parts["reasoning"]).strip()
-        activity_items = [item for item in parts["activity"] if isinstance(item, dict)]
-        if not prompt and not output and not output_segments and not reasoning and not activity_items and not output_image_previews:
-            continue
-        summary = output or reasoning or prompt
-        if not summary and activity_items:
-            summary = str(activity_items[-1].get("detail") or activity_items[-1].get("event") or "")
-        if not summary and output_image_previews:
-            summary = str(output_image_previews[-1].get("label") or "image")
-        tasks.append(
-            {
-                "id": f"codex-{thread_id}-{turn_id}",
-                "agent_id": "codex",
-                "agent_name": "Codex",
-                "backend": "codex",
-                "source": "codex-app-server",
-                "sender_id": "",
-                "session_id": thread_id,
-                "session_name": session_name,
-                "workdir": cwd,
-                "model": "",
-                "status": "succeeded",
-                "stream_order": turn_order_lookup.get(turn_id, 0),
-                "created_at": created_at,
-                "started_at": "",
-                "finished_at": "",
-                "prompt": prompt,
-                "images": prompt_images,
-                "image_previews": [*prompt_image_previews, *output_image_previews],
-                "output_image_previews": output_image_previews,
-                "output_segments": output_segments,
-                "output": output,
-                "error": "",
-                "progress_text": reasoning,
-                "progress_at": "",
-                "progress_seq": 1 if reasoning else 0,
-                "context_left_percent": None,
-                "activity_items": activity_items,
-                "summary": summary,
+        display_turns = display_turns_by_turn[turn_id]
+        if not display_turns:
+            preamble = preambles_by_turn[turn_id]
+            if any(preamble[key] for key in ("assistant", "reasoning", "activity")):
+                display_turns = [preamble]
+        uses_split_display = len(display_turns) > 1
+        for display_index, parts in enumerate(display_turns, start=1):
+            is_terminal_display = display_index == len(display_turns)
+            created_at = str(parts["created_at"] or turn_created_at.get(turn_id, "") or turn_fallback_at.get(turn_id, "") or created_base)
+            prompt = "\n\n".join(str(part) for part in parts["user"]).strip()
+            prompt_images: list[str] = []
+            seen_prompt_images: set[str] = set()
+            for part in parts["user"]:
+                for image_path in _text_local_image_paths(str(part)):
+                    if image_path in seen_prompt_images:
+                        continue
+                    seen_prompt_images.add(image_path)
+                    prompt_images.append(image_path)
+            prompt_image_previews = [_image_preview_payload(item) for item in prompt_images]
+            raw_output_with_images = raw_output_with_images_by_turn.get(turn_id, "") if not uses_split_display else ""
+            output = raw_output_with_images or "\n\n".join(str(part) for part in parts["assistant"]).strip()
+            output_segments = [
+                dict(segment)
+                for segment in raw_output_segments_by_turn.get(turn_id, [])
+                if isinstance(segment, dict) and not uses_split_display
+            ]
+            output_image_previews = _output_image_previews(output)
+            seen_output_sources = {
+                str(preview.get("source") or "").strip()
+                for preview in output_image_previews
+                if isinstance(preview, dict)
             }
-        )
+            if is_terminal_display:
+                for preview in view_image_previews_by_turn.get(turn_id, []):
+                    source = str(preview.get("source") or "").strip() if isinstance(preview, dict) else ""
+                    if not source or source in seen_output_sources:
+                        continue
+                    seen_output_sources.add(source)
+                    output_image_previews.append(dict(preview))
+            reasoning = "\n\n".join(str(part) for part in parts["reasoning"]).strip()
+            activity_items = [item for item in parts["activity"] if isinstance(item, dict)]
+            if not prompt and not output and not output_segments and not reasoning and not activity_items and not output_image_previews:
+                continue
+            summary = output or reasoning or prompt
+            if not summary and activity_items:
+                summary = str(activity_items[-1].get("detail") or activity_items[-1].get("event") or "")
+            if not summary and output_image_previews:
+                summary = str(output_image_previews[-1].get("label") or "image")
+            message_id = str(parts["message_id"] or display_index).strip() or str(display_index)
+            tasks.append(
+                {
+                    "id": f"codex-{thread_id}-{turn_id}-{message_id}",
+                    "agent_id": "codex",
+                    "agent_name": "Codex",
+                    "backend": "codex",
+                    "source": "codex-app-server",
+                    "sender_id": "",
+                    "session_id": thread_id,
+                    "session_name": session_name,
+                    "workdir": cwd,
+                    "model": "",
+                    "status": "succeeded",
+                    "stream_order": turn_order_lookup.get(turn_id, 0) * 1000 + display_index,
+                    "created_at": created_at,
+                    "started_at": "",
+                    "finished_at": "",
+                    "prompt": prompt,
+                    "images": prompt_images,
+                    "image_previews": [*prompt_image_previews, *output_image_previews],
+                    "output_image_previews": output_image_previews,
+                    "output_segments": output_segments,
+                    "output": output,
+                    "error": "",
+                    "progress_text": reasoning,
+                    "progress_at": "",
+                    "progress_seq": 1 if reasoning else 0,
+                    "context_left_percent": None,
+                    "activity_items": activity_items,
+                    "summary": summary,
+                }
+            )
     if not tasks and thread_error:
         tasks.append(
             {

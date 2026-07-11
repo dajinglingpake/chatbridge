@@ -294,7 +294,7 @@ class StreamComposerTests(unittest.TestCase):
         self.assertEqual(["only prompt"], body_texts)
         self.assertEqual([], assistant_blocks)
 
-    def test_stream_shows_manual_load_older_without_auto_loader(self) -> None:
+    def test_stream_hides_manual_load_older_before_history_limit(self) -> None:
         ui = FakeUI()
         tasks = [
             {
@@ -324,7 +324,7 @@ class StreamComposerTests(unittest.TestCase):
         manual_buttons = [item for item in ui.elements if "cb-stream-load-older-button" in item.class_text]
 
         self.assertEqual([], auto_buttons)
-        self.assertEqual(1, len(manual_buttons))
+        self.assertEqual([], manual_buttons)
 
     def test_stream_uses_explicit_order_when_timestamps_match(self) -> None:
         ui = FakeUI()
@@ -878,7 +878,7 @@ class StreamComposerTests(unittest.TestCase):
         self.assertEqual(0, len(buttons))
         self.assertEqual([], new_session_calls)
 
-    def test_older_history_keeps_manual_button_without_auto_loader(self) -> None:
+    def test_older_history_hides_manual_button_before_history_limit(self) -> None:
         ui = FakeUI()
         mobile_state = {
             "counts": {"running": 0, "queued": 0},
@@ -922,11 +922,11 @@ class StreamComposerTests(unittest.TestCase):
             item for item in ui.elements if "cb-stream-auto-load-older-trigger" in item.class_text
         ]
 
-        self.assertEqual(1, len(load_older_buttons))
-        self.assertEqual(1, len(load_older_wrappers))
+        self.assertEqual([], load_older_buttons)
+        self.assertEqual([], load_older_wrappers)
         self.assertEqual([], auto_load_triggers)
 
-    def test_older_history_always_uses_manual_button(self) -> None:
+    def test_older_history_uses_manual_button_after_history_limit(self) -> None:
         ui = FakeUI()
         tasks = [
             {
@@ -975,18 +975,19 @@ class StreamComposerTests(unittest.TestCase):
         self.assertEqual([], auto_load_triggers)
         self.assertIn("data-load-older-ready=1", load_older_buttons[0].props_text)
 
-    def test_stream_initial_history_window_stays_small(self) -> None:
+    def test_stream_initial_history_window_matches_manual_history_limit(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")
 
         self.assertIn("STREAM_HISTORY_PAGE_SIZE = 20", source)
-        self.assertIn("STREAM_CODEX_HISTORY_INITIAL_SIZE = 60", source)
+        self.assertIn("return STREAM_MANUAL_HISTORY_LIMIT", source)
         self.assertIn("limits[cleaned_session_name] = _stream_session_task_limit(cleaned_session_name) + STREAM_HISTORY_PAGE_SIZE", source)
         sections_source = Path("ui/sections.py").read_text(encoding="utf-8")
-        self.assertNotIn("STREAM_AUTO_HISTORY_LIMIT", sections_source)
+        self.assertIn("STREAM_MANUAL_HISTORY_LIMIT = 60", sections_source)
+        self.assertIn("session_total_count > max(displayed_session_count, STREAM_MANUAL_HISTORY_LIMIT)", sections_source)
         self.assertNotIn("data-stream-auto-load-older", sections_source)
 
-    def test_codex_stream_uses_larger_initial_history_window(self) -> None:
-        self.assertEqual(20, _stream_initial_history_limit("qq-private-10001"))
+    def test_stream_uses_manual_history_limit_for_all_sessions(self) -> None:
+        self.assertEqual(60, _stream_initial_history_limit("qq-private-10001"))
         self.assertEqual(60, _stream_initial_history_limit("codex:thread-001"))
 
     def test_latest_task_activity_log_hides_routine_lifecycle_items(self) -> None:
@@ -1783,7 +1784,7 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("task_limit=_stream_global_task_limit(session_name),", source)
         self.assertIn('model = None if state["active_page"] in {"mobile", "stream"} else refresh_model()', source)
         self.assertIn("window.__cbStreamForceBottomUntil = Date.now() + 1200;", source)
-        self.assertIn("forceBottom || Date.now() < Number(window.__cbStreamForceBottomUntil || 0)", source)
+        self.assertIn("forceBottom\n                        || Date.now() < Number(window.__cbStreamForceBottomUntil || 0)", source)
         self.assertNotIn("forceBottom || streamChanged || state.userScrolledAway !== true", source)
         self.assertNotIn("ui.timer(0.05, lambda session=active_stream_session: scroll_stream_to_bottom(session), once=True)", source)
         self.assertIn("document.querySelector('.cb-agent-panel')?.dataset?.streamKey", source)
@@ -1826,6 +1827,9 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn('ui.run_javascript(f"window.__cbStreamAfterPatch?.({patch_options_json});")', scroll_body)
         self.assertIn('installed_clients.add(client_key)', scroll_body)
         self.assertIn("window.__cbStreamPatchRuntimeReady", scroll_body)
+        self.assertIn("window.__cbStreamPatchRuntimeReady !== '5'", scroll_body)
+        self.assertIn("const setupStreamWheelFallback = () => {", scroll_body)
+        self.assertIn("document.addEventListener('mousewheel', handleWheel, { capture: true, passive: false });", scroll_body)
         self.assertIn("window.__cbStreamAfterPatch = (options = {}) => {", scroll_body)
         self.assertIn("setupStreamBehavior", scroll_body)
         self.assertIn("updateComposerMetrics();\n                        updateLiveElapsed();", scroll_body)
@@ -2177,16 +2181,21 @@ class StreamComposerTests(unittest.TestCase):
         source = Path("ui/app.py").read_text(encoding="utf-8")
         sections_source = Path("ui/sections.py").read_text(encoding="utf-8")
 
-        self.assertIn("const markProgrammaticScroll = () => {", source)
-        self.assertIn("const isProgrammaticScroll = () => Date.now() < Number(window.__cbStreamProgrammaticScrollUntil || 0);", source)
+        self.assertIn("const programmaticScrollers = window.__cbStreamProgrammaticScrollers || new WeakSet();", source)
+        self.assertIn("const markProgrammaticScroll = (scroller) => {", source)
+        self.assertIn("window.requestAnimationFrame(() => programmaticScrollers.delete(scroller));", source)
+        self.assertIn("const isProgrammaticScroll = (scroller) => programmaticScrollers.has(scroller);", source)
         self.assertIn("const scrollWindowToBottom = () => {", source)
         self.assertIn("const scrollToBottom = (scroller) => {", source)
         self.assertIn("scrollWindowToBottom();", source)
-        self.assertIn("if (source === 'user' && isProgrammaticScroll())", source)
+        self.assertIn("if (source === 'user' && isProgrammaticScroll(scroller))", source)
+        self.assertIn("scroller.addEventListener('wheel', (event) => {", source)
+        self.assertIn("const nextTop = clampScrollTop(scroller, scroller.scrollTop + event.deltaY * unit);", source)
+        self.assertIn("scroller.scrollTop = nextTop;\n                            updateScrollState(scroller, 'user');", source)
         self.assertIn("window.__cbStreamForceBottomUntil = 0;", source)
         self.assertIn("source = 'script';", source)
         self.assertIn("scrollToBottom(scroller);", source)
-        self.assertIn("window.__cbStreamProgrammaticScrollUntil = Date.now() + 250;", source)
+        self.assertNotIn("__cbStreamProgrammaticScrollUntil", source)
         self.assertIn("window.__cbStreamLoadOlderAnchor = {", source)
         self.assertIn("scroller.scrollHeight - Number(loadOlderAnchor.scrollHeight) + Number(loadOlderAnchor.scrollTop)", source)
         self.assertIn("window.__cbStreamLoadOlderAnchor = {", sections_source)
@@ -2195,11 +2204,31 @@ class StreamComposerTests(unittest.TestCase):
         self.assertNotIn("data-stream-auto-load-older", sections_source)
         self.assertNotIn("button.click();", source[source.index("def scroll_stream_to_bottom"):source.index("def install_stream_refresh_timer")])
 
+    def test_stream_scroll_preserves_small_user_scrolls_across_refreshes(self) -> None:
+        source = Path("ui/app.py").read_text(encoding="utf-8")
+        sections_source = Path("ui/sections.py").read_text(encoding="utf-8")
+
+        self.assertIn("const userScrollAwayLimit = 4;", source)
+        self.assertIn("const clampScrollTop = (scroller, value)", source)
+        self.assertIn("top: 0,", source)
+        self.assertIn("state.top = readScrollTop(scroller);", source)
+        self.assertIn("restoreTopPending: false,", source)
+        self.assertIn("if ((!keepSavedTop && !state.restoreTopPending) || source === 'user') {", source)
+        self.assertIn("state.userScrolledAway = delta > userScrollAwayLimit;", source)
+        self.assertIn("(!state.userScrolledAway && state.nearBottom === true)", source)
+        self.assertIn("const restorePreviousTop = () => {", source)
+        self.assertIn("state.restoreTopPending = restoredTop !== previousTop;", source)
+        self.assertIn("return state.restoreTopPending;", source)
+        self.assertIn("updateScrollState(scroller, 'script', topWasClamped);", source)
+        self.assertIn("top: Math.max(0, scroller.scrollHeight - scroller.clientHeight),", sections_source)
+
     def test_stream_switch_resets_scroll_state_to_bottom(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")
 
         self.assertIn("state[\"stream_force_bottom_session\"] = cleaned_session_name", source)
         self.assertIn("if (streamChanged) {", source)
+        self.assertIn("const hasKnownState = Object.prototype.hasOwnProperty.call(", source)
+        self.assertIn("if (forceBottom || !hasKnownState) {", source)
         self.assertIn("state.delta = 0;\n                        state.nearBottom = true;\n                        state.userScrolledAway = false;", source)
         self.assertIn("window.__cbStreamForceBottomUntil = Date.now() + 1200;", source)
         self.assertIn("if (preserveTop && !shouldStickToBottom) {", source)
@@ -2492,6 +2521,16 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn(".cb-agent-stream {\n            flex: 1;", source)
         self.assertIn("padding: 1rem;", source)
         self.assertIn("overscroll-behavior-y: contain;", source)
+        self.assertIn(".cb-agent-stream::-webkit-scrollbar", source)
+        self.assertIn("@media (any-hover: hover) and (any-pointer: fine)", source)
+        self.assertIn("overflow-y: auto !important;", source)
+        self.assertIn("scrollbar-gutter: auto;", source)
+        self.assertIn("width: 1rem;", source)
+        self.assertIn("background: #c7d0d9;", source)
+        self.assertIn("const acceptUserScroll = (scroller) =>", source)
+        self.assertIn("window.__cbStreamWheelFallbackReady === '4'", source)
+        self.assertIn("const handleScrollbarPointerDown = (event) =>", source)
+        self.assertIn("document.addEventListener('pointerdown', handleScrollbarPointerDown, true);", source)
         self.assertIn(".cb-agent-stream {\n                padding: 1rem 0.75rem;", source)
         self.assertIn(".cb-agent-stream-content {\n                padding: 0 0.5rem;", source)
         self.assertNotIn("padding: 0.9rem 0.55rem 0.75rem;", source)

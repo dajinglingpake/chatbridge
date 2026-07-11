@@ -17,6 +17,9 @@ from core.view_models import WebConsoleViewModel
 
 
 Translator = Callable[..., str]
+STREAM_MANUAL_HISTORY_LIMIT = 60
+
+
 class UIEventLike(Protocol):
     value: object
 
@@ -1303,7 +1306,7 @@ def _prepare_stream_render_context(mobile_state: dict[str, object], selected_ses
     ]
     session_total_count = _stream_session_task_count(mobile_state, active_session)
     displayed_session_count = len(session_tasks)
-    has_older_session_tasks = session_total_count > displayed_session_count
+    has_older_session_tasks = session_total_count > max(displayed_session_count, STREAM_MANUAL_HISTORY_LIMIT)
     latest_task = session_tasks[-1] if session_tasks else None
     latest_task_id = str(latest_task.get("id") or "").strip() if isinstance(latest_task, dict) else ""
     latest_active_task = next(
@@ -1583,8 +1586,10 @@ def _render_mobile_stream_scroll_button(ui: UIFactoryLike) -> None:
             window.__cbStreamScrollStateByKey = window.__cbStreamScrollStateByKey || {};
             window.__cbStreamScrollStateByKey[activeKey] = {
                 delta: 0,
+                top: Math.max(0, scroller.scrollHeight - scroller.clientHeight),
                 nearBottom: true,
                 userScrolledAway: false,
+                restoreTopPending: false,
             };
             window.__cbStreamScrollDelta = 0;
             window.__cbStreamWasNearBottom = true;

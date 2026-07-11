@@ -631,6 +631,27 @@ class MobileStateTests(unittest.TestCase):
         self.assertEqual("先检查状态", tasks[0]["progress_text"])
         self.assertEqual("最终回答", tasks[0]["output"])
 
+    def test_codex_thread_history_keeps_supplemental_user_messages_separate(self) -> None:
+        thread = {
+            "id": "thread-supplemental-inputs",
+            "updated_at": "2026-07-04T20:02:00",
+            "messages": [
+                {"id": "item-1", "turn_id": "turn-1", "turn_order": 1, "item_order": 1, "at": "2026-07-04T20:00:00", "role": "user", "text": "先生成预览"},
+                {"id": "item-2", "turn_id": "turn-1", "turn_order": 1, "item_order": 2, "at": "2026-07-04T20:00:01", "role": "assistant", "text": "正在下载模型"},
+                {"id": "item-3", "turn_id": "turn-1", "turn_order": 1, "item_order": 3, "at": "2026-07-04T20:01:00", "role": "user", "text": "缓存不要放 C 盘"},
+                {"id": "item-4", "turn_id": "turn-1", "turn_order": 1, "item_order": 4, "at": "2026-07-04T20:01:01", "role": "assistant", "text": "已改为项目缓存目录"},
+            ],
+        }
+
+        tasks = _codex_thread_task_payloads(thread)
+
+        self.assertEqual(2, _codex_thread_turn_count(thread))
+        self.assertEqual(["先生成预览", "缓存不要放 C 盘"], [task["prompt"] for task in tasks])
+        self.assertEqual(["正在下载模型", "已改为项目缓存目录"], [task["output"] for task in tasks])
+        self.assertEqual(["2026-07-04T20:00:00", "2026-07-04T20:01:00"], [task["created_at"] for task in tasks])
+        self.assertEqual([1001, 1002], [task["stream_order"] for task in tasks])
+        self.assertNotEqual(tasks[0]["id"], tasks[1]["id"])
+
     def test_codex_thread_payloads_can_build_only_recent_turns(self) -> None:
         messages: list[dict[str, object]] = []
         for index in range(100):
@@ -648,7 +669,7 @@ class MobileStateTests(unittest.TestCase):
 
         self.assertEqual(100, _codex_thread_turn_count(thread))
         self.assertEqual(["prompt 97", "prompt 98", "prompt 99"], [task["prompt"] for task in tasks])
-        self.assertEqual([98, 99, 100], [task["stream_order"] for task in tasks])
+        self.assertEqual([98001, 99001, 100001], [task["stream_order"] for task in tasks])
         self.assertEqual("2026-07-04T20:00:00", tasks[0]["created_at"])
 
     def test_codex_thread_payloads_sort_only_selected_turn_messages(self) -> None:
@@ -676,7 +697,7 @@ class MobileStateTests(unittest.TestCase):
             tasks = _codex_thread_task_payloads({"id": "thread-long", "messages": messages}, limit=2)
 
         self.assertEqual(["prompt 28", "prompt 29"], [task["prompt"] for task in tasks])
-        self.assertEqual([29, 30], [task["stream_order"] for task in tasks])
+        self.assertEqual([29001, 30001], [task["stream_order"] for task in tasks])
 
     def test_codex_thread_turn_count_does_not_build_turn_order(self) -> None:
         thread = {
@@ -708,7 +729,7 @@ class MobileStateTests(unittest.TestCase):
 
         self.assertEqual(["prompt 1", "prompt 2"], [task["prompt"] for task in tasks])
         self.assertEqual(["answer 1", "answer 2"], [task["output"] for task in tasks])
-        self.assertEqual([1, 2], [task["stream_order"] for task in tasks])
+        self.assertEqual([1001, 2001], [task["stream_order"] for task in tasks])
         self.assertEqual(["2026-07-04T20:01:00", "2026-07-04T20:02:00"], [task["created_at"] for task in tasks])
 
     def test_codex_thread_top_level_error_does_not_override_history_turns(self) -> None:

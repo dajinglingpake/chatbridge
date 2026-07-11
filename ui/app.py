@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+from collections.abc import Callable, MutableMapping
 import json
 import time
 import traceback
@@ -20,7 +22,7 @@ from localization import Localizer, normalize_language
 from ui.mobile import MOBILE_UPLOAD_ROOT, build_mobile_access_url, build_mobile_qr_data_url, build_stream_sidebar_state_snapshot, build_stream_signature_snapshot, build_stream_state_snapshot, codex_thread_id_from_session_name, install_mobile_routes, is_mobile_access_authorized, load_codex_threads_page, stream_hub_state_file_signature
 from ui.qr_login import install_qr_login_dialog
 from ui.qq_login import install_qq_login_dialog
-from ui.sections import render_diagnostics_section, render_home_section, render_mobile_section, render_mobile_stream_composer_section, render_mobile_stream_messages_section, render_mobile_stream_shell, render_sessions_section
+from ui.sections import STREAM_MANUAL_HISTORY_LIMIT, render_diagnostics_section, render_home_section, render_mobile_section, render_mobile_stream_composer_section, render_mobile_stream_messages_section, render_mobile_stream_shell, render_sessions_section
 
 
 APP_DIR = Path(__file__).resolve().parent.parent
@@ -33,18 +35,49 @@ ASYNC_SERVICE_ACTIONS = {
     "restart-qq-stack",
 }
 STREAM_HISTORY_PAGE_SIZE = 20
-STREAM_CODEX_HISTORY_INITIAL_SIZE = 60
 STREAM_SIDEBAR_PAGE_SIZE = 40
 WEB_THEME_OPTIONS = ("dark", "light", "forest")
 STREAM_UI_LOG_PATH = APP_DIR / ".runtime" / "logs" / "ui_stream_refresh.jsonl"
+_CLIENT_STATE_STORAGE_KEY = "chatbridge_ui_state"
+
+
+class _ClientState(MutableMapping[str, object]):
+    """Expose one UI state mapping for whichever NiceGUI client is active."""
+
+    def __init__(
+        self,
+        defaults: dict[str, object],
+        storage_provider: Callable[[], MutableMapping[str, object]],
+    ) -> None:
+        self._defaults = defaults
+        self._storage_provider = storage_provider
+
+    def _data(self) -> MutableMapping[str, object]:
+        storage = self._storage_provider()
+        state = storage.get(_CLIENT_STATE_STORAGE_KEY)
+        if not isinstance(state, dict):
+            state = copy.deepcopy(self._defaults)
+            storage[_CLIENT_STATE_STORAGE_KEY] = state
+        return state
+
+    def __getitem__(self, key: str) -> object:
+        return self._data()[key]
+
+    def __setitem__(self, key: str, value: object) -> None:
+        self._data()[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        del self._data()[key]
+
+    def __iter__(self):
+        return iter(self._data())
+
+    def __len__(self) -> int:
+        return len(self._data())
 
 
 def _stream_initial_history_limit(session_name: str) -> int:
-    return (
-        STREAM_CODEX_HISTORY_INITIAL_SIZE
-        if codex_thread_id_from_session_name(str(session_name or "").strip())
-        else STREAM_HISTORY_PAGE_SIZE
-    )
+    return STREAM_MANUAL_HISTORY_LIMIT
 
 
 def _append_stream_ui_log(event: str, **fields: object) -> None:
@@ -141,10 +174,16 @@ def _load_nicegui():
 def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
     ui = _load_nicegui()
     from nicegui import context
-    localizer_ref = {"value": Localizer()}
+    default_language = Localizer().language
 
     def translate(key: str, **kwargs: object) -> str:
-        return localizer_ref["value"].translate(key, **kwargs)
+        language = str(state.get("language") or default_language)
+        localizer = state.get("_localizer")
+        if not isinstance(localizer, Localizer) or state.get("_localizer_language") != language:
+            localizer = Localizer(language)
+            state["_localizer"] = localizer
+            state["_localizer_language"] = language
+        return localizer.translate(key, **kwargs)
 
     def t(key: str, fallback: str = "", **kwargs: object) -> str:
         value = translate(key, **kwargs)
@@ -857,6 +896,33 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             padding: 1rem;
             position: relative;
             overscroll-behavior-y: contain;
+        }
+        @media (any-hover: hover) and (any-pointer: fine) {
+            .cb-agent-stream {
+                overflow-y: auto !important;
+                scrollbar-gutter: auto;
+                scrollbar-width: auto;
+                scrollbar-color: #c7d0d9 #1c2228;
+            }
+            .cb-agent-stream::-webkit-scrollbar {
+                display: block;
+                width: 1rem;
+                background: #1c2228;
+            }
+            .cb-agent-stream::-webkit-scrollbar-track {
+                background: #1c2228;
+                box-shadow: inset 1px 0 0 #39424c;
+            }
+            .cb-agent-stream::-webkit-scrollbar-thumb {
+                min-height: 3.5rem;
+                border: 0.25rem solid #1c2228;
+                border-radius: 0.5rem;
+                background: #c7d0d9;
+                box-shadow: inset 0 0 0 1px #eef2f6;
+            }
+            .cb-agent-stream::-webkit-scrollbar-thumb:hover {
+                background: #f1f5f9;
+            }
         }
         .cb-agent-stream-content {
             display: flex;
@@ -2146,7 +2212,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         """,
         shared=True,
     )
-    state = {
+    state_defaults = {
         "selected_session_name": "",
         "selected_task_id": "",
         "selected_task_status": "",
@@ -2167,7 +2233,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         "active_page": "stream",
         "bridge_mode": "weixin",
         "bridge_mode_selected": False,
-        "language": localizer_ref["value"].language,
+        "language": default_language,
         "theme": "dark",
         "qr_login_open": False,
         "stream_session_task_limits": {},
@@ -2191,6 +2257,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         "stream_sidebar_codex_error": "",
         "sidebar_content_loaded": False,
     }
+    state = _ClientState(state_defaults, lambda: context.client.storage)
 
     def refresh_model():
         model = build_web_console_view_model(
@@ -2279,7 +2346,6 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         if selected not in {"zh-CN", "en-US"}:
             return
         state["language"] = selected
-        localizer_ref["value"] = Localizer(selected)
         ui.run_javascript(f"window.location.href = '/?lang={selected}'")
 
     def switch_theme(theme: str) -> None:
@@ -2299,7 +2365,6 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         selected = normalize_language(str(request.query_params.get("lang") or ""))
         if selected in {"zh-CN", "en-US"} and selected != state["language"]:
             state["language"] = selected
-            localizer_ref["value"] = Localizer(selected)
 
     def apply_request_theme(request) -> None:
         selected = normalize_web_theme(str(request.query_params.get("theme") or request.cookies.get("cb_theme") or ""))
@@ -3500,8 +3565,8 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         installed_clients.add(client_key)
         script = """
             (() => {
-                if (window.__cbStreamPatchRuntimeReady !== '1') {
-                window.__cbStreamPatchRuntimeReady = '1';
+                if (window.__cbStreamPatchRuntimeReady !== '5') {
+                window.__cbStreamPatchRuntimeReady = '5';
                 window.__cbStreamAfterPatch = (options = {}) => {
                 try {
                     if (window.history && 'scrollRestoration' in window.history) {
@@ -3532,16 +3597,27 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                 window.__cbStreamDesiredActiveKey = activeKey;
                 const nearBottomLimit = 120;
                 const nearHistoryStartLimit = 96;
+                const userScrollAwayLimit = 4;
                 const fileLinkTitle = labels.fileLinkTitle || 'Copy file path';
                 const imageLightboxOpenLabel = labels.imageLightboxOpenLabel || 'Open image preview';
                 const imageLightboxCloseLabel = labels.imageLightboxCloseLabel || 'Close image preview';
                 const copyCodeLabel = labels.copyCodeLabel || 'Copy code';
                 const copiedLabel = labels.copiedLabel || 'Copied';
                 const readDelta = (scroller) => Math.max(0, scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight);
-                const markProgrammaticScroll = () => {
-                    window.__cbStreamProgrammaticScrollUntil = Date.now() + 250;
+                const readScrollTop = (scroller) => Math.max(0, Number(scroller.scrollTop) || 0);
+                const maxScrollTop = (scroller) => Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+                const clampScrollTop = (scroller, value) => Math.min(maxScrollTop(scroller), Math.max(0, Number(value) || 0));
+                const programmaticScrollers = window.__cbStreamProgrammaticScrollers || new WeakSet();
+                window.__cbStreamProgrammaticScrollers = programmaticScrollers;
+                const markProgrammaticScroll = (scroller) => {
+                    if (!scroller) return;
+                    programmaticScrollers.add(scroller);
+                    window.requestAnimationFrame(() => programmaticScrollers.delete(scroller));
                 };
-                const isProgrammaticScroll = () => Date.now() < Number(window.__cbStreamProgrammaticScrollUntil || 0);
+                const acceptUserScroll = (scroller) => {
+                    programmaticScrollers.delete(scroller);
+                };
+                const isProgrammaticScroll = (scroller) => programmaticScrollers.has(scroller);
                 const scrollWindowToBottom = () => {
                     const height = Math.max(
                         document.body?.scrollHeight || 0,
@@ -3550,7 +3626,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     window.scrollTo(0, height);
                 };
                 const scrollToBottom = (scroller) => {
-                    markProgrammaticScroll();
+                    markProgrammaticScroll(scroller);
                     scroller.scrollTop = scroller.scrollHeight;
                     scroller.scrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
                     scrollWindowToBottom();
@@ -3562,13 +3638,15 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     if (!states[safeKey]) {
                         states[safeKey] = {
                             delta: 0,
+                            top: 0,
                             nearBottom: true,
                             userScrolledAway: false,
+                            restoreTopPending: false,
                         };
                     }
                     return states[safeKey];
                 };
-                const updateScrollState = (scroller, source = 'script') => {
+                const updateScrollState = (scroller, source = 'script', keepSavedTop = false) => {
                     const key = window.__cbStreamActiveKey || window.__cbStreamDesiredActiveKey || activeKey || readRenderedActiveKey();
                     const delta = readDelta(scroller);
                     const state = scrollStateFor(key);
@@ -3576,12 +3654,16 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     state.nearBottom = delta <= nearBottomLimit;
                     window.__cbStreamScrollDelta = delta;
                     window.__cbStreamWasNearBottom = state.nearBottom;
-                    if (source === 'user' && isProgrammaticScroll()) {
+                    if (source === 'user' && isProgrammaticScroll(scroller)) {
                         source = 'script';
+                    }
+                    if ((!keepSavedTop && !state.restoreTopPending) || source === 'user') {
+                        state.top = readScrollTop(scroller);
+                        state.restoreTopPending = false;
                     }
                     if (source === 'user') {
                         window.__cbStreamForceBottomUntil = 0;
-                        state.userScrolledAway = delta > nearBottomLimit;
+                        state.userScrolledAway = delta > userScrollAwayLimit;
                         window.__cbStreamUserScrolledAway = state.userScrolledAway;
                     } else {
                         window.__cbStreamUserScrolledAway = state.userScrolledAway;
@@ -4301,6 +4383,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     window.__cbStreamTypewriterObservedContent = streamContent;
                 };
                 const setupStreamBehavior = () => {
+                    setupStreamWheelFallback();
                     setupFooterLabelReveal();
                     setupCopyFeedback();
                     setupFileLinkFeedback();
@@ -4312,20 +4395,65 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     updateLiveElapsed();
                     setupLiveTypewriter();
                 };
+                const setupStreamWheelFallback = () => {
+                    if (window.__cbStreamWheelFallbackReady === '4') return;
+                    window.__cbStreamWheelFallbackReady = '4';
+                    const handleWheel = (event) => {
+                        if (event.defaultPrevented || event.ctrlKey || event.metaKey) return;
+                        const target = event.target;
+                        if (target?.closest?.('.cb-sidebar-shell, .cb-composer-zone, .q-menu, .q-dialog')) return;
+                        const scroller = document.querySelector('.cb-agent-stream');
+                        if (!scroller) return;
+                        const deltaY = Number(event.deltaY) || (Number(event.wheelDelta) ? -Number(event.wheelDelta) : 0);
+                        if (!deltaY) return;
+                        const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? scroller.clientHeight : 1;
+                        const nextTop = clampScrollTop(scroller, scroller.scrollTop + deltaY * unit);
+                        if (nextTop === scroller.scrollTop) return;
+                        acceptUserScroll(scroller);
+                        event.preventDefault();
+                        scroller.scrollTop = nextTop;
+                        updateScrollState(scroller, 'user');
+                    };
+                    const handleScrollbarPointerDown = (event) => {
+                        if (event.button !== undefined && event.button !== 0) return;
+                        const scroller = document.querySelector('.cb-agent-stream');
+                        if (!scroller) return;
+                        const rect = scroller.getBoundingClientRect();
+                        const scrollbarWidth = Math.max(18, rect.width - scroller.clientWidth);
+                        const inScrollbar = event.clientX >= rect.right - scrollbarWidth
+                            && event.clientX <= rect.right
+                            && event.clientY >= rect.top
+                            && event.clientY <= rect.bottom;
+                        if (inScrollbar) acceptUserScroll(scroller);
+                    };
+                    document.addEventListener('wheel', handleWheel, { capture: true, passive: false });
+                    document.addEventListener('mousewheel', handleWheel, { capture: true, passive: false });
+                    document.addEventListener('pointerdown', handleScrollbarPointerDown, true);
+                    document.addEventListener('mousedown', handleScrollbarPointerDown, true);
+                };
                 const attachScrollListener = (scroller) => {
                     const desiredActiveKey = window.__cbStreamDesiredActiveKey || activeKey || readRenderedActiveKey();
                     const streamChanged = window.__cbStreamActiveKey !== desiredActiveKey;
                     if (streamChanged) {
                         window.__cbStreamActiveKey = desiredActiveKey;
+                        const hasKnownState = Object.prototype.hasOwnProperty.call(
+                            window.__cbStreamScrollStateByKey || {}, desiredActiveKey,
+                        );
                         const state = scrollStateFor(desiredActiveKey);
-                        state.delta = 0;
-                        state.nearBottom = true;
-                        state.userScrolledAway = false;
-                        window.__cbStreamScrollDelta = state.delta;
-                        window.__cbStreamWasNearBottom = state.nearBottom;
-                        window.__cbStreamUserScrolledAway = state.userScrolledAway;
+                        if (forceBottom || !hasKnownState) {
+                            state.delta = 0;
+                            state.top = 0;
+                            state.nearBottom = true;
+                            state.userScrolledAway = false;
+                            state.restoreTopPending = false;
+                            window.__cbStreamScrollDelta = state.delta;
+                            window.__cbStreamWasNearBottom = state.nearBottom;
+                            window.__cbStreamUserScrolledAway = state.userScrolledAway;
+                            window.__cbStreamForceBottomUntil = Date.now() + 1200;
+                        } else {
+                            window.__cbStreamForceBottomUntil = 0;
+                        }
                         window.__cbStreamComposerFocusedKey = '';
-                        window.__cbStreamForceBottomUntil = Date.now() + 1200;
                     }
                     if (scroller.dataset.cbScrollReady !== '1') {
                         scroller.dataset.cbScrollReady = '1';
@@ -4333,13 +4461,32 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                             updateScrollState(scroller, 'user');
                         }, { passive: true });
                     }
+                    if (scroller.dataset.cbWheelReady !== '1') {
+                        scroller.dataset.cbWheelReady = '1';
+                        scroller.addEventListener('wheel', (event) => {
+                            if (event.defaultPrevented || event.deltaY === 0) return;
+                            const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? scroller.clientHeight : 1;
+                            const nextTop = clampScrollTop(scroller, scroller.scrollTop + event.deltaY * unit);
+                            if (nextTop === scroller.scrollTop) return;
+                            acceptUserScroll(scroller);
+                            event.preventDefault();
+                            scroller.scrollTop = nextTop;
+                            updateScrollState(scroller, 'user');
+                        }, { passive: false });
+                    }
                     return streamChanged;
                 };
                 const positionScroller = (scroller) => {
                     const streamChanged = attachScrollListener(scroller);
                     const key = window.__cbStreamActiveKey || window.__cbStreamDesiredActiveKey || activeKey || readRenderedActiveKey();
                     const state = scrollStateFor(key);
-                    const previousDelta = Number(state.delta);
+                    const previousTop = Number(state.top);
+                    const restorePreviousTop = () => {
+                        const restoredTop = clampScrollTop(scroller, previousTop);
+                        state.restoreTopPending = restoredTop !== previousTop;
+                        scroller.scrollTop = restoredTop;
+                        return state.restoreTopPending;
+                    };
                     const loadOlderAnchor = window.__cbStreamLoadOlderAnchor;
                     if (
                         loadOlderAnchor
@@ -4347,7 +4494,8 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                         && Number.isFinite(Number(loadOlderAnchor.scrollHeight))
                         && Number.isFinite(Number(loadOlderAnchor.scrollTop))
                     ) {
-                        markProgrammaticScroll();
+                        markProgrammaticScroll(scroller);
+                        state.restoreTopPending = false;
                         if (loadOlderAnchor.stickToBottom === true) {
                             scrollToBottom(scroller);
                         } else {
@@ -4365,23 +4513,27 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                         state.delta = 0;
                         state.nearBottom = true;
                         state.userScrolledAway = false;
+                        state.restoreTopPending = false;
                     }
-                    const shouldStickToBottom = forceBottom || Date.now() < Number(window.__cbStreamForceBottomUntil || 0) || state.nearBottom === true || !Number.isFinite(previousDelta);
+                    const shouldStickToBottom = forceBottom
+                        || Date.now() < Number(window.__cbStreamForceBottomUntil || 0)
+                        || (!state.userScrolledAway && state.nearBottom === true)
+                        || !Number.isFinite(previousTop);
                     if (preserveTop && !shouldStickToBottom) {
-                        markProgrammaticScroll();
-                        scroller.scrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight - previousDelta);
-                        state.delta = readDelta(scroller);
-                        state.nearBottom = false;
-                        state.userScrolledAway = true;
-                        updateScrollState(scroller);
+                        markProgrammaticScroll(scroller);
+                        const topWasClamped = restorePreviousTop();
+                        updateScrollState(scroller, 'script', topWasClamped);
                         revealPositionedStream();
                         return;
                     }
                     if (shouldStickToBottom) {
                         scrollToBottom(scroller);
                     } else {
-                        markProgrammaticScroll();
-                        scroller.scrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight - previousDelta);
+                        markProgrammaticScroll(scroller);
+                        const topWasClamped = restorePreviousTop();
+                        updateScrollState(scroller, 'script', topWasClamped);
+                        revealPositionedStream();
+                        return;
                     }
                     updateScrollState(scroller);
                     revealPositionedStream();
