@@ -606,7 +606,7 @@ class McpServerInjectionTests(unittest.TestCase):
             self.assertIsNone(backend.last_context.mcp_server)
             self.assertEqual("exec", backend.last_context.codex_transport)
 
-    def test_qq_private_admin_injects_admin_history_mcp(self) -> None:
+    def test_qq_private_admin_injects_full_operations_mcp(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             workdir = temp_path / "workspace"
@@ -643,11 +643,9 @@ class McpServerInjectionTests(unittest.TestCase):
                 hub._invoke_backend(config.agents[0], task)
 
             self.assertIsNotNone(backend.last_context.mcp_server)
-            self.assertEqual("qq_history", backend.last_context.mcp_server.name)
-            self.assertIn("--qq-history-scope", backend.last_context.mcp_server.args)
-            self.assertIn("admin", backend.last_context.mcp_server.args)
-            self.assertIn("--qq-admin-user-id", backend.last_context.mcp_server.args)
-            self.assertIn("10001", backend.last_context.mcp_server.args)
+            self.assertEqual("operations", backend.last_context.mcp_server.name)
+            self.assertNotIn("--qq-history-scope", backend.last_context.mcp_server.args)
+            self.assertNotIn("--qq-admin-user-id", backend.last_context.mcp_server.args)
             self.assertEqual("exec", backend.last_context.codex_transport)
 
 

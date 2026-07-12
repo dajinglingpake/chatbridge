@@ -882,7 +882,7 @@ class MultiCodexHub:
         source = task.source.strip().lower()
         sender_id = task.sender_id.strip()
         if source.startswith("wechat"):
-            return self._build_wechat_mcp_server(task)
+            return self._build_direct_mcp_server(task)
         if source.startswith("qq") and sender_id.lower().startswith("qq:group:"):
             group_id = self._qq_group_id_from_sender(sender_id)
             if not group_id:
@@ -896,14 +896,10 @@ class MultiCodexHub:
             user_id = self._qq_private_user_id_from_sender(sender_id)
             if not self._is_qq_history_admin_user(user_id):
                 return None
-            return McpServerConfig(
-                name=QQ_HISTORY_MCP_SERVER_NAME,
-                command=sys.executable,
-                args=[str(MCP_SERVER_PATH), "--qq-history-scope", "admin", "--qq-admin-user-id", user_id],
-            )
+            return self._build_direct_mcp_server(task)
         return None
 
-    def _build_wechat_mcp_server(self, task: HubTask) -> McpServerConfig | None:
+    def _build_direct_mcp_server(self, task: HubTask) -> McpServerConfig:
         args = [str(MCP_SERVER_PATH)]
         if task.bridge_conversations_path.strip():
             args.extend(["--bridge-conversations-path", task.bridge_conversations_path.strip()])
