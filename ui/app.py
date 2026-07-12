@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 from collections.abc import Callable, MutableMapping
 import json
+import os
 import time
 import traceback
 from datetime import datetime
@@ -38,6 +39,10 @@ STREAM_HISTORY_PAGE_SIZE = 20
 STREAM_SIDEBAR_PAGE_SIZE = 40
 WEB_THEME_OPTIONS = ("dark", "light", "forest")
 STREAM_UI_LOG_PATH = APP_DIR / ".runtime" / "logs" / "ui_stream_refresh.jsonl"
+STREAM_UI_DEBUG_LOG_ENABLED = os.environ.get("CHATBRIDGE_UI_DEBUG_LOG", "").strip().lower() in {"1", "true", "yes", "on"}
+STREAM_UI_ALWAYS_LOG_EVENTS = {"refresh_timer_cancel", "client_disconnect"}
+NICEGUI_RECONNECT_TIMEOUT_SECONDS = 30.0
+NICEGUI_MESSAGE_HISTORY_LENGTH = 200
 _CLIENT_STATE_STORAGE_KEY = "chatbridge_ui_state"
 
 
@@ -81,6 +86,12 @@ def _stream_initial_history_limit(session_name: str) -> int:
 
 
 def _append_stream_ui_log(event: str, **fields: object) -> None:
+    if not STREAM_UI_DEBUG_LOG_ENABLED and not (
+        event in STREAM_UI_ALWAYS_LOG_EVENTS
+        or event.startswith("browser_")
+        or event.endswith("_error")
+    ):
+        return
     try:
         STREAM_UI_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -2248,6 +2259,8 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         "stream_force_bottom_session": "",
         "stream_force_bottom_next": False,
         "stream_preserve_top_session": "",
+        "stream_switch_refresh_pending": False,
+        "stream_switch_sequence": 0,
         "stream_sidebar_task_limit": STREAM_SIDEBAR_PAGE_SIZE,
         "stream_sidebar_codex_loaded": False,
         "stream_sidebar_codex_threads": [],
@@ -3420,6 +3433,16 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         cleaned_session_name = str(session_name or "").strip() or "default"
         encoded_session_name = quote(cleaned_session_name, safe="")
         was_stream_page = state["active_page"] == "stream"
+        current_session_name = str(state.get("selected_session_name") or "").strip()
+        if was_stream_page and current_session_name == cleaned_session_name:
+            ui.run_javascript("document.body.classList.remove('cb-sidebar-open')")
+            return
+        try:
+            switch_sequence = int(state.get("stream_switch_sequence") or 0) + 1
+        except (TypeError, ValueError):
+            switch_sequence = 1
+        state["stream_switch_sequence"] = switch_sequence
+        state["stream_switch_refresh_pending"] = True
         state["active_page"] = "stream"
         state["selected_session_name"] = cleaned_session_name
         state["session_page"] = 1
@@ -3444,14 +3467,23 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         )
         if was_stream_page:
             def refresh_selected_session() -> None:
-                if str(state.get("selected_session_name") or "").strip() != cleaned_session_name:
+                if (
+                    str(state.get("selected_session_name") or "").strip() != cleaned_session_name
+                    or state.get("stream_switch_sequence") != switch_sequence
+                ):
                     return
-                _refresh_stream_parts()
+                try:
+                    _refresh_stream_parts()
+                finally:
+                    if state.get("stream_switch_sequence") == switch_sequence:
+                        state["stream_switch_refresh_pending"] = False
 
             ui.timer(0.01, refresh_selected_session, once=True)
         else:
             sidebar_navigation_view.refresh()
             content_view.refresh()
+            if state.get("stream_switch_sequence") == switch_sequence:
+                state["stream_switch_refresh_pending"] = False
 
     def shell_view() -> None:
         with ui.element("div").classes("cb-sidebar-backdrop").on("click", lambda _event: close_sidebar()):
@@ -3597,7 +3629,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                 window.__cbStreamDesiredActiveKey = activeKey;
                 const nearBottomLimit = 120;
                 const nearHistoryStartLimit = 96;
-                const userScrollAwayLimit = 4;
+                const userScrollAwayLimit = 0;
                 const fileLinkTitle = labels.fileLinkTitle || 'Copy file path';
                 const imageLightboxOpenLabel = labels.imageLightboxOpenLabel || 'Open image preview';
                 const imageLightboxCloseLabel = labels.imageLightboxCloseLabel || 'Close image preview';
@@ -4694,6 +4726,8 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                 return
             if state["active_page"] == "stream":
                 try:
+                    if state.get("stream_switch_refresh_pending"):
+                        return
                     selected_stream_session = str(state["selected_session_name"] or "").strip()
                     if not codex_thread_id_from_session_name(selected_stream_session):
                         next_hub_file_signature = stream_hub_state_file_signature()
@@ -4750,6 +4784,12 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         timer_ref["timer"] = ui.timer(1.0, refresh_stream)
 
         def cancel_timer() -> None:
+            _append_stream_ui_log(
+                "client_disconnect",
+                client_id=str(getattr(client, "id", id(client))),
+                deleted=bool(getattr(client, "_deleted", False)),
+                has_socket=bool(getattr(client, "has_socket_connection", False)),
+            )
             initial_timer = timer_ref["initial_timer"]
             timer = timer_ref["timer"]
             if initial_timer is not None:
@@ -4823,4 +4863,6 @@ def run_ui(host: str = "0.0.0.0", port: int = 8765, native: bool = False) -> Non
         native=native,
         show=False,
         title=f"{APP_SHELL.app_name} UI",
+        reconnect_timeout=NICEGUI_RECONNECT_TIMEOUT_SECONDS,
+        message_history_length=NICEGUI_MESSAGE_HISTORY_LENGTH,
     )

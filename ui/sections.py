@@ -1594,7 +1594,11 @@ def _render_mobile_stream_scroll_button(ui: UIFactoryLike) -> None:
             window.__cbStreamScrollDelta = 0;
             window.__cbStreamWasNearBottom = true;
             window.__cbStreamUserScrolledAway = false;
-            window.__cbStreamProgrammaticScrollUntil = Date.now() + 250;
+            const programmaticScrollers = window.__cbStreamProgrammaticScrollers;
+            if (programmaticScrollers) {
+                programmaticScrollers.add(scroller);
+                window.requestAnimationFrame(() => programmaticScrollers.delete(scroller));
+            }
             scroller.scrollTop = scroller.scrollHeight;
             document.querySelector('.cb-scroll-bottom-button')?.classList.remove('cb-scroll-bottom-button-visible');
         }

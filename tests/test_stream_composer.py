@@ -2208,7 +2208,7 @@ class StreamComposerTests(unittest.TestCase):
         source = Path("ui/app.py").read_text(encoding="utf-8")
         sections_source = Path("ui/sections.py").read_text(encoding="utf-8")
 
-        self.assertIn("const userScrollAwayLimit = 4;", source)
+        self.assertIn("const userScrollAwayLimit = 0;", source)
         self.assertIn("const clampScrollTop = (scroller, value)", source)
         self.assertIn("top: 0,", source)
         self.assertIn("state.top = readScrollTop(scroller);", source)
@@ -2221,10 +2221,18 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("return state.restoreTopPending;", source)
         self.assertIn("updateScrollState(scroller, 'script', topWasClamped);", source)
         self.assertIn("top: Math.max(0, scroller.scrollHeight - scroller.clientHeight),", sections_source)
+        self.assertIn("const programmaticScrollers = window.__cbStreamProgrammaticScrollers;", sections_source)
+        self.assertNotIn("__cbStreamProgrammaticScrollUntil", sections_source)
 
     def test_stream_switch_resets_scroll_state_to_bottom(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")
 
+        self.assertIn('"stream_switch_refresh_pending": False,', source)
+        self.assertIn('"stream_switch_sequence": 0,', source)
+        self.assertIn("if was_stream_page and current_session_name == cleaned_session_name:", source)
+        self.assertIn('state["stream_switch_refresh_pending"] = True', source)
+        self.assertIn('state.get("stream_switch_sequence") != switch_sequence', source)
+        self.assertIn('if state.get("stream_switch_refresh_pending"):', source)
         self.assertIn("state[\"stream_force_bottom_session\"] = cleaned_session_name", source)
         self.assertIn("if (streamChanged) {", source)
         self.assertIn("const hasKnownState = Object.prototype.hasOwnProperty.call(", source)
