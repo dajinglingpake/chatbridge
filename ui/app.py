@@ -2390,14 +2390,20 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             state["active_page"] = page.key
 
     def apply_request_session(request) -> None:
+        has_session_query = "session" in request.query_params
         requested_session = str(request.query_params.get("session") or "").strip()
         if requested_session:
             state["active_page"] = "stream"
             state["selected_session_name"] = requested_session
             state["stream_force_bottom_session"] = requested_session
             state["stream_force_bottom_next"] = True
-        elif state["active_page"] == "stream":
+        elif has_session_query and state["active_page"] == "stream":
             state["selected_session_name"] = ""
+            state["stream_force_bottom_next"] = True
+        elif state["active_page"] == "stream":
+            preserved_session = str(state.get("selected_session_name") or "").strip()
+            if preserved_session:
+                state["stream_force_bottom_session"] = preserved_session
             state["stream_force_bottom_next"] = True
 
     def mark_qr_login_open() -> None:
@@ -2433,10 +2439,22 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
 
     def _stream_state_snapshot() -> dict[str, object]:
         session_name = str(state["selected_session_name"] or "").strip()
-        return build_stream_state_snapshot(
+        stream_state = build_stream_state_snapshot(
             selected_session_name=session_name,
             task_limit=_stream_global_task_limit(session_name),
             session_task_limit=_stream_session_task_limit(session_name),
+        )
+        if session_name:
+            return stream_state
+        inferred_session = _resolve_stream_active_session(stream_state)
+        if inferred_session == "default":
+            return stream_state
+        state["selected_session_name"] = inferred_session
+        state["stream_force_bottom_session"] = inferred_session
+        return build_stream_state_snapshot(
+            selected_session_name=inferred_session,
+            task_limit=_stream_global_task_limit(inferred_session),
+            session_task_limit=_stream_session_task_limit(inferred_session),
         )
 
     def _stream_render_snapshot() -> tuple[dict[str, object], str]:

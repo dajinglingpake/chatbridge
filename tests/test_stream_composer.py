@@ -1782,6 +1782,10 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("def _stream_global_task_limit(session_name: str) -> int:", source)
         self.assertIn('return 0 if str(session_name or "").strip() else 1', source)
         self.assertIn("task_limit=_stream_global_task_limit(session_name),", source)
+        self.assertIn("inferred_session = _resolve_stream_active_session(stream_state)", source)
+        self.assertIn('state["selected_session_name"] = inferred_session', source)
+        self.assertIn('state["stream_force_bottom_session"] = inferred_session', source)
+        self.assertIn("task_limit=_stream_global_task_limit(inferred_session),", source)
         self.assertIn('model = None if state["active_page"] in {"mobile", "stream"} else refresh_model()', source)
         self.assertIn("window.__cbStreamForceBottomUntil = Date.now() + 1200;", source)
         self.assertIn("forceBottom\n                        || Date.now() < Number(window.__cbStreamForceBottomUntil || 0)", source)
@@ -1980,11 +1984,14 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("z-index: 2200;", source)
         self.assertIn("pointer-events: none;", source)
 
-    def test_stream_page_without_session_query_clears_stale_selected_session(self) -> None:
+    def test_stream_page_without_session_query_preserves_selected_session(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")
 
-        self.assertIn('elif state["active_page"] == "stream":', source)
+        self.assertIn('has_session_query = "session" in request.query_params', source)
+        self.assertIn('elif has_session_query and state["active_page"] == "stream":', source)
         self.assertIn('state["selected_session_name"] = ""', source)
+        self.assertIn('preserved_session = str(state.get("selected_session_name") or "").strip()', source)
+        self.assertIn('state["stream_force_bottom_session"] = preserved_session', source)
         self.assertIn('state["stream_force_bottom_session"] = requested_session', source)
 
     def test_non_stream_navigation_removes_session_from_browser_url(self) -> None:
