@@ -628,6 +628,7 @@
   "ui.web.mobile.send_message": "Send message",
   "ui.web.mobile.context_left": "Context {percent}%",
   "ui.web.mobile.stream_sessions": "Sessions",
+  "ui.web.mobile.refresh_session_list": "Refresh session list",
   "ui.web.mobile.stream_session_meta": "{count} turns | Agent: {agent}",
   "ui.web.mobile.stream_status_line": "Updated: {updated_at} | Running {running} | Queued {queued}",
   "ui.web.mobile.stream_task_meta": "Session: {session} | Agent: {agent}",

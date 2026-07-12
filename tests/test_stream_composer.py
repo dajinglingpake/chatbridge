@@ -2266,6 +2266,18 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("session_order.insert(0, selected_sidebar_session)", source)
         self.assertIn("not codex_thread_id_from_session_name(selected_sidebar_session)", source)
 
+    def test_loaded_sidebar_can_refresh_and_include_current_empty_qq_session(self) -> None:
+        source = Path("ui/app.py").read_text(encoding="utf-8")
+        start = source.index("def sidebar_sessions_view")
+        end = source.index("def right_sidebar_view", start)
+        body = source[start:end]
+
+        self.assertIn("stream_qq_current_session_name()", body)
+        self.assertIn("qq_current_session not in sessions", body)
+        self.assertIn("session_order.insert(0, qq_current_session)", body)
+        self.assertIn("ui.web.mobile.refresh_session_list", body)
+        self.assertIn("on_click=sidebar_sessions_view.refresh", body)
+
     def test_sidebar_uses_chunked_state_and_lazy_codex_loading(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")
         start = source.index("def sidebar_sessions_view")

@@ -20,7 +20,7 @@ from core.shell_schema import APP_SHELL
 from core.dashboard import refresh_dashboard_cache
 from core.view_models import build_web_console_view_model
 from localization import Localizer, normalize_language
-from ui.mobile import MOBILE_UPLOAD_ROOT, build_mobile_access_url, build_mobile_qr_data_url, build_stream_sidebar_state_snapshot, build_stream_signature_snapshot, build_stream_state_snapshot, codex_thread_id_from_session_name, install_mobile_routes, is_mobile_access_authorized, load_codex_threads_page, stream_hub_state_file_signature
+from ui.mobile import MOBILE_UPLOAD_ROOT, build_mobile_access_url, build_mobile_qr_data_url, build_stream_sidebar_state_snapshot, build_stream_signature_snapshot, build_stream_state_snapshot, codex_thread_id_from_session_name, install_mobile_routes, is_mobile_access_authorized, load_codex_threads_page, stream_hub_state_file_signature, stream_qq_current_session_name
 from ui.qr_login import install_qr_login_dialog
 from ui.qq_login import install_qq_login_dialog
 from ui.sections import STREAM_MANUAL_HISTORY_LIMIT, render_diagnostics_section, render_home_section, render_mobile_section, render_mobile_stream_composer_section, render_mobile_stream_messages_section, render_mobile_stream_shell, render_sessions_section
@@ -3257,13 +3257,25 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                 session_order.append(session_name)
             sessions[session_name].append(task)
         session_order = _stream_session_order(sessions, session_order)
+        qq_current_session = stream_qq_current_session_name()
+        if qq_current_session and qq_current_session not in sessions:
+            sessions[qq_current_session] = []
+            session_counts[qq_current_session] = 0
+            session_order.insert(0, qq_current_session)
+            session_total_count += 1
         selected_sidebar_session = str(state["selected_session_name"] or "").strip()
         if selected_sidebar_session and not codex_thread_id_from_session_name(selected_sidebar_session) and selected_sidebar_session not in sessions:
             sessions[selected_sidebar_session] = []
             session_order.insert(0, selected_sidebar_session)
 
         with ui.column().classes("w-full gap-2 min-h-0"):
-            ui.label(t("ui.web.mobile.stream_sessions", "会话")).classes("cb-sidebar-section-title")
+            with ui.row().classes("w-full items-center justify-between gap-2"):
+                ui.label(t("ui.web.mobile.stream_sessions", "会话")).classes("cb-sidebar-section-title")
+                ui.button(
+                    t("ui.web.mobile.refresh_session_list", "刷新会话列表"),
+                    on_click=sidebar_sessions_view.refresh,
+                    icon="refresh",
+                ).props("flat dense").classes("cb-stream-refresh-session-list-button")
             if not session_order:
                 with ui.element("div").classes("cb-panel w-full p-3"):
                     ui.label(t("ui.web.mobile.stream_empty", "暂无任务输出。")).classes("text-sm cb-muted")

@@ -32,6 +32,7 @@ from ui.mobile import (
     codex_thread_session_name,
     load_codex_threads_page,
     stream_hub_state_file_signature,
+    stream_qq_current_session_name,
 )
 
 
@@ -1299,6 +1300,33 @@ class MobileStateTests(unittest.TestCase):
         self.assertEqual(first_signature, second_signature)
         self.assertGreater(first_signature[0], 0)
         self.assertGreater(first_signature[1], 0)
+
+    def test_stream_qq_current_session_uses_latest_private_binding(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "qq_conversations.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "qq:private:old": {
+                            "current_session": "old-session",
+                            "sessions": {"old-session": {"updated_at": "2026-07-12T01:00:00"}},
+                        },
+                        "qq:private:current": {
+                            "current_session": "new-session",
+                            "sessions": {"new-session": {"updated_at": "2026-07-13T01:00:00"}},
+                        },
+                        "qq:group:123": {
+                            "current_session": "group-session",
+                            "sessions": {"group-session": {"updated_at": "2026-07-14T01:00:00"}},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch("ui.mobile.QQ_CONVERSATIONS_PATH", state_path):
+                current_session = stream_qq_current_session_name()
+
+        self.assertEqual("new-session", current_session)
 
     def test_stream_raw_hub_state_reuses_cached_parse_for_same_signature(self) -> None:
         with TemporaryDirectory() as temp_dir:

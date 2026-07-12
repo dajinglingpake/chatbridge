@@ -41,6 +41,7 @@ from core.state_models import HubTask
 from runtime_stack import HUB_STATE_PATH, get_runtime_snapshot, read_json
 
 MOBILE_ACCESS_PATH = STATE_DIR / "mobile_access.json"
+QQ_CONVERSATIONS_PATH = STATE_DIR / "qq_conversations.json"
 MOBILE_UPLOAD_ROOT = APP_DIR / ".runtime" / "uploads"
 MOBILE_TOKEN_BYTES = 24
 MOBILE_POLL_SECONDS = 1.0
@@ -205,6 +206,26 @@ def stream_hub_state_file_signature() -> tuple[int, int]:
     except OSError:
         return (-1, -1)
     return int(stat.st_mtime_ns), int(stat.st_size)
+
+
+def stream_qq_current_session_name() -> str:
+    payload = read_json(QQ_CONVERSATIONS_PATH)
+    candidates: list[tuple[tuple[int, float, str], str, str]] = []
+    if not isinstance(payload, dict):
+        return ""
+    for sender_id, raw_binding in payload.items():
+        cleaned_sender_id = str(sender_id or "").strip()
+        if not cleaned_sender_id.startswith("qq:private:") or not isinstance(raw_binding, dict):
+            continue
+        current_session = str(raw_binding.get("current_session") or "").strip()
+        raw_sessions = raw_binding.get("sessions")
+        if not current_session or not isinstance(raw_sessions, dict):
+            continue
+        raw_meta = raw_sessions.get(current_session)
+        meta = raw_meta if isinstance(raw_meta, dict) else {}
+        updated_at = str(meta.get("updated_at") or meta.get("created_at") or "").strip()
+        candidates.append((_stream_time_sort_key(updated_at), cleaned_sender_id, current_session))
+    return max(candidates)[2] if candidates else ""
 
 
 def _load_raw_hub_state() -> dict[str, object]:

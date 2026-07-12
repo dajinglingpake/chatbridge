@@ -628,6 +628,7 @@
   "ui.web.mobile.send_message": "发送消息",
   "ui.web.mobile.context_left": "上下文 {percent}%",
   "ui.web.mobile.stream_sessions": "会话",
+  "ui.web.mobile.refresh_session_list": "刷新会话列表",
   "ui.web.mobile.stream_session_meta": "{count} 轮对话 | Agent: {agent}",
   "ui.web.mobile.stream_status_line": "已更新: {updated_at} | 运行中 {running} | 排队 {queued}",
   "ui.web.mobile.stream_task_meta": "会话: {session} | Agent: {agent}",
