@@ -1326,14 +1326,29 @@ class QQOneBotBridge:
         if agent is None:
             return self._t("bridge.agent.not_found", agent=agent_id)
 
+        binding = self._ensure_conversation(sender_key)
         session_name = current_session or "default"
+        session_meta = binding.sessions.get(session_name) or self._new_session_meta()
         session_file = resolve_session_file(agent, session_name, SESSION_DIR)
         backend = normalize_backend(getattr(agent, "backend", "") or self.config.default_backend)
-        if not session_file.exists() or not session_file.read_text(encoding="utf-8").strip():
-            return self._t("bridge.session.clear.empty", session=session_name, backend=backend)
+        had_backend_session = session_file.exists() and bool(session_file.read_text(encoding="utf-8").strip())
+        if had_backend_session:
+            session_file.write_text("", encoding="utf-8")
 
-        session_file.write_text("", encoding="utf-8")
-        return self._t("bridge.session.clear", session=session_name, backend=backend)
+        new_session = self._allocate_session_name(binding, _safe_path_part(sender_key))
+        binding.sessions[new_session] = self._new_session_meta(
+            session_meta.backend,
+            workdir=session_meta.workdir,
+            model=session_meta.model,
+            reasoning_effort=session_meta.reasoning_effort,
+            permission_mode=session_meta.permission_mode,
+        )
+        binding.current_session = new_session
+        binding.last_regular_session = new_session
+        self._save_conversations()
+
+        message_key = "bridge.session.clear.rotated" if had_backend_session else "bridge.session.clear.empty_rotated"
+        return self._t(message_key, session=session_name, new_session=new_session, backend=backend)
 
     def _save_pending_tasks(self) -> None:
         self.pending_task_store.save(self.pending_tasks)

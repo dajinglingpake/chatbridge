@@ -692,8 +692,37 @@ class QQOneBotBridgeTests(unittest.TestCase):
 
         self.assertEqual("", session_file.read_text(encoding="utf-8"))
         self.assertEqual("old-unused-session-id", stale_file.read_text(encoding="utf-8"))
+        binding = bridge.conversations["qq:private:10001"]
+        self.assertEqual("qq-private-10001-2", binding.current_session)
+        self.assertEqual("qq-private-10001-2", binding.last_regular_session)
+        self.assertIn("qq-private-10001", binding.sessions)
+        self.assertIn("qq-private-10001-2", binding.sessions)
+        self.assertEqual("qq-private-10001-2", bridge._session_name("qq:private:10001"))
         self.assertEqual("send_private_msg", bridge.api_calls[-1][0])
         self.assertIn("已清空当前 Agent 会话", bridge.api_calls[-1][1]["message"])
+        self.assertIn("新会话: qq-private-10001-2", bridge.api_calls[-1][1]["message"])
+
+    def test_clear_command_rotates_ui_session_when_backend_session_is_already_empty(self) -> None:
+        session_dir = self.temp_path / "sessions"
+        session_dir.mkdir()
+        bridge = FakeQQBridge(self.temp_path)
+
+        with (
+            patch("qq_onebot_bridge.SESSION_DIR", session_dir),
+            patch.object(QQOneBotBridge, "_load_agents", return_value=[SimpleNamespace(id="qq", backend="codex", session_file=str(session_dir / "qq.txt"))]),
+        ):
+            bridge.handle_event(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "user_id": 10001,
+                    "message": "/clear",
+                }
+            )
+
+        binding = bridge.conversations["qq:private:10001"]
+        self.assertEqual("qq-private-10001-2", binding.current_session)
+        self.assertIn("已经是空的，已切换到新会话", bridge.api_calls[-1][1]["message"])
 
     def test_restart_command_schedules_qq_stack_restart(self) -> None:
         bridge = FakeQQBridge(self.temp_path)
