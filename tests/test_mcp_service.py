@@ -154,14 +154,19 @@ class McpServiceTests(unittest.TestCase):
             _resolve_shareable_project_file=lambda raw_path: target_file,
             _send_media_to_reply_target=unittest.mock.Mock(),
         )
-        with patch("qq_onebot_bridge.QQOneBotBridge", return_value=fake_bridge):
-            with patch("core.mcp_service.BridgeConfig.load", return_value=SimpleNamespace()):
-                result = send_bridge_media("qq:private:10001", "docs/diagram.png")
+        with (
+            patch("qq_onebot_bridge.QQOneBotBridge", return_value=fake_bridge),
+            patch("core.mcp_service.BridgeConfig.load", return_value=SimpleNamespace()),
+            patch("core.mcp_service.time.perf_counter", side_effect=[100.0, 102.345]),
+        ):
+            result = send_bridge_media("qq:private:10001", "docs/diagram.png")
         self.assertTrue(result.ok)
         reply_target, sent_file = fake_bridge._send_media_to_reply_target.call_args.args
         self.assertEqual({"message_type": "private", "user_id": "10001"}, reply_target)
         self.assertNotEqual(target_file, sent_file)
         self.assertEqual(target_file.read_bytes(), sent_file.read_bytes())
+        self.assertIn("耗时 2.34 秒", result.summary)
+        self.assertEqual(2.34, result.data["elapsed_seconds"])
 
     def test_send_current_qq_private_admin_media_uses_current_sender(self) -> None:
         expected_result = SimpleNamespace(ok=True)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -50,6 +51,17 @@ def _prepare_media_delivery_copy(file_path: Path) -> Path:
     target_path = exports_dir / stamped_name
     shutil.copyfile(file_path, target_path)
     return target_path
+
+
+def _with_media_elapsed(result: ToolActionResult, started_at: float) -> ToolActionResult:
+    elapsed_seconds = round(max(0.0, time.perf_counter() - started_at), 2)
+    data = dict(result.data)
+    data["elapsed_seconds"] = elapsed_seconds
+    return ToolActionResult(
+        ok=result.ok,
+        summary=f"{result.summary}（耗时 {elapsed_seconds:.2f} 秒）",
+        data=data,
+    )
 
 
 def _select_latest_display_task(session_tasks: list[HubTask]) -> HubTask | None:
@@ -899,34 +911,39 @@ def send_weixin_media(target_sender_id: str, path: str) -> ToolActionResult:
     return send_bridge_media(target_sender_id, path)
 
 def _send_weixin_media(cleaned_sender_id: str, cleaned_path: str) -> ToolActionResult:
+    started_at = time.perf_counter()
     bridge = WeixinBridge(BridgeConfig.load())
     try:
         account = bridge._load_account()
         token = str(account.get("token") or "").strip()
         if not token:
-            return ToolActionResult(ok=False, summary="微信账号 token 为空，请先登录")
+            return _with_media_elapsed(ToolActionResult(ok=False, summary="微信账号 token 为空，请先登录"), started_at)
         base_url = str(account.get("baseUrl") or DEFAULT_WEIXIN_BASE_URL).strip()
         original_file_path = bridge._resolve_shareable_project_file(cleaned_path)
         file_path = _prepare_media_delivery_copy(original_file_path)
         context_token = bridge.context_tokens.get(cleaned_sender_id, "")
         response = bridge._send_media_file(base_url, token, cleaned_sender_id, context_token, file_path)
     except Exception as exc:  # noqa: BLE001
-        return ToolActionResult(ok=False, summary=f"发送媒体失败：{exc}")
-    return ToolActionResult(
-        ok=True,
-        summary=f"已发送 {file_path.name} 到 {cleaned_sender_id}。",
-        data={
-            "target_sender_id": cleaned_sender_id,
-            "path": str(file_path),
-            "source_path": str(original_file_path),
-            "file_name": file_path.name,
-            "response": response,
-        },
+        return _with_media_elapsed(ToolActionResult(ok=False, summary=f"发送媒体失败：{exc}"), started_at)
+    return _with_media_elapsed(
+        ToolActionResult(
+            ok=True,
+            summary=f"已发送 {file_path.name} 到 {cleaned_sender_id}。",
+            data={
+                "target_sender_id": cleaned_sender_id,
+                "path": str(file_path),
+                "source_path": str(original_file_path),
+                "file_name": file_path.name,
+                "response": response,
+            },
+        ),
+        started_at,
     )
 
 def _send_qq_media(cleaned_sender_id: str, cleaned_path: str) -> ToolActionResult:
     from qq_onebot_bridge import QQOneBotBridge
 
+    started_at = time.perf_counter()
     bridge = QQOneBotBridge(BridgeConfig.load())
     try:
         original_file_path = bridge._resolve_shareable_project_file(cleaned_path)
@@ -934,17 +951,20 @@ def _send_qq_media(cleaned_sender_id: str, cleaned_path: str) -> ToolActionResul
         reply_target = _qq_reply_target_from_sender_id(cleaned_sender_id)
         response = bridge._send_media_to_reply_target(reply_target, file_path)
     except Exception as exc:  # noqa: BLE001
-        return ToolActionResult(ok=False, summary=f"发送媒体失败：{exc}")
-    return ToolActionResult(
-        ok=True,
-        summary=f"已发送 {file_path.name} 到 {cleaned_sender_id}。",
-        data={
-            "target_sender_id": cleaned_sender_id,
-            "path": str(file_path),
-            "source_path": str(original_file_path),
-            "file_name": file_path.name,
-            "response": response,
-        },
+        return _with_media_elapsed(ToolActionResult(ok=False, summary=f"发送媒体失败：{exc}"), started_at)
+    return _with_media_elapsed(
+        ToolActionResult(
+            ok=True,
+            summary=f"已发送 {file_path.name} 到 {cleaned_sender_id}。",
+            data={
+                "target_sender_id": cleaned_sender_id,
+                "path": str(file_path),
+                "source_path": str(original_file_path),
+                "file_name": file_path.name,
+                "response": response,
+            },
+        ),
+        started_at,
     )
 
 def _qq_reply_target_from_sender_id(sender_id: str) -> JsonObject:

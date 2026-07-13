@@ -351,7 +351,7 @@ def _build_tool_specs(scope: ServerScope | None = None) -> dict[str, ToolSpec]:
         ),
         "send_bridge_media": ToolSpec(
             name="send_bridge_media",
-            description="发送项目内允许的图片或文件到指定发送方；微信和 QQ 会分别走对应平台发送链路。",
+            description="发送项目内允许的图片或文件到指定发送方；微信和 QQ 会分别走对应平台发送链路，结果包含耗时。",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -422,7 +422,7 @@ def _build_tool_specs(scope: ServerScope | None = None) -> dict[str, ToolSpec]:
         tool_specs.pop("send_weixin_media")
         tool_specs["send_bridge_media"] = ToolSpec(
             name="send_bridge_media",
-            description="发送项目内允许的图片或文件给当前 QQ 私聊管理员。目标自动取当前会话，不能指定其他发送方。",
+            description="发送项目内允许的图片或文件给当前 QQ 私聊管理员。目标自动取当前会话，不能指定其他发送方；结果包含耗时。",
             input_schema={
                 "type": "object",
                 "properties": {
