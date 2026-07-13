@@ -46,6 +46,10 @@ NICEGUI_MESSAGE_HISTORY_LENGTH = 200
 _CLIENT_STATE_STORAGE_KEY = "chatbridge_ui_state"
 
 
+def _refresh_runtime_status_on_ui_entry() -> None:
+    refresh_dashboard_cache(APP_DIR, "runtime")
+
+
 class _ClientState(MutableMapping[str, object]):
     """Expose one UI state mapping for whichever NiceGUI client is active."""
 
@@ -2720,7 +2724,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     model,
                     translate,
                     _run_action,
-                    _refresh_checks,
+                    _refresh_home_status,
                     _submit_task,
                     _switch_account,
                     _set_weixin_notice_enabled,
@@ -2818,6 +2822,11 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         refresh_dashboard_cache(APP_DIR, "runtime")
         refresh_dashboard_cache(APP_DIR, key)
         _notify(t("ui.web.notify.checks_refreshed", "环境检查已刷新"))
+
+    def _refresh_home_status() -> None:
+        refresh_dashboard_cache(APP_DIR, "runtime")
+        refresh_dashboard_cache(APP_DIR, "checks_light")
+        _notify(t("ui.web.notify.status_refreshed", "状态已刷新"))
 
     def _refresh_logs() -> None:
         refresh_dashboard_cache(APP_DIR, "logs")
@@ -4842,6 +4851,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         else:
             state["bridge_mode_selected"] = False
         apply_request_session(request)
+        _refresh_runtime_status_on_ui_entry()
         shell_view()
         content_view()
         ui.run_javascript(f"window.__cbApplyTheme && window.__cbApplyTheme({state['theme']!r})")
