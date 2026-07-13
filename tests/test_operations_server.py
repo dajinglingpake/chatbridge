@@ -225,3 +225,23 @@ class ChatBridgeMcpServerTests(unittest.TestCase):
         mocked_send.assert_called_once_with("qq:private:10001", "docs/diagram.png")
         self.assertFalse(response["result"]["isError"])
         self.assertEqual("已发送文件", response["result"]["content"][0]["text"])
+
+    def test_qq_private_admin_media_tool_uses_current_sender(self) -> None:
+        specs = _build_tool_specs(
+            ServerScope(
+                current_sender_id="qq:private:10001",
+                qq_admin_user_id="10001",
+            )
+        )
+
+        self.assertNotIn("send_weixin_media", specs)
+        tool = specs["send_bridge_media"]
+        self.assertEqual({"path"}, set(tool.input_schema["properties"]))
+        self.assertEqual(["path"], tool.input_schema["required"])
+
+        with patch("tools.operations_server.send_current_qq_private_admin_media") as mocked_send:
+            mocked_send.return_value = type("Result", (), {"ok": True, "summary": "已发送文件", "data": {}})()
+            result = tool.handler({"path": "docs/diagram.png"})
+
+        mocked_send.assert_called_once_with("qq:private:10001", "10001", "docs/diagram.png")
+        self.assertTrue(result.ok)

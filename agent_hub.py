@@ -896,15 +896,29 @@ class MultiCodexHub:
             user_id = self._qq_private_user_id_from_sender(sender_id)
             if not self._is_qq_history_admin_user(user_id):
                 return None
-            return self._build_direct_mcp_server(task)
+            return self._build_direct_mcp_server(
+                task,
+                current_sender_id=sender_id,
+                qq_admin_user_id=user_id,
+            )
         return None
 
-    def _build_direct_mcp_server(self, task: HubTask) -> McpServerConfig:
+    def _build_direct_mcp_server(
+        self,
+        task: HubTask,
+        *,
+        current_sender_id: str = "",
+        qq_admin_user_id: str = "",
+    ) -> McpServerConfig:
         args = [str(MCP_SERVER_PATH)]
         if task.bridge_conversations_path.strip():
             args.extend(["--bridge-conversations-path", task.bridge_conversations_path.strip()])
         if task.bridge_event_log_path.strip():
             args.extend(["--bridge-event-log-path", task.bridge_event_log_path.strip()])
+        if current_sender_id.strip():
+            args.extend(["--current-sender-id", current_sender_id.strip()])
+        if qq_admin_user_id.strip():
+            args.extend(["--qq-admin-user-id", qq_admin_user_id.strip()])
         return McpServerConfig(
             name=MCP_SERVER_NAME,
             command=sys.executable,

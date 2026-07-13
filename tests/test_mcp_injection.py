@@ -645,7 +645,10 @@ class McpServerInjectionTests(unittest.TestCase):
             self.assertIsNotNone(backend.last_context.mcp_server)
             self.assertEqual("operations", backend.last_context.mcp_server.name)
             self.assertNotIn("--qq-history-scope", backend.last_context.mcp_server.args)
-            self.assertNotIn("--qq-admin-user-id", backend.last_context.mcp_server.args)
+            self.assertIn("--current-sender-id", backend.last_context.mcp_server.args)
+            self.assertIn("qq:private:10001", backend.last_context.mcp_server.args)
+            self.assertIn("--qq-admin-user-id", backend.last_context.mcp_server.args)
+            self.assertIn("10001", backend.last_context.mcp_server.args)
             self.assertEqual("exec", backend.last_context.codex_transport)
 
 

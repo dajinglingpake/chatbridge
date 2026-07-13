@@ -872,6 +872,29 @@ def send_bridge_media(target_sender_id: str, path: str) -> ToolActionResult:
         return _send_qq_media(cleaned_sender_id, cleaned_path)
     return _send_weixin_media(cleaned_sender_id, cleaned_path)
 
+
+def send_current_qq_private_admin_media(
+    current_sender_id: str,
+    admin_user_id: str,
+    path: str,
+) -> ToolActionResult:
+    cleaned_sender_id = str(current_sender_id or "").strip()
+    cleaned_admin_user_id = str(admin_user_id or "").strip()
+    cleaned_path = str(path or "").strip()
+    current_user_id = _qq_private_user_id_from_sender_id(cleaned_sender_id)
+
+    if not cleaned_path:
+        return ToolActionResult(ok=False, summary="path 不能为空")
+    if not current_user_id or current_user_id != cleaned_admin_user_id:
+        return ToolActionResult(ok=False, summary="媒体发送仅允许当前 QQ 私聊管理员使用")
+
+    config = BridgeConfig.load()
+    allowed_user_ids = {str(item or "").strip() for item in config.qq_allowed_private_user_ids}
+    if current_user_id not in allowed_user_ids:
+        return ToolActionResult(ok=False, summary="当前 QQ 私聊管理员已不在允许名单中")
+    return _send_qq_media(cleaned_sender_id, cleaned_path)
+
+
 def send_weixin_media(target_sender_id: str, path: str) -> ToolActionResult:
     return send_bridge_media(target_sender_id, path)
 
@@ -931,6 +954,13 @@ def _qq_reply_target_from_sender_id(sender_id: str) -> JsonObject:
     if len(parts) >= 3 and parts[0] == "qq" and parts[1] == "private":
         return {"message_type": "private", "user_id": parts[2]}
     raise ValueError(f"不支持的 QQ sender_id: {sender_id}")
+
+
+def _qq_private_user_id_from_sender_id(sender_id: str) -> str:
+    parts = str(sender_id or "").strip().split(":")
+    if len(parts) >= 3 and parts[0].lower() == "qq" and parts[1].lower() == "private":
+        return parts[2].strip()
+    return ""
 
 
 def delegate_task(

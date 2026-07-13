@@ -13,6 +13,7 @@ from core.mcp_service import (
     get_sender_snapshot,
     restart_services,
     send_bridge_media,
+    send_current_qq_private_admin_media,
     send_weixin_media,
     start_agent_session,
     list_senders,
@@ -161,6 +162,30 @@ class McpServiceTests(unittest.TestCase):
         self.assertEqual({"message_type": "private", "user_id": "10001"}, reply_target)
         self.assertNotEqual(target_file, sent_file)
         self.assertEqual(target_file.read_bytes(), sent_file.read_bytes())
+
+    def test_send_current_qq_private_admin_media_uses_current_sender(self) -> None:
+        expected_result = SimpleNamespace(ok=True)
+        with (
+            patch("core.mcp_service.BridgeConfig.load", return_value=SimpleNamespace(qq_allowed_private_user_ids=["10001"])),
+            patch("core.mcp_service._send_qq_media", return_value=expected_result) as mocked_send,
+        ):
+            result = send_current_qq_private_admin_media("qq:private:10001", "10001", "docs/diagram.png")
+
+        self.assertIs(expected_result, result)
+        mocked_send.assert_called_once_with("qq:private:10001", "docs/diagram.png")
+
+    def test_send_current_qq_private_admin_media_rejects_other_sender(self) -> None:
+        result = send_current_qq_private_admin_media("qq:private:20002", "10001", "docs/diagram.png")
+
+        self.assertFalse(result.ok)
+        self.assertIn("仅允许当前 QQ 私聊管理员", result.summary)
+
+    def test_send_current_qq_private_admin_media_rechecks_allowlist(self) -> None:
+        with patch("core.mcp_service.BridgeConfig.load", return_value=SimpleNamespace(qq_allowed_private_user_ids=[])):
+            result = send_current_qq_private_admin_media("qq:private:10001", "10001", "docs/diagram.png")
+
+        self.assertFalse(result.ok)
+        self.assertIn("不在允许名单", result.summary)
 
     def test_start_agent_session_submits_first_prompt(self) -> None:
         fake_agent = SimpleNamespace(

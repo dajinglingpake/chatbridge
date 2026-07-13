@@ -50,6 +50,7 @@ from core.mcp_service import (
     search_qq_admin_group_messages,
     search_qq_current_group_messages,
     send_bridge_media,
+    send_current_qq_private_admin_media,
     send_weixin_media,
     start_agent_session,
 )
@@ -85,6 +86,7 @@ class ServerScope:
     qq_history_scope: str = ""
     qq_group_id: str = ""
     qq_admin_user_id: str = ""
+    current_sender_id: str = ""
 
 
 def _tool_result_text(result: ToolActionResult) -> str:
@@ -115,11 +117,13 @@ def _server_scope_from_argv(argv: list[str]) -> ServerScope:
         "qq_history_scope": "",
         "qq_group_id": "",
         "qq_admin_user_id": "",
+        "current_sender_id": "",
     }
     flags = {
         "--qq-history-scope": "qq_history_scope",
         "--qq-group-id": "qq_group_id",
         "--qq-admin-user-id": "qq_admin_user_id",
+        "--current-sender-id": "current_sender_id",
     }
     index = 0
     while index < len(argv):
@@ -138,6 +142,7 @@ def _server_scope_from_argv(argv: list[str]) -> ServerScope:
         qq_history_scope=history_scope,
         qq_group_id=values["qq_group_id"].strip(),
         qq_admin_user_id=values["qq_admin_user_id"].strip(),
+        current_sender_id=values["current_sender_id"].strip(),
     )
 
 
@@ -149,7 +154,19 @@ def _server_instructions() -> str:
         return "This server exposes read-only QQ history tools for the current group chat."
     if SERVER_SCOPE.qq_history_scope == "admin":
         return "This server exposes read-only QQ group history tools for the private admin chat."
+    if _is_qq_private_admin_scope(SERVER_SCOPE):
+        return "This server exposes bridge tools for a private QQ admin chat; media can only be sent back to the current admin."
     return "This server exposes the built-in bridge tools with direct mutation access for a private deployment."
+
+
+def _is_qq_private_admin_scope(scope: ServerScope) -> bool:
+    sender_parts = scope.current_sender_id.strip().split(":")
+    return (
+        len(sender_parts) >= 3
+        and sender_parts[0].lower() == "qq"
+        and sender_parts[1].lower() == "private"
+        and sender_parts[2].strip() == scope.qq_admin_user_id.strip()
+    )
 
 
 def _build_tool_specs(scope: ServerScope | None = None) -> dict[str, ToolSpec]:
@@ -236,7 +253,7 @@ def _build_tool_specs(scope: ServerScope | None = None) -> dict[str, ToolSpec]:
             ),
         }
 
-    return {
+    tool_specs = {
         "get_tool_guide": ToolSpec(
             name="get_tool_guide",
             description="返回内置桥接工具的工作规则，包括当前会话语义以及推荐操作流程。",
@@ -401,6 +418,25 @@ def _build_tool_specs(scope: ServerScope | None = None) -> dict[str, ToolSpec]:
             ),
         ),
     }
+    if _is_qq_private_admin_scope(active_scope):
+        tool_specs.pop("send_weixin_media")
+        tool_specs["send_bridge_media"] = ToolSpec(
+            name="send_bridge_media",
+            description="发送项目内允许的图片或文件给当前 QQ 私聊管理员。目标自动取当前会话，不能指定其他发送方。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "项目内文件路径；允许 .runtime/exports 下的导出文件。"},
+                },
+                "required": ["path"],
+            },
+            handler=lambda args: send_current_qq_private_admin_media(
+                active_scope.current_sender_id,
+                active_scope.qq_admin_user_id,
+                str(args.get("path") or ""),
+            ),
+        )
+    return tool_specs
 
 
 TOOL_SPECS = _build_tool_specs()
