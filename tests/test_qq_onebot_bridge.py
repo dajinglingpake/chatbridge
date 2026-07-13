@@ -667,6 +667,14 @@ class QQOneBotBridgeTests(unittest.TestCase):
         self.assertIn("当前设置", sent_text)
         self.assertIn("task-qq-latest", sent_text)
 
+    def test_control_command_entrypoint_routes_to_qq_command_router(self) -> None:
+        bridge = FakeQQBridge(self.temp_path)
+
+        reply, handled = bridge._handle_control_command("qq:private:10001", "/help")
+
+        self.assertTrue(handled)
+        self.assertIn("/model", reply)
+
     def test_clear_command_clears_resolved_qq_agent_session_file(self) -> None:
         session_dir = self.temp_path / "sessions"
         session_dir.mkdir()

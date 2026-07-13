@@ -774,6 +774,9 @@ class QQOneBotBridge:
     def _is_group_control_command(text: str) -> bool:
         return str(text or "").strip().startswith("/")
 
+    def _handle_control_command(self, sender_id: str, text: str) -> tuple[str, bool]:
+        return self.command_router.handle(sender_id, text)
+
     def _resolve_message_permission_mode(self, sender_key: str, session_meta: Any) -> str:
         if self._is_group_sender(sender_key):
             return str(getattr(self.config, "qq_group_permission_mode", "") or "read-only").strip().lower() or "read-only"
