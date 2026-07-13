@@ -434,8 +434,40 @@ def _discover_proxy_env() -> dict[str, str]:
     return values
 
 
+def _discover_windows_user_env() -> dict[str, str]:
+    if not IS_WINDOWS:
+        return {}
+    try:
+        import winreg
+
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment")
+    except (ImportError, OSError):
+        return {}
+    values: dict[str, str] = {}
+    try:
+        index = 0
+        while True:
+            try:
+                name, value, _value_type = winreg.EnumValue(key, index)
+            except OSError:
+                break
+            index += 1
+            cleaned_name = str(name or "").strip()
+            cleaned_value = str(value or "").strip()
+            if cleaned_name and cleaned_value:
+                values[cleaned_name] = cleaned_value
+    finally:
+        winreg.CloseKey(key)
+    return values
+
+
 def _managed_subprocess_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
     env = dict(base_env or os.environ)
+    existing_keys = {key.upper() for key in env}
+    for key, value in _discover_windows_user_env().items():
+        if key.upper() not in existing_keys:
+            env[key] = value
+            existing_keys.add(key.upper())
     for key, value in _discover_proxy_env().items():
         if not env.get(key, "").strip():
             env[key] = value

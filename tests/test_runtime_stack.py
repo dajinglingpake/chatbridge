@@ -337,10 +337,29 @@ class RuntimeStackTests(unittest.TestCase):
     def test_managed_subprocess_env_copies_proxy_from_running_process(self) -> None:
         fake_proc = SimpleNamespace(pid=123)
         with patch.dict("runtime_stack.os.environ", {}, clear=True):
-            with patch("runtime_stack._find_processes_by_script", return_value=[fake_proc]):
-                with patch("runtime_stack._read_process_proxy_env", return_value={"HTTPS_PROXY": "http://127.0.0.1:7890"}):
-                    env = _managed_subprocess_env({})
+            with patch("runtime_stack._discover_windows_user_env", return_value={}):
+                with patch("runtime_stack._find_processes_by_script", return_value=[fake_proc]):
+                    with patch("runtime_stack._read_process_proxy_env", return_value={"HTTPS_PROXY": "http://127.0.0.1:7890"}):
+                        env = _managed_subprocess_env({})
         self.assertEqual("http://127.0.0.1:7890", env["HTTPS_PROXY"])
+
+    def test_managed_subprocess_env_fills_missing_windows_user_variables(self) -> None:
+        with (
+            patch("runtime_stack._discover_windows_user_env", return_value={"NINE_ROUTER_API_KEY": "secret-value"}),
+            patch("runtime_stack._discover_proxy_env", return_value={}),
+        ):
+            env = _managed_subprocess_env({"PATH": "C:/tools"})
+
+        self.assertEqual("secret-value", env["NINE_ROUTER_API_KEY"])
+
+    def test_managed_subprocess_env_preserves_existing_values(self) -> None:
+        with (
+            patch("runtime_stack._discover_windows_user_env", return_value={"NINE_ROUTER_API_KEY": "user-value"}),
+            patch("runtime_stack._discover_proxy_env", return_value={}),
+        ):
+            env = _managed_subprocess_env({"NINE_ROUTER_API_KEY": "process-value"})
+
+        self.assertEqual("process-value", env["NINE_ROUTER_API_KEY"])
 
     def test_onebot_runtime_env_sets_quick_login_from_napcat_config(self) -> None:
         with patch("runtime_stack._managed_subprocess_env", return_value={}):
