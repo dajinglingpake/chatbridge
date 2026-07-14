@@ -1733,6 +1733,67 @@ class QQOneBotBridgeTests(unittest.TestCase):
         self.assertEqual("qq-group-20002", payload["session_name"])
         self.assertEqual("总结今天的公开新闻", payload["prompt"])
 
+    def test_group_submit_ignores_session_model_override(self) -> None:
+        bridge = QQOneBotBridge(
+            SimpleNamespace(backend_id="main", default_backend="codex", hub_task_timeout_seconds=30, language="zh-CN"),
+            api_base="http://onebot.local",
+        )
+        message = IncomingBridgeMessage(
+            sender_id="qq:group:20002",
+            text="hello",
+            reply_target={"message_type": "group", "group_id": 20002},
+            source="qq",
+            session_name="qq-group-20002",
+            attachments=[],
+            attachment_errors=[],
+        )
+        session = {
+            "session_name": "qq-group-20002",
+            "session_meta": SimpleNamespace(
+                backend="codex",
+                workdir="",
+                model="gpt-5",
+                reasoning_effort="ultra",
+                permission_mode="",
+            ),
+        }
+
+        context = bridge._resolve_task_submit_context(message, session)
+
+        self.assertEqual("qq-group", context.agent_id)
+        self.assertEqual("", context.model)
+        self.assertEqual("", context.reasoning_effort)
+
+    def test_private_submit_keeps_session_model_override(self) -> None:
+        bridge = QQOneBotBridge(
+            SimpleNamespace(backend_id="main", default_backend="codex", hub_task_timeout_seconds=30, language="zh-CN"),
+            api_base="http://onebot.local",
+        )
+        message = IncomingBridgeMessage(
+            sender_id="qq:private:10001",
+            text="hello",
+            reply_target={"message_type": "private", "user_id": 10001},
+            source="qq",
+            session_name="qq-private-10001",
+            attachments=[],
+            attachment_errors=[],
+        )
+        session = {
+            "session_name": "qq-private-10001",
+            "session_meta": SimpleNamespace(
+                backend="codex",
+                workdir="",
+                model="gpt-5.6-sol",
+                reasoning_effort="ultra",
+                permission_mode="",
+            ),
+        }
+
+        context = bridge._resolve_task_submit_context(message, session)
+
+        self.assertEqual("gpt-5.6-sol", context.model)
+        self.assertEqual("ultra", context.reasoning_effort)
+
     def test_group_image_submit_uses_permission_profile_and_codex_image(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)

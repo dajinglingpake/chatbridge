@@ -435,13 +435,14 @@ class QQOneBotBridge:
             session_name = str(session or message.session_name or self._session_name(message.sender_id))
             session_meta = None
         backend = str(getattr(session_meta, "backend", "") or self.config.default_backend)
+        is_group = self._is_group_sender(message.sender_id)
         return BridgeTaskSubmitContext(
             agent_id=self._resolve_message_agent_id(message.sender_id),
             session_name=session_name,
             backend=backend,
             workdir=str(getattr(session_meta, "workdir", "") or ""),
-            model=str(getattr(session_meta, "model", "") or ""),
-            reasoning_effort=str(getattr(session_meta, "reasoning_effort", "") or ""),
+            model="" if is_group else str(getattr(session_meta, "model", "") or ""),
+            reasoning_effort="" if is_group else str(getattr(session_meta, "reasoning_effort", "") or ""),
             permission_mode=self._resolve_message_permission_mode(message.sender_id, session_meta),
             permission_profile=self._resolve_message_permission_profile(message.sender_id),
             images=self._message_image_paths(message),
