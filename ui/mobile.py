@@ -187,6 +187,12 @@ def _display_activity_items(items: list[dict[str, object]], *, assume_utc_naive:
         displayed.append(copied)
     return displayed
 
+
+def _stored_activity_items(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
 def build_mobile_access_url(*, host: str, port: int) -> str:
     token = _load_or_create_access_token()
     access_host = host if host not in {"", "0.0.0.0", "127.0.0.1", "localhost", "::1"} else _detect_lan_ip()
@@ -799,6 +805,7 @@ def _raw_task_activity_items(raw: dict[str, object]) -> list[dict[str, object]]:
 
     append("accepted", "system", _raw_clean_text(raw, "created_at"))
     append("running", "info", _raw_clean_text(raw, "started_at"))
+    items.extend(_stored_activity_items(raw.get("activity_items")))
     progress_text = _raw_text(raw, "progress_text")
     if _raw_progress_seq(raw) > 0 and progress_text.strip():
         append("progress", "info", _raw_clean_text(raw, "progress_at") or _raw_clean_text(raw, "started_at") or _raw_clean_text(raw, "created_at"), progress_text)
@@ -1114,6 +1121,7 @@ def _task_activity_items(task: HubTask) -> list[dict[str, object]]:
 
     append("accepted", "system", task.created_at)
     append("running", "info", task.started_at)
+    items.extend(_stored_activity_items(getattr(task, "activity_items", [])))
     if task.progress_seq > 0 and task.progress_text.strip():
         append("progress", "info", task.progress_at or task.started_at or task.created_at, task.progress_text)
     status = (task.status or "").strip()
@@ -1251,6 +1259,7 @@ def _hub_task_signature_part(task: HubTask) -> tuple[object, ...]:
         len(str(task.progress_text or "")),
         len(str(task.live_output_text or "")),
         len(str(task.reasoning_text or "")),
+        _payload_activity_signature(task.activity_items),
         len(str(task.output or "")),
         len(str(task.error or "")),
         str(task.context_left_percent or ""),

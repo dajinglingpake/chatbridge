@@ -466,6 +466,65 @@ class AgentHubCancellationTests(unittest.TestCase):
         self.assertEqual("先检查项目", saved_task["reasoning_text"])
         self.assertEqual("正在生成回答", saved_task["live_output_text"])
 
+    def test_command_activity_updates_existing_item_and_persists(self) -> None:
+        workdir = self.temp_path / "workspace"
+        session_file = self.temp_path / "sessions" / "main.txt"
+        workdir.mkdir(parents=True, exist_ok=True)
+        session_file.parent.mkdir(parents=True, exist_ok=True)
+        config = HubConfig(
+            codex_command="codex",
+            claude_command="claude",
+            opencode_command="opencode",
+            agents=[AgentConfig("main", "Main", str(workdir), str(session_file), backend="codex")],
+        )
+        task = HubTask(
+            id="task-command-001",
+            agent_id="main",
+            agent_name="Main",
+            backend="codex",
+            source="stream-web",
+            sender_id="",
+            prompt="run tests",
+            status="running",
+            created_at="2026-07-17T00:00:00",
+            session_name="default",
+            workdir=str(workdir),
+        )
+        state_path = self.temp_path / "state" / "agent_hub_state.json"
+        with (
+            patch("agent_hub.STATE_PATH", state_path),
+            patch("agent_hub.discover_external_agent_processes", return_value=[]),
+        ):
+            hub = MultiCodexHub(config)
+            hub.tasks.append(task)
+            hub._update_task_activity(
+                task.id,
+                {
+                    "id": "command-1",
+                    "event": "codex_command",
+                    "type": "info",
+                    "detail": "pytest -q",
+                    "metadata": {"command": "pytest -q", "status": "inProgress", "output": ""},
+                },
+            )
+            hub._update_task_activity(
+                task.id,
+                {
+                    "id": "command-1",
+                    "event": "codex_command",
+                    "type": "success",
+                    "detail": "pytest -q",
+                    "metadata": {"command": "pytest -q", "status": "completed", "output": "623 passed", "exit_code": 0},
+                },
+            )
+
+        saved_task = json.loads(state_path.read_text(encoding="utf-8"))["tasks"][0]
+        self.assertEqual(1, len(task.activity_items))
+        self.assertEqual("success", task.activity_items[0]["type"])
+        self.assertEqual("623 passed", task.activity_items[0]["metadata"]["output"])
+        self.assertEqual(2, task.progress_seq)
+        self.assertEqual(task.activity_items, saved_task["activity_items"])
+
     def test_qq_progress_update_pushes_to_qq_bridge_channel(self) -> None:
         workdir = self.temp_path / "workspace"
         session_file = self.temp_path / "sessions" / "main.txt"

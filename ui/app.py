@@ -1558,14 +1558,16 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             display: inline;
         }
         .cb-stream-reasoning-preview {
-            display: -webkit-box;
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-end;
             grid-column: 1 / -1;
+            min-height: 4.1rem;
+            max-height: 4.1rem;
             color: var(--cb-muted);
             font-size: 0.88rem;
             font-weight: 400;
             line-height: 1.55;
-            -webkit-box-orient: vertical;
-            -webkit-line-clamp: 3;
             overflow: hidden;
             overflow-wrap: anywhere;
             user-select: text;
@@ -1581,7 +1583,10 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             padding: 0.65rem 0.75rem 0.7rem;
         }
         .cb-stream-reasoning-static .cb-stream-reasoning-preview {
+            display: block;
             grid-column: 1;
+            min-height: 0;
+            max-height: none;
         }
         .cb-stream-reasoning-body {
             max-height: min(52vh, 28rem);
@@ -1596,6 +1601,195 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         @keyframes cb-reasoning-reveal {
             from { opacity: 0; transform: translateY(-0.25rem); }
             to { opacity: 1; transform: translateY(0); }
+        }
+        .cb-stream-command-log {
+            display: grid;
+            gap: 0.5rem;
+            margin-bottom: 0.75rem;
+        }
+        .cb-stream-command {
+            overflow: hidden;
+            border: 1px solid color-mix(in srgb, var(--cb-border-strong) 72%, transparent);
+            border-radius: 8px;
+            background: color-mix(in srgb, var(--cb-surface-raised) 78%, transparent);
+            transition: border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
+        }
+        .cb-stream-command:hover,
+        .cb-stream-command[open] {
+            border-color: color-mix(in srgb, var(--cb-accent-bright) 50%, var(--cb-border-strong));
+            background: var(--cb-surface-raised);
+        }
+        .cb-stream-command[open] {
+            box-shadow: inset 3px 0 0 color-mix(in srgb, var(--cb-accent-bright) 72%, transparent);
+        }
+        .cb-stream-command-summary {
+            display: grid;
+            grid-template-columns: auto minmax(0, 1fr) auto;
+            align-items: end;
+            gap: 0.65rem;
+            padding: 0.62rem 0.72rem;
+            cursor: pointer;
+            list-style: none;
+            user-select: none;
+        }
+        .cb-stream-command-summary::-webkit-details-marker {
+            display: none;
+        }
+        .cb-stream-command-summary:focus-visible {
+            outline: 2px solid var(--cb-accent-bright);
+            outline-offset: -2px;
+        }
+        .cb-stream-command-status-icon,
+        .cb-stream-command-chevron {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-family: "Material Icons";
+            line-height: 1;
+        }
+        .cb-stream-command-status-icon {
+            width: 1.75rem;
+            height: 1.75rem;
+            border-radius: 6px;
+            background: color-mix(in srgb, var(--cb-accent-bright) 14%, transparent);
+            color: var(--cb-accent-bright);
+            font-size: 1rem;
+        }
+        .cb-stream-command-status-icon::before {
+            content: "terminal";
+        }
+        .cb-stream-command-running .cb-stream-command-status-icon {
+            animation: cb-command-running 1.25s ease-in-out infinite;
+        }
+        .cb-stream-command-completed .cb-stream-command-status-icon {
+            color: var(--cb-ok);
+            background: color-mix(in srgb, var(--cb-ok) 14%, transparent);
+        }
+        .cb-stream-command-failed .cb-stream-command-status-icon {
+            color: var(--cb-danger);
+            background: color-mix(in srgb, var(--cb-danger) 14%, transparent);
+        }
+        .cb-stream-command-interrupted .cb-stream-command-status-icon {
+            color: var(--cb-muted);
+            background: var(--cb-surface-muted);
+        }
+        @keyframes cb-command-running {
+            0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--cb-accent-bright) 0%, transparent); }
+            50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--cb-accent-bright) 12%, transparent); }
+        }
+        .cb-stream-command-heading {
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-end;
+            min-width: 0;
+            min-height: 4.8rem;
+            max-height: 4.8rem;
+            overflow: hidden;
+        }
+        .cb-stream-command-label {
+            color: var(--cb-ink);
+            font-size: 0.8rem;
+            font-weight: 750;
+            line-height: 1.35;
+        }
+        .cb-stream-command-command-preview,
+        .cb-stream-command-preview {
+            overflow: hidden;
+            margin-top: 0.1rem;
+            color: var(--cb-muted);
+            font-family: "JetBrains Mono", "Cascadia Code", monospace;
+            font-size: 0.78rem;
+            line-height: 1.45;
+        }
+        .cb-stream-command-command-preview {
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .cb-stream-command-preview {
+            display: -webkit-box;
+            color: color-mix(in srgb, var(--cb-ink) 78%, var(--cb-muted));
+            -webkit-box-orient: vertical;
+            -webkit-line-clamp: 2;
+            overflow-wrap: anywhere;
+        }
+        .cb-stream-command-toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.25rem;
+            color: var(--cb-muted);
+            white-space: nowrap;
+        }
+        .cb-stream-command-toggle-label {
+            font-size: 0.74rem;
+            font-weight: 600;
+        }
+        .cb-stream-command-toggle-label-close {
+            display: none;
+        }
+        .cb-stream-command-chevron {
+            font-size: 0.95rem;
+            transition: transform 160ms ease;
+        }
+        .cb-stream-command-chevron::before {
+            content: "chevron_right";
+        }
+        .cb-stream-command[open] .cb-stream-command-toggle-label-open {
+            display: none;
+        }
+        .cb-stream-command[open] .cb-stream-command-toggle-label-close {
+            display: inline;
+        }
+        .cb-stream-command[open] .cb-stream-command-chevron {
+            transform: rotate(90deg);
+        }
+        .cb-stream-command-body {
+            display: grid;
+            max-height: min(48vh, 26rem);
+            gap: 0.4rem;
+            overflow: auto;
+            border-top: 1px solid var(--cb-border);
+            padding: 0.72rem 0.82rem 0.8rem;
+            animation: cb-reasoning-reveal 160ms ease-out;
+        }
+        .cb-stream-command-section-label {
+            margin-top: 0.15rem;
+            color: var(--cb-muted);
+            font-size: 0.7rem;
+            font-weight: 800;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+        .cb-stream-command-code,
+        .cb-stream-command-output {
+            margin: 0;
+            border-radius: 6px;
+            background: var(--cb-code-bg);
+            color: var(--cb-code-ink);
+            font-family: "JetBrains Mono", "Cascadia Code", monospace;
+            font-size: 0.78rem;
+            line-height: 1.55;
+            overflow-wrap: anywhere;
+            padding: 0.6rem 0.68rem;
+            white-space: pre-wrap;
+            user-select: text;
+        }
+        .cb-stream-command-output {
+            max-height: 16rem;
+            overflow: auto;
+        }
+        .cb-stream-command-meta {
+            color: var(--cb-muted);
+            font-size: 0.72rem;
+            line-height: 1.45;
+            overflow-wrap: anywhere;
+        }
+        @media (max-width: 640px) {
+            .cb-stream-command-summary {
+                grid-template-columns: auto minmax(0, 1fr);
+            }
+            .cb-stream-command-toggle {
+                display: none;
+            }
         }
         .cb-stream-progress {
             border-left: 3px solid #d97706;
@@ -3830,6 +4024,34 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                         });
                     });
                 };
+                const commandStorageKey = 'cb_command_open_state';
+                const commandOpenState = window.__cbCommandOpenState || (() => {
+                    try {
+                        return JSON.parse(localStorage.getItem(commandStorageKey) || '{}') || {};
+                    } catch {
+                        return {};
+                    }
+                })();
+                window.__cbCommandOpenState = commandOpenState;
+                const persistCommandOpenState = () => {
+                    try {
+                        localStorage.setItem(commandStorageKey, JSON.stringify(commandOpenState));
+                    } catch {}
+                };
+                const setupCommandDisclosures = () => {
+                    document.querySelectorAll('.cb-stream-command[data-command-key]').forEach((details) => {
+                        const key = details.getAttribute('data-command-key') || '';
+                        if (!key) return;
+                        if (commandOpenState[key] === true) details.open = true;
+                        if (details.dataset.cbCommandReady === '1') return;
+                        details.dataset.cbCommandReady = '1';
+                        const summary = details.querySelector('summary');
+                        summary?.addEventListener('click', () => {
+                            commandOpenState[key] = !details.open;
+                            persistCommandOpenState();
+                        });
+                    });
+                };
                 const readDelta = (scroller) => Math.max(0, scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight);
                 const readScrollTop = (scroller) => Math.max(0, Number(scroller.scrollTop) || 0);
                 const maxScrollTop = (scroller) => Math.max(0, scroller.scrollHeight - scroller.clientHeight);
@@ -4619,6 +4841,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     setupComposerUploadPanel();
                     setupComposerSubmit();
                     setupReasoningDisclosures();
+                    setupCommandDisclosures();
                     updateComposerMetrics();
                     updateLiveElapsed();
                     setupLiveTypewriter();

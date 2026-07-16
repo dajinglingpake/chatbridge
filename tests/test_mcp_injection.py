@@ -68,7 +68,58 @@ class McpServerInjectionTests(unittest.TestCase):
     def test_codex_app_server_streams_reasoning_separately_from_final_answer(self) -> None:
         live_output: list[str] = []
         reasoning: list[str] = []
+        activities: list[dict[str, object]] = []
         client = _CodexAppServerClient("codex", creationflags=0, start_new_session=False, slim_exec=True)
+        client._messages.put(
+            {
+                "method": "item/started",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "startedAtMs": 1783161500000,
+                    "item": {
+                        "id": "command-1",
+                        "type": "commandExecution",
+                        "command": "pytest -q",
+                        "cwd": "I:/AI/chatbridge",
+                        "status": "inProgress",
+                        "commandActions": [],
+                    },
+                },
+            }
+        )
+        client._messages.put(
+            {
+                "method": "item/commandExecution/outputDelta",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": "command-1",
+                    "delta": "623 passed\n",
+                },
+            }
+        )
+        client._messages.put(
+            {
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "completedAtMs": 1783161501200,
+                    "item": {
+                        "id": "command-1",
+                        "type": "commandExecution",
+                        "command": "pytest -q",
+                        "cwd": "I:/AI/chatbridge",
+                        "status": "completed",
+                        "commandActions": [],
+                        "aggregatedOutput": "623 passed\n",
+                        "exitCode": 0,
+                        "durationMs": 1200,
+                    },
+                },
+            }
+        )
         client._messages.put(
             {
                 "method": "item/reasoning/summaryTextDelta",
@@ -134,12 +185,19 @@ class McpServerInjectionTests(unittest.TestCase):
             on_progress=None,
             on_live_output=live_output.append,
             on_reasoning=reasoning.append,
+            on_activity=activities.append,
         )
 
         self.assertEqual("最终回答", output)
         self.assertEqual(75, context_left_percent)
         self.assertEqual(["先检查项目结构"], reasoning)
         self.assertEqual(["最终回答片段", "最终回答"], live_output)
+        self.assertEqual(3, len(activities))
+        self.assertEqual("codex_command", activities[-1]["event"])
+        self.assertEqual("success", activities[-1]["type"])
+        self.assertEqual("pytest -q", activities[-1]["detail"])
+        self.assertEqual("623 passed\n", activities[-1]["metadata"]["output"])
+        self.assertEqual(0, activities[-1]["metadata"]["exit_code"])
 
     def test_codex_app_server_normalizes_threads_and_reasoning_history(self) -> None:
         backend = CodexBackend()
@@ -211,6 +269,47 @@ class McpServerInjectionTests(unittest.TestCase):
         self.assertEqual(messages[2]["at"], activities[0]["at"])
         self.assertEqual("shell", activities[0]["metadata"]["name"])
         self.assertEqual("auto", activities[2]["metadata"]["trigger"])
+
+    def test_codex_app_server_normalizes_command_execution_history(self) -> None:
+        activity = CodexBackend._app_server_activity_payload(
+            {
+                "id": "command-1",
+                "type": "commandExecution",
+                "command": "pytest -q",
+                "cwd": "I:/AI/chatbridge",
+                "status": "completed",
+                "aggregatedOutput": "623 passed\n",
+                "exitCode": 0,
+                "durationMs": 1200,
+            },
+            item_type="commandExecution",
+            item_id="command-1",
+        )
+
+        self.assertEqual("codex_command", activity["event"])
+        self.assertEqual("pytest -q", activity["detail"])
+        self.assertEqual("pytest -q", activity["metadata"]["command"])
+        self.assertEqual("623 passed\n", activity["metadata"]["output"])
+        self.assertEqual("0", activity["metadata"]["exitCode"])
+
+    def test_codex_exec_json_extracts_command_activity(self) -> None:
+        activity = CodexBackend._extract_exec_command_activity(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item-1",
+                    "type": "command_execution",
+                    "command": "git status --short",
+                    "status": "completed",
+                    "aggregated_output": " M ui/app.py\n",
+                    "exit_code": 0,
+                },
+            }
+        )
+
+        self.assertEqual("codex_command", activity["event"])
+        self.assertEqual("git status --short", activity["metadata"]["command"])
+        self.assertEqual(" M ui/app.py\n", activity["metadata"]["output"])
 
     def test_hub_exposes_codex_threads_through_app_server_backend(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

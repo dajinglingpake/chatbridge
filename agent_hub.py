@@ -612,6 +612,7 @@ class MultiCodexHub:
             task.progress_text = ""
             task.live_output_text = ""
             task.reasoning_text = ""
+            task.activity_items = []
             task.progress_at = task.started_at
             task.progress_seq = 0
             self.runtimes[agent_id].status = "running"
@@ -804,6 +805,7 @@ class MultiCodexHub:
                 on_progress=lambda text: self._update_task_progress(task.id, text),
                 on_live_output=lambda text: self._update_task_stream_text(task.id, "live_output_text", text),
                 on_reasoning=lambda text: self._update_task_stream_text(task.id, "reasoning_text", text),
+                on_activity=lambda item: self._update_task_activity(task.id, item),
                 on_context_left_percent=lambda percent: self._update_task_context_left_percent(task.id, percent),
                 is_cancel_requested=lambda: self._is_cancel_requested(task.id),
                 mcp_server=mcp_server,
@@ -853,6 +855,34 @@ class MultiCodexHub:
                 return
             setattr(task, field_name, stream_text)
             task.progress_text = stream_text
+            task.progress_at = now_iso()
+            task.progress_seq += 1
+            self._save_state()
+            self._push_bridge_task_update(task, event="progress")
+
+    def _update_task_activity(self, task_id: str, item: dict[str, object]) -> None:
+        item_id = str(item.get("id") or "").strip()
+        event = str(item.get("event") or "").strip()
+        if not item_id or not event:
+            return
+        normalized = dict(item)
+        normalized["id"] = item_id
+        normalized["event"] = event
+        with self.lock:
+            task = next((candidate for candidate in self.tasks if candidate.id == task_id), None)
+            if task is None or task.status not in {"running", "queued"}:
+                return
+            existing_index = next(
+                (index for index, candidate in enumerate(task.activity_items) if str(candidate.get("id") or "") == item_id),
+                -1,
+            )
+            if existing_index >= 0:
+                if task.activity_items[existing_index] == normalized:
+                    return
+                task.activity_items[existing_index] = normalized
+            else:
+                task.activity_items.append(normalized)
+                del task.activity_items[:-24]
             task.progress_at = now_iso()
             task.progress_seq += 1
             self._save_state()

@@ -1651,7 +1651,7 @@ class StreamComposerTests(unittest.TestCase):
 
     def test_reasoning_shows_limited_preview_above_separate_live_output(self) -> None:
         ui = FakeUI()
-        reasoning_text = "**先检查项目结构**并确认消息数据流。" * 20
+        reasoning_text = "**开始检查项目结构** " + ("中间分析内容 " * 30) + "最新进度：正在核对流式命令输出。"
         mobile_state = {
             "counts": {"running": 1, "queued": 0},
             "updated_at": "2026-07-04T05:20:00",
@@ -1705,7 +1705,9 @@ class StreamComposerTests(unittest.TestCase):
         self.assertNotIn("open", reasoning_details[0].props_text.split())
         self.assertEqual(1, len(reasoning_previews))
         self.assertLessEqual(len(reasoning_previews[0].text), 120)
-        self.assertTrue(reasoning_previews[0].text.endswith("..."))
+        self.assertTrue(reasoning_previews[0].text.startswith("..."))
+        self.assertIn("最新进度：正在核对流式命令输出。", reasoning_previews[0].text)
+        self.assertNotIn("开始检查项目结构", reasoning_previews[0].text)
         self.assertNotIn("**", reasoning_previews[0].text)
         self.assertEqual(1, len(expand_labels))
         self.assertEqual(1, len(collapse_labels))
@@ -1720,6 +1722,76 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("summary?.addEventListener('click'", source)
         self.assertIn("localStorage.setItem(reasoningStorageKey", source)
         self.assertIn("setupReasoningDisclosures();", source)
+
+    def test_running_command_is_rendered_as_collapsed_activity_with_output(self) -> None:
+        ui = FakeUI()
+        mobile_state = {
+            "counts": {"running": 1, "queued": 0},
+            "agents": [{"id": "codex", "name": "Codex", "backend": "codex"}],
+            "tasks": [
+                {
+                    "id": "task-command",
+                    "agent_id": "codex",
+                    "backend": "codex",
+                    "session_name": "focus",
+                    "status": "running",
+                    "created_at": "2026-07-17T05:19:00",
+                    "started_at": "2026-07-17T05:19:00",
+                    "prompt": "run tests",
+                    "activity_items": [
+                        {
+                            "id": "command-1",
+                            "event": "codex_command",
+                            "type": "info",
+                            "at": "2026-07-17T05:19:01",
+                            "detail": "pytest -q",
+                            "metadata": {
+                                "command": "pytest -q",
+                                "cwd": "I:/AI/chatbridge",
+                                "status": "inProgress",
+                                "output": "INITIAL OUTPUT MARKER " + ("old output " * 30) + "latest output: collecting final tests...",
+                            },
+                        }
+                    ],
+                }
+            ],
+            "session_task_counts": {"focus": 1},
+        }
+
+        render_mobile_stream_section(ui, _translator, mobile_state, "focus", [], _noop, _noop, _noop, _noop, _noop, _noop, _noop)
+
+        command_details = [item for item in ui.elements if "cb-stream-command" in item.class_text.split()]
+        command_previews = [item.text for item in ui.elements if "cb-stream-command-preview" in item.class_text.split()]
+        command_command_previews = [item.text for item in ui.elements if "cb-stream-command-command-preview" in item.class_text.split()]
+        command_outputs = [item.text for item in ui.elements if "cb-stream-command-output" in item.class_text.split()]
+        command_labels = [item.text for item in ui.elements if "cb-stream-command-label" in item.class_text.split()]
+
+        self.assertEqual(1, len(command_details))
+        self.assertIn("cb-stream-command-running", command_details[0].class_text.split())
+        self.assertIn("data-command-details=1", command_details[0].props_text)
+        self.assertIn("data-command-key=task-command%3Acommand-1", command_details[0].props_text)
+        self.assertNotIn("open", command_details[0].props_text.split())
+        self.assertEqual(["pytest -q"], command_command_previews)
+        self.assertEqual(1, len(command_previews))
+        self.assertTrue(command_previews[0].startswith("..."))
+        self.assertIn("latest output: collecting final tests...", command_previews[0])
+        self.assertNotIn("INITIAL OUTPUT MARKER", command_previews[0])
+        self.assertEqual(["INITIAL OUTPUT MARKER " + ("old output " * 30) + "latest output: collecting final tests..."], command_outputs)
+        self.assertEqual(["正在运行命令"], command_labels)
+
+    def test_streaming_previews_are_bottom_aligned(self) -> None:
+        source = Path("ui/app.py").read_text(encoding="utf-8")
+
+        self.assertRegex(source, r"\.cb-stream-reasoning-preview\s*\{[^}]*justify-content:\s*flex-end")
+        self.assertRegex(source, r"\.cb-stream-command-heading\s*\{[^}]*justify-content:\s*flex-end")
+
+    def test_command_disclosure_persists_open_state_across_stream_refreshes(self) -> None:
+        source = Path("ui/app.py").read_text(encoding="utf-8")
+
+        self.assertIn("window.__cbCommandOpenState", source)
+        self.assertIn("data-command-key", source)
+        self.assertIn("localStorage.setItem(commandStorageKey", source)
+        self.assertIn("setupCommandDisclosures();", source)
 
     def test_short_reasoning_is_visible_without_empty_disclosure(self) -> None:
         ui = FakeUI()

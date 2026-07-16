@@ -179,6 +179,7 @@ class HubTask:
     progress_text: str = ""
     live_output_text: str = ""
     reasoning_text: str = ""
+    activity_items: list[dict[str, object]] = field(default_factory=list)
     progress_at: str = ""
     progress_seq: int = 0
     context_left_percent: int | None = None
@@ -198,6 +199,8 @@ class HubTask:
         progress_text = str(raw.get("progress_text") or "") if include_text else ""
         live_output_text = str(raw.get("live_output_text") or "") if include_text else ""
         reasoning_text = str(raw.get("reasoning_text") or "") if include_text else ""
+        raw_activity_items = raw.get("activity_items")
+        activity_items = [dict(item) for item in raw_activity_items if isinstance(item, dict)] if include_text and isinstance(raw_activity_items, list) else []
         return cls(
             id=task_id,
             agent_id=agent_id or "main",
@@ -227,6 +230,7 @@ class HubTask:
             progress_text=progress_text,
             live_output_text=live_output_text,
             reasoning_text=reasoning_text,
+            activity_items=activity_items,
             progress_at=str(raw.get("progress_at") or "").strip(),
             progress_seq=int(raw.get("progress_seq") or 0),
             context_left_percent=_optional_percent(raw.get("context_left_percent")),

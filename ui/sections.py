@@ -973,10 +973,14 @@ def _stream_reasoning_preview(value: str, *, limit: int = 120) -> tuple[str, boo
     plain = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", plain)
     plain = re.sub(r"[*_~`]+", "", plain)
     plain = re.sub(r"(^|\s)[#>]+\s*", r"\1", plain)
-    compact = " ".join(plain.split())
+    return _stream_tail_preview(plain, limit=limit)
+
+
+def _stream_tail_preview(value: str, *, limit: int) -> tuple[str, bool]:
+    compact = " ".join(str(value or "").split())
     if len(compact) <= limit:
         return compact, False
-    return f"{compact[: limit - 3].rstrip()}...", True
+    return f"...{compact[-(limit - 3):].lstrip()}", True
 
 
 def _stream_time_sort_key(value: object) -> tuple[int, float, str]:
@@ -1086,6 +1090,90 @@ def _stream_activity_items(value: object) -> list[dict[str, object]]:
         if event and at:
             items.append({"event": event, "type": activity_type, "at": at, "detail": detail, "metadata": metadata})
     return items
+
+
+def _stream_command_items(value: object, *, task_status: str = "") -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    terminal_task = task_status in {"succeeded", "failed", "canceled", "unknown_after_restart"}
+    items: list[dict[str, object]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict) or str(item.get("event") or "") != "codex_command":
+            continue
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        command = str(metadata.get("command") or item.get("detail") or "").strip()
+        if not command:
+            continue
+        raw_status = str(metadata.get("status") or "inProgress").replace("_", "").lower()
+        status = "running" if raw_status in {"inprogress", "running"} else "failed" if raw_status in {"failed", "declined"} else "completed"
+        exit_code = metadata.get("exit_code") if "exit_code" in metadata else metadata.get("exitCode")
+        if str(exit_code or "").lstrip("-").isdigit() and int(str(exit_code)) != 0:
+            status = "failed"
+        if terminal_task and status == "running":
+            status = "interrupted"
+        items.append(
+            {
+                "id": str(item.get("id") or f"command-{index + 1}"),
+                "command": command,
+                "cwd": str(metadata.get("cwd") or "").strip(),
+                "status": status,
+                "output": str(metadata.get("output") or metadata.get("aggregatedOutput") or "")[-12000:],
+                "exit_code": "" if exit_code is None else str(exit_code),
+                "duration_ms": str(metadata.get("duration_ms") or metadata.get("durationMs") or "").strip(),
+                "at": str(item.get("at") or "").strip(),
+            }
+        )
+    return items[-24:]
+
+
+def _stream_command_status_label(status: str, t: Translator) -> str:
+    return {
+        "running": _tr(t, "ui.web.mobile.command_running", "正在运行命令"),
+        "completed": _tr(t, "ui.web.mobile.command_completed", "已运行命令"),
+        "failed": _tr(t, "ui.web.mobile.command_failed", "命令运行失败"),
+        "interrupted": _tr(t, "ui.web.mobile.command_interrupted", "命令已中断"),
+    }.get(status, _tr(t, "ui.web.mobile.command_activity", "命令活动"))
+
+
+def _render_stream_command_item(ui: UIFactoryLike, t: Translator, item: dict[str, object], *, task_id: str, index: int) -> None:
+    status = str(item.get("status") or "running")
+    command = str(item.get("command") or "")
+    output = str(item.get("output") or "")
+    command_preview = " ".join(command.split())
+    if len(command_preview) > 160:
+        command_preview = f"{command_preview[:157].rstrip()}..."
+    output_preview, _ = _stream_tail_preview(output, limit=180)
+    command_key = quote(f"{task_id}:{item.get('id') or index}", safe="")
+    with ui.element("details").props(f"data-command-details=1 data-command-key={command_key}").classes(f"cb-stream-command cb-stream-command-{status}"):
+        with ui.element("summary").classes("cb-stream-command-summary"):
+            ui.element("span").classes("cb-stream-command-status-icon")
+            with ui.element("div").classes("cb-stream-command-heading"):
+                ui.label(_stream_command_status_label(status, t)).classes("cb-stream-command-label")
+                ui.label(command_preview).classes("cb-stream-command-command-preview")
+                if output_preview:
+                    ui.label(output_preview).classes("cb-stream-command-preview")
+            with ui.element("span").classes("cb-stream-command-toggle"):
+                ui.label(_tr(t, "ui.web.mobile.stream_reasoning_expand", "展开")).classes("cb-stream-command-toggle-label cb-stream-command-toggle-label-open")
+                ui.label(_tr(t, "ui.web.mobile.stream_reasoning_collapse", "收起")).classes("cb-stream-command-toggle-label cb-stream-command-toggle-label-close")
+                ui.element("span").classes("cb-stream-command-chevron")
+        with ui.element("div").classes("cb-stream-command-body"):
+            ui.label(_tr(t, "ui.web.mobile.command_command", "命令")).classes("cb-stream-command-section-label")
+            ui.label(command).classes("cb-stream-command-code")
+            if output:
+                ui.label(_tr(t, "ui.web.mobile.command_output", "输出")).classes("cb-stream-command-section-label")
+                ui.label(output).classes("cb-stream-command-output")
+            details = []
+            cwd = str(item.get("cwd") or "")
+            if cwd:
+                details.append(_tr(t, "ui.web.mobile.command_cwd", "目录: {value}", value=cwd))
+            duration_ms = str(item.get("duration_ms") or "")
+            if duration_ms:
+                details.append(_tr(t, "ui.web.mobile.command_duration", "耗时: {value} ms", value=duration_ms))
+            exit_code = str(item.get("exit_code") or "")
+            if exit_code:
+                details.append(_tr(t, "ui.web.mobile.command_exit_code", "退出码: {value}", value=exit_code))
+            if details:
+                ui.label(" · ".join(details)).classes("cb-stream-command-meta")
 
 
 def _stream_activity_type_class(activity_type: str) -> str:
@@ -1462,6 +1550,7 @@ def _render_mobile_stream_messages(
                     raw_activity_items = task.get("activity_items")
                     has_codex_activity = _stream_has_codex_activity(raw_activity_items if isinstance(raw_activity_items, list) else [])
                     activity_items = _stream_activity_items(raw_activity_items)
+                    command_items = _stream_command_items(raw_activity_items, task_status=status)
                     assume_utc_naive_time = _stream_task_uses_utc_naive_time(task)
                     task_id = str(task.get("id") or "").strip()
                     should_show_activity = bool(activity_items) and (
@@ -1474,7 +1563,7 @@ def _render_mobile_stream_messages(
                     if not assistant_text and status in {"running", "queued"}:
                         assistant_text = _tr(t, "ui.web.mobile.stream_working", "正在处理")
                         is_working_placeholder = True
-                    assistant_has_content = bool(assistant_text or output_segments or reasoning_text)
+                    assistant_has_content = bool(assistant_text or output_segments or reasoning_text or command_items)
                     turn_classes = "cb-stream-turn cb-stream-turn-with-footer" if assistant_has_content or should_show_activity else "cb-stream-turn"
                     with ui.element("div").classes(turn_classes):
                         if prompt_text:
@@ -1528,6 +1617,10 @@ def _render_mobile_stream_messages(
                                                     ui.element("span").classes("cb-stream-reasoning-icon")
                                                     ui.label(_tr(t, "ui.web.mobile.stream_reasoning", "思考过程")).classes("cb-stream-reasoning-label")
                                                 ui.label(reasoning_preview).classes("cb-stream-reasoning-preview")
+                                    if command_items:
+                                        with ui.element("div").classes("cb-stream-command-log"):
+                                            for command_index, command_item in enumerate(command_items, start=1):
+                                                _render_stream_command_item(ui, t, command_item, task_id=task_id, index=command_index)
                                     if should_show_activity:
                                         with ui.element("div").classes("cb-stream-activity-log"):
                                             for item in activity_items:

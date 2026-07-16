@@ -69,6 +69,13 @@ class StateModelTests(unittest.TestCase):
                 "prompt": "hello",
                 "live_output_text": "partial answer",
                 "reasoning_text": "inspect state",
+                "activity_items": [
+                    {
+                        "id": "command-1",
+                        "event": "codex_command",
+                        "metadata": {"command": "pytest -q", "status": "inProgress"},
+                    }
+                ],
             },
             default_backend="codex",
         )
@@ -83,6 +90,8 @@ class StateModelTests(unittest.TestCase):
         self.assertEqual([], task.images)
         self.assertEqual("partial answer", task.live_output_text)
         self.assertEqual("inspect state", task.reasoning_text)
+        self.assertEqual("codex_command", task.activity_items[0]["event"])
+        self.assertEqual("pytest -q", task.activity_items[0]["metadata"]["command"])
 
     def test_agent_runtime_from_dict_recovers_invalid_payload(self) -> None:
         runtime = AgentRuntimeState.from_dict("broken", now="2026-01-01T00:00:00")
