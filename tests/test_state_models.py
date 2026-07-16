@@ -67,6 +67,8 @@ class StateModelTests(unittest.TestCase):
                 "agent_id": "main",
                 "created_at": "2026-01-01T00:00:00",
                 "prompt": "hello",
+                "live_output_text": "partial answer",
+                "reasoning_text": "inspect state",
             },
             default_backend="codex",
         )
@@ -79,6 +81,8 @@ class StateModelTests(unittest.TestCase):
         self.assertEqual("", task.model)
         self.assertEqual("", task.permission_profile)
         self.assertEqual([], task.images)
+        self.assertEqual("partial answer", task.live_output_text)
+        self.assertEqual("inspect state", task.reasoning_text)
 
     def test_agent_runtime_from_dict_recovers_invalid_payload(self) -> None:
         runtime = AgentRuntimeState.from_dict("broken", now="2026-01-01T00:00:00")

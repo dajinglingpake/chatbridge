@@ -1469,6 +1469,134 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             width: 100%;
             min-width: 0;
         }
+        .cb-stream-reasoning {
+            display: block;
+            margin-bottom: 0.75rem;
+            overflow: hidden;
+            border: 1px solid var(--cb-border);
+            border-radius: 8px;
+            background: color-mix(in srgb, var(--cb-surface-raised) 72%, transparent);
+            color: var(--cb-muted);
+            transition: border-color 160ms ease, background-color 160ms ease;
+        }
+        .cb-stream-reasoning[open] {
+            border-color: var(--cb-border-strong);
+            background: var(--cb-surface-raised);
+        }
+        .cb-stream-reasoning-summary {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            align-items: start;
+            gap: 0.45rem 0.75rem;
+            box-sizing: border-box;
+            width: 100%;
+            padding: 0.65rem 0.75rem 0.7rem;
+            cursor: pointer;
+            list-style: none;
+            user-select: none;
+        }
+        .cb-stream-reasoning-summary:hover {
+            background: var(--cb-surface-muted);
+        }
+        .cb-stream-reasoning-summary:focus-visible {
+            outline: 2px solid var(--cb-accent-bright);
+            outline-offset: -2px;
+        }
+        .cb-stream-reasoning-summary::-webkit-details-marker {
+            display: none;
+        }
+        .cb-stream-reasoning-heading,
+        .cb-stream-reasoning-toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            min-width: 0;
+        }
+        .cb-stream-reasoning-toggle {
+            justify-content: flex-end;
+            color: var(--cb-muted);
+            white-space: nowrap;
+        }
+        .cb-stream-reasoning-icon,
+        .cb-stream-reasoning-chevron {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-family: "Material Icons";
+            font-size: 0.95rem;
+            line-height: 1;
+        }
+        .cb-stream-reasoning-icon::before {
+            content: "psychology";
+        }
+        .cb-stream-reasoning-chevron::before {
+            content: "chevron_right";
+        }
+        .cb-stream-reasoning-chevron {
+            transition: transform 160ms ease;
+        }
+        .cb-stream-reasoning[open] .cb-stream-reasoning-chevron {
+            transform: rotate(90deg);
+        }
+        .cb-stream-reasoning-label {
+            font-size: 0.82rem;
+            font-weight: 700;
+            line-height: 1.35;
+        }
+        .cb-stream-reasoning-toggle-label {
+            font-size: 0.76rem;
+            font-weight: 600;
+            line-height: 1.35;
+        }
+        .cb-stream-reasoning-toggle-label-close {
+            display: none;
+        }
+        .cb-stream-reasoning[open] .cb-stream-reasoning-toggle-label-open {
+            display: none;
+        }
+        .cb-stream-reasoning[open] .cb-stream-reasoning-toggle-label-close {
+            display: inline;
+        }
+        .cb-stream-reasoning-preview {
+            display: -webkit-box;
+            grid-column: 1 / -1;
+            color: var(--cb-muted);
+            font-size: 0.88rem;
+            font-weight: 400;
+            line-height: 1.55;
+            -webkit-box-orient: vertical;
+            -webkit-line-clamp: 3;
+            overflow: hidden;
+            overflow-wrap: anywhere;
+            user-select: text;
+        }
+        .cb-stream-reasoning[open] .cb-stream-reasoning-preview {
+            display: none;
+        }
+        .cb-stream-reasoning-static {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr);
+            align-items: start;
+            gap: 0.4rem;
+            padding: 0.65rem 0.75rem 0.7rem;
+        }
+        .cb-stream-reasoning-static .cb-stream-reasoning-preview {
+            grid-column: 1;
+        }
+        .cb-stream-reasoning-body {
+            max-height: min(52vh, 28rem);
+            overflow: auto;
+            border-top: 1px solid var(--cb-border);
+            padding: 0.75rem 0.9rem 0.85rem;
+            color: var(--cb-muted);
+            font-size: 0.9rem;
+            line-height: 1.6;
+            animation: cb-reasoning-reveal 160ms ease-out;
+        }
+        @keyframes cb-reasoning-reveal {
+            from { opacity: 0; transform: translateY(-0.25rem); }
+            to { opacity: 1; transform: translateY(0); }
+        }
         .cb-stream-progress {
             border-left: 3px solid #d97706;
             padding-left: 0.85rem;
@@ -3674,6 +3802,34 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                 const imageLightboxCloseLabel = labels.imageLightboxCloseLabel || 'Close image preview';
                 const copyCodeLabel = labels.copyCodeLabel || 'Copy code';
                 const copiedLabel = labels.copiedLabel || 'Copied';
+                const reasoningStorageKey = 'cb_reasoning_open_state';
+                const reasoningOpenState = window.__cbReasoningOpenState || (() => {
+                    try {
+                        return JSON.parse(localStorage.getItem(reasoningStorageKey) || '{}') || {};
+                    } catch {
+                        return {};
+                    }
+                })();
+                window.__cbReasoningOpenState = reasoningOpenState;
+                const persistReasoningOpenState = () => {
+                    try {
+                        localStorage.setItem(reasoningStorageKey, JSON.stringify(reasoningOpenState));
+                    } catch {}
+                };
+                const setupReasoningDisclosures = () => {
+                    document.querySelectorAll('.cb-stream-reasoning[data-reasoning-key]').forEach((details) => {
+                        const key = details.getAttribute('data-reasoning-key') || '';
+                        if (!key) return;
+                        if (reasoningOpenState[key] === true) details.open = true;
+                        if (details.dataset.cbReasoningReady === '1') return;
+                        details.dataset.cbReasoningReady = '1';
+                        const summary = details.querySelector('summary');
+                        summary?.addEventListener('click', () => {
+                            reasoningOpenState[key] = !details.open;
+                            persistReasoningOpenState();
+                        });
+                    });
+                };
                 const readDelta = (scroller) => Math.max(0, scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight);
                 const readScrollTop = (scroller) => Math.max(0, Number(scroller.scrollTop) || 0);
                 const maxScrollTop = (scroller) => Math.max(0, scroller.scrollHeight - scroller.clientHeight);
@@ -4462,6 +4618,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     setupCodeBlockCopy();
                     setupComposerUploadPanel();
                     setupComposerSubmit();
+                    setupReasoningDisclosures();
                     updateComposerMetrics();
                     updateLiveElapsed();
                     setupLiveTypewriter();

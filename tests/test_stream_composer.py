@@ -1649,6 +1649,107 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("data-stream-text-key=task-running", live_markdowns[0].props_text)
         self.assertNotIn("data-stream-placeholder=1", live_markdowns[0].props_text)
 
+    def test_reasoning_shows_limited_preview_above_separate_live_output(self) -> None:
+        ui = FakeUI()
+        reasoning_text = "**先检查项目结构**并确认消息数据流。" * 20
+        mobile_state = {
+            "counts": {"running": 1, "queued": 0},
+            "updated_at": "2026-07-04T05:20:00",
+            "agents": [{"id": "codex", "name": "Codex", "backend": "codex"}],
+            "tasks": [
+                {
+                    "id": "task-running",
+                    "agent_id": "codex",
+                    "agent_name": "Codex",
+                    "backend": "codex",
+                    "session_name": "focus",
+                    "status": "running",
+                    "created_at": "2026-07-04T05:19:00",
+                    "started_at": "2026-07-04T05:19:00",
+                    "prompt": "keep going",
+                    "progress_text": "正在输出回答",
+                    "reasoning_text": reasoning_text,
+                    "output": "",
+                    "error": "",
+                    "summary": "正在输出回答",
+                }
+            ],
+            "session_task_counts": {"focus": 1},
+        }
+
+        render_mobile_stream_section(
+            ui,
+            _translator,
+            mobile_state,
+            "focus",
+            [],
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+        )
+
+        reasoning_details = [item for item in ui.elements if "cb-stream-reasoning" in item.class_text.split()]
+        reasoning_previews = [item for item in ui.elements if "cb-stream-reasoning-preview" in item.class_text.split()]
+        reasoning_bodies = [item for item in ui.elements if "cb-stream-reasoning-body" in item.class_text.split()]
+        expand_labels = [item for item in ui.elements if "cb-stream-reasoning-toggle-label-open" in item.class_text.split()]
+        collapse_labels = [item for item in ui.elements if "cb-stream-reasoning-toggle-label-close" in item.class_text.split()]
+        live_markdowns = [item for item in ui.elements if "cb-stream-live-text" in item.class_text.split()]
+
+        self.assertEqual(1, len(reasoning_details))
+        self.assertIn("data-reasoning-details=1", reasoning_details[0].props_text)
+        self.assertIn("data-reasoning-key=task-running", reasoning_details[0].props_text)
+        self.assertNotIn("open", reasoning_details[0].props_text.split())
+        self.assertEqual(1, len(reasoning_previews))
+        self.assertLessEqual(len(reasoning_previews[0].text), 120)
+        self.assertTrue(reasoning_previews[0].text.endswith("..."))
+        self.assertNotIn("**", reasoning_previews[0].text)
+        self.assertEqual(1, len(expand_labels))
+        self.assertEqual(1, len(collapse_labels))
+        self.assertEqual([reasoning_text], [item.text for item in reasoning_bodies])
+        self.assertEqual(["正在输出回答"], [item.text for item in live_markdowns])
+
+    def test_reasoning_disclosure_persists_open_state_across_stream_refreshes(self) -> None:
+        source = Path("ui/app.py").read_text(encoding="utf-8")
+
+        self.assertIn("window.__cbReasoningOpenState", source)
+        self.assertIn("data-reasoning-key", source)
+        self.assertIn("summary?.addEventListener('click'", source)
+        self.assertIn("localStorage.setItem(reasoningStorageKey", source)
+        self.assertIn("setupReasoningDisclosures();", source)
+
+    def test_short_reasoning_is_visible_without_empty_disclosure(self) -> None:
+        ui = FakeUI()
+        mobile_state = {
+            "counts": {"running": 0, "queued": 0},
+            "agents": [{"id": "codex", "name": "Codex", "backend": "codex"}],
+            "tasks": [
+                {
+                    "id": "task-finished",
+                    "agent_id": "codex",
+                    "backend": "codex",
+                    "session_name": "focus",
+                    "status": "succeeded",
+                    "created_at": "2026-07-04T05:19:00",
+                    "prompt": "inspect",
+                    "reasoning_text": "先检查项目结构",
+                    "output": "检查完成",
+                }
+            ],
+            "session_task_counts": {"focus": 1},
+        }
+
+        render_mobile_stream_section(ui, _translator, mobile_state, "focus", [], _noop, _noop, _noop, _noop, _noop, _noop, _noop)
+
+        reasoning_details = [item for item in ui.elements if "data-reasoning-details=1" in item.props_text]
+        reasoning_previews = [item.text for item in ui.elements if "cb-stream-reasoning-preview" in item.class_text.split()]
+
+        self.assertEqual([], reasoning_details)
+        self.assertEqual(["先检查项目结构"], reasoning_previews)
+
     def test_queued_task_is_rendered_in_composer_queue_track_while_running(self) -> None:
         ui = FakeUI()
         mobile_state = {

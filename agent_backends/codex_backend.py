@@ -114,15 +114,48 @@ class _CodexAppServerClient:
         *,
         timeout: float,
         on_progress: Callable[[str], None] | None,
+        on_live_output: Callable[[str], None] | None = None,
+        on_reasoning: Callable[[str], None] | None = None,
         reasoning_progress_label: Callable[[str], str] | None = None,
     ) -> tuple[str, int | None]:
         deadline = time.time() + timeout
         output = ""
         pending_answer_delta = ""
         pending_reasoning_delta = ""
-        last_progress = ""
-        last_progress_at = 0.0
+        last_output_progress = ""
+        last_output_progress_at = 0.0
+        last_reasoning_progress = ""
+        last_reasoning_progress_at = 0.0
         context_left_percent: int | None = None
+
+        def push_live_output(text: str, *, force: bool = False) -> None:
+            nonlocal last_output_progress, last_output_progress_at
+            cleaned = text.strip()
+            callback = on_live_output or on_progress
+            now = time.time()
+            if not cleaned or callback is None or cleaned == last_output_progress:
+                return
+            if not force and now - last_output_progress_at < PROGRESS_PUSH_INTERVAL_SECONDS:
+                return
+            callback(cleaned)
+            last_output_progress = cleaned
+            last_output_progress_at = now
+
+        def push_reasoning(text: str, *, force: bool = False) -> None:
+            nonlocal last_reasoning_progress, last_reasoning_progress_at
+            cleaned = text.strip()
+            callback = on_reasoning or on_progress
+            now = time.time()
+            if not cleaned or callback is None or cleaned == last_reasoning_progress:
+                return
+            if not force and now - last_reasoning_progress_at < PROGRESS_PUSH_INTERVAL_SECONDS:
+                return
+            if on_reasoning is None and reasoning_progress_label is not None:
+                cleaned = reasoning_progress_label(cleaned)
+            callback(cleaned)
+            last_reasoning_progress = text.strip()
+            last_reasoning_progress_at = now
+
         while time.time() < deadline:
             message = self._read_message(deadline)
             method = str(message.get("method") or "")
@@ -144,24 +177,12 @@ class _CodexAppServerClient:
                 delta = self._extract_delta(message)
                 if delta:
                     pending_answer_delta += delta
-                    if on_progress is not None and time.time() - last_progress_at >= PROGRESS_PUSH_INTERVAL_SECONDS:
-                        progress = pending_answer_delta.strip()
-                        if progress and progress != last_progress:
-                            on_progress(progress)
-                            last_progress = progress
-                            last_progress_at = time.time()
+                    push_live_output(pending_answer_delta)
             if method in {"item/reasoning/summaryTextDelta", "item/reasoning/textDelta"}:
                 delta = self._extract_delta(message)
                 if delta:
                     pending_reasoning_delta += delta
-                    if on_progress is not None and time.time() - last_progress_at >= PROGRESS_PUSH_INTERVAL_SECONDS:
-                        progress = pending_reasoning_delta.strip()
-                        if progress and reasoning_progress_label is not None:
-                            progress = reasoning_progress_label(progress)
-                        if progress and progress != last_progress:
-                            on_progress(progress)
-                            last_progress = progress
-                            last_progress_at = time.time()
+                    push_reasoning(pending_reasoning_delta)
             next_context_left = self._extract_context_left_percent(message)
             if next_context_left is not None:
                 context_left_percent = next_context_left
@@ -174,6 +195,8 @@ class _CodexAppServerClient:
                     raise RuntimeError(f"Codex app-server turn {status}")
                 if not output.strip() and pending_answer_delta.strip():
                     output = pending_answer_delta.strip()
+                push_reasoning(pending_reasoning_delta, force=True)
+                push_live_output(output or pending_answer_delta, force=True)
                 return output, context_left_percent
         raise RuntimeError(f"timed out waiting for app-server turn: {turn_id}")
 
@@ -391,6 +414,8 @@ class CodexBackend(AgentBackend):
             turn_id,
             timeout=max(60, int(getattr(context, "hub_task_timeout_seconds", 0) or 0), 60 * 30),
             on_progress=context.on_progress,
+            on_live_output=context.on_live_output,
+            on_reasoning=context.on_reasoning,
             reasoning_progress_label=lambda text: _translate(
                 Localizer().translate,
                 "agent.codex.progress.reasoning",
@@ -572,6 +597,9 @@ class CodexBackend(AgentBackend):
         last_progress_at = 0.0
         last_progress_perf_at = 0.0
         pending_delta = ""
+        pending_reasoning = ""
+        last_reasoning = ""
+        last_reasoning_at = 0.0
         context_left_percent: int | None = None
         assert proc.stderr is not None
         stdout_events: queue.Queue[dict[str, object] | None] = queue.Queue()
@@ -635,7 +663,31 @@ class CodexBackend(AgentBackend):
                 context_left_percent = next_context_left
                 if context.on_context_left_percent is not None:
                     context.on_context_left_percent(next_context_left)
-            delta = self._extract_text_delta(event)
+            reasoning_update, reasoning_is_delta = self._extract_reasoning_update(event)
+            if reasoning_update:
+                cleaned_reasoning = reasoning_update.strip()
+                if reasoning_is_delta:
+                    pending_reasoning += reasoning_update
+                elif not pending_reasoning:
+                    pending_reasoning = cleaned_reasoning
+                elif cleaned_reasoning.startswith(pending_reasoning):
+                    pending_reasoning = cleaned_reasoning
+                elif cleaned_reasoning not in pending_reasoning:
+                    pending_reasoning = f"{pending_reasoning.rstrip()}\n\n{cleaned_reasoning}"
+                reasoning_callback = context.on_reasoning or context.on_progress
+                now = time.time()
+                force_reasoning = not reasoning_is_delta
+                if (
+                    reasoning_callback is not None
+                    and pending_reasoning.strip()
+                    and pending_reasoning.strip() != last_reasoning
+                    and (force_reasoning or now - last_reasoning_at >= PROGRESS_PUSH_INTERVAL_SECONDS)
+                ):
+                    last_reasoning = pending_reasoning.strip()
+                    last_reasoning_at = now
+                    last_progress_perf_at = time.perf_counter()
+                    reasoning_callback(last_reasoning)
+            delta = "" if reasoning_update else self._extract_text_delta(event)
             progress = ""
             if delta:
                 pending_delta += delta
@@ -660,6 +712,11 @@ class CodexBackend(AgentBackend):
             if trailing_chunk and trailing_chunk != last_progress:
                 last_progress_perf_at = time.perf_counter()
                 context.on_progress(trailing_chunk)
+        reasoning_callback = context.on_reasoning or context.on_progress
+        trailing_reasoning = pending_reasoning.strip()
+        if reasoning_callback is not None and trailing_reasoning and trailing_reasoning != last_reasoning:
+            last_progress_perf_at = time.perf_counter()
+            reasoning_callback(trailing_reasoning)
         wait_started_at = time.perf_counter()
         try:
             completed_returncode = self._wait_for_exit(proc)
@@ -1104,6 +1161,54 @@ class CodexBackend(AgentBackend):
                 if nested:
                     return nested
         return ""
+
+    @staticmethod
+    def _extract_reasoning_update(value: object) -> tuple[str, bool]:
+        if not isinstance(value, dict):
+            return "", False
+        event_type = str(value.get("method") or value.get("type") or value.get("event") or "").lower()
+        candidates = [value]
+        for key in ("params", "item", "payload"):
+            nested = value.get(key)
+            if isinstance(nested, dict):
+                candidates.append(nested)
+                nested_item = nested.get("item")
+                if isinstance(nested_item, dict):
+                    candidates.append(nested_item)
+        params = value.get("params")
+        reasoning_candidate = params if "reasoning" in event_type and isinstance(params, dict) else next(
+            (
+                candidate
+                for candidate in candidates[1:]
+                if "reasoning" in str(candidate.get("type") or candidate.get("event") or "").lower()
+            ),
+            None,
+        )
+        if reasoning_candidate is None and "reasoning" not in event_type:
+            return "", False
+        target = reasoning_candidate or value
+        for key in ("delta", "textDelta", "text_delta", "text"):
+            text = target.get(key)
+            if isinstance(text, str) and text.strip():
+                return text, "delta" in event_type
+        summary = target.get("summary")
+        if isinstance(summary, list):
+            parts = []
+            for item in summary:
+                if isinstance(item, str) and item.strip():
+                    parts.append(item.strip())
+                elif isinstance(item, dict):
+                    text = item.get("text")
+                    if isinstance(text, str) and text.strip():
+                        parts.append(text.strip())
+            if parts:
+                return "\n".join(parts), "delta" in event_type
+        if target is not value:
+            for key in ("delta", "textDelta", "text_delta", "text"):
+                text = value.get(key)
+                if isinstance(text, str) and text.strip():
+                    return text, "delta" in event_type
+        return "", False
 
     def _extract_context_left_percent(self, value: object) -> int | None:
         if not isinstance(value, dict):

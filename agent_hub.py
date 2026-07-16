@@ -610,6 +610,8 @@ class MultiCodexHub:
             task.status = "running"
             task.started_at = now_iso()
             task.progress_text = ""
+            task.live_output_text = ""
+            task.reasoning_text = ""
             task.progress_at = task.started_at
             task.progress_seq = 0
             self.runtimes[agent_id].status = "running"
@@ -800,6 +802,8 @@ class MultiCodexHub:
                 start_new_session=not IS_WINDOWS,
                 on_process_started=lambda pid: self._register_running_task_pid(task.id, pid),
                 on_progress=lambda text: self._update_task_progress(task.id, text),
+                on_live_output=lambda text: self._update_task_stream_text(task.id, "live_output_text", text),
+                on_reasoning=lambda text: self._update_task_stream_text(task.id, "reasoning_text", text),
                 on_context_left_percent=lambda percent: self._update_task_context_left_percent(task.id, percent),
                 is_cancel_requested=lambda: self._is_cancel_requested(task.id),
                 mcp_server=mcp_server,
@@ -832,6 +836,23 @@ class MultiCodexHub:
             if task.progress_text == progress_text:
                 return
             task.progress_text = progress_text
+            task.progress_at = now_iso()
+            task.progress_seq += 1
+            self._save_state()
+            self._push_bridge_task_update(task, event="progress")
+
+    def _update_task_stream_text(self, task_id: str, field_name: str, text: str) -> None:
+        stream_text = str(text or "").strip()
+        if not stream_text or field_name not in {"live_output_text", "reasoning_text"}:
+            return
+        with self.lock:
+            task = next((item for item in self.tasks if item.id == task_id), None)
+            if task is None or task.status not in {"running", "queued"}:
+                return
+            if getattr(task, field_name) == stream_text:
+                return
+            setattr(task, field_name, stream_text)
+            task.progress_text = stream_text
             task.progress_at = now_iso()
             task.progress_seq += 1
             self._save_state()

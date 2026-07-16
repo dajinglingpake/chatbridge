@@ -950,6 +950,35 @@ def _stream_task_body(task: dict[str, object], t: Translator) -> tuple[str, str]
     return _tr(t, "ui.web.mobile.stream_prompt", "输入"), _stream_text(task.get("prompt"))
 
 
+def _stream_reasoning_and_live_output(task: dict[str, object]) -> tuple[str, str]:
+    reasoning_text = _stream_text(task.get("reasoning_text"), limit=12000)
+    live_output_text = _stream_text(task.get("live_output_text"), limit=20000)
+    progress_text = _stream_text(task.get("progress_text"), limit=20000)
+    if live_output_text or not progress_text:
+        return reasoning_text, live_output_text
+    if reasoning_text:
+        return reasoning_text, "" if progress_text == reasoning_text else progress_text
+    for prefix in ("思考：", "Thinking:"):
+        if progress_text.startswith(prefix):
+            return progress_text[len(prefix):].strip(), ""
+    source = str(task.get("source") or "").strip()
+    status = str(task.get("status") or "").strip()
+    if source == "codex-app-server" and status not in {"running", "queued"}:
+        return progress_text, ""
+    return "", progress_text
+
+
+def _stream_reasoning_preview(value: str, *, limit: int = 120) -> tuple[str, bool]:
+    plain = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", str(value or ""))
+    plain = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", plain)
+    plain = re.sub(r"[*_~`]+", "", plain)
+    plain = re.sub(r"(^|\s)[#>]+\s*", r"\1", plain)
+    compact = " ".join(plain.split())
+    if len(compact) <= limit:
+        return compact, False
+    return f"{compact[: limit - 3].rstrip()}...", True
+
+
 def _stream_time_sort_key(value: object) -> tuple[int, float, str]:
     text = str(value or "").strip()
     if not text:
@@ -1426,7 +1455,7 @@ def _render_mobile_stream_messages(
                     output_image_previews = _stream_image_previews(task.get("output_image_previews"))
                     output_segments = _stream_output_segments(task.get("output_segments"))
                     error_text = _stream_text(task.get("error"), limit=8000)
-                    progress_text = _stream_text(task.get("progress_text"), limit=4000)
+                    reasoning_text, live_output_text = _stream_reasoning_and_live_output(task)
                     output_text = _stream_text(task.get("output"), limit=20000)
                     if error_text:
                         output_segments = []
@@ -1440,12 +1469,12 @@ def _render_mobile_stream_messages(
                         or task_id == latest_task_id
                         or status in {"running", "queued"}
                     )
-                    assistant_text = error_text or output_text or progress_text
+                    assistant_text = error_text or output_text or live_output_text
                     is_working_placeholder = False
                     if not assistant_text and status in {"running", "queued"}:
                         assistant_text = _tr(t, "ui.web.mobile.stream_working", "正在处理")
                         is_working_placeholder = True
-                    assistant_has_content = bool(assistant_text or output_segments)
+                    assistant_has_content = bool(assistant_text or output_segments or reasoning_text)
                     turn_classes = "cb-stream-turn cb-stream-turn-with-footer" if assistant_has_content or should_show_activity else "cb-stream-turn"
                     with ui.element("div").classes(turn_classes):
                         if prompt_text:
@@ -1478,10 +1507,27 @@ def _render_mobile_stream_messages(
                         if assistant_has_content or should_show_activity:
                             with ui.element("div").classes("cb-stream-message cb-stream-assistant"):
                                 with ui.element("div").classes("cb-stream-assistant-content"):
-                                    if progress_text and (output_text or error_text or output_segments):
-                                        with ui.element("div").classes("cb-stream-tool-block cb-stream-progress"):
-                                            ui.label(_tr(t, "ui.web.mobile.stream_progress", "进度")).classes("cb-stream-tool-label")
-                                            ui.markdown(_stream_markdown(progress_text, t)).classes("cb-stream-tool-body cb-stream-markdown")
+                                    if reasoning_text:
+                                        reasoning_preview, reasoning_has_more = _stream_reasoning_preview(reasoning_text)
+                                        if reasoning_has_more:
+                                            reasoning_key = quote(task_id or str(task.get("id") or "reasoning"), safe="")
+                                            with ui.element("details").props(f"data-reasoning-details=1 data-reasoning-key={reasoning_key}").classes("cb-stream-reasoning"):
+                                                with ui.element("summary").classes("cb-stream-reasoning-summary"):
+                                                    with ui.element("div").classes("cb-stream-reasoning-heading"):
+                                                        ui.element("span").classes("cb-stream-reasoning-icon")
+                                                        ui.label(_tr(t, "ui.web.mobile.stream_reasoning", "思考过程")).classes("cb-stream-reasoning-label")
+                                                    with ui.element("span").classes("cb-stream-reasoning-toggle"):
+                                                        ui.label(_tr(t, "ui.web.mobile.stream_reasoning_expand", "展开")).classes("cb-stream-reasoning-toggle-label cb-stream-reasoning-toggle-label-open")
+                                                        ui.label(_tr(t, "ui.web.mobile.stream_reasoning_collapse", "收起")).classes("cb-stream-reasoning-toggle-label cb-stream-reasoning-toggle-label-close")
+                                                        ui.element("span").classes("cb-stream-reasoning-chevron")
+                                                    ui.label(reasoning_preview).classes("cb-stream-reasoning-preview")
+                                                ui.markdown(_stream_markdown(reasoning_text, t)).classes("cb-stream-reasoning-body cb-stream-markdown")
+                                        else:
+                                            with ui.element("div").props("data-reasoning-preview=1").classes("cb-stream-reasoning cb-stream-reasoning-static"):
+                                                with ui.element("div").classes("cb-stream-reasoning-heading"):
+                                                    ui.element("span").classes("cb-stream-reasoning-icon")
+                                                    ui.label(_tr(t, "ui.web.mobile.stream_reasoning", "思考过程")).classes("cb-stream-reasoning-label")
+                                                ui.label(reasoning_preview).classes("cb-stream-reasoning-preview")
                                     if should_show_activity:
                                         with ui.element("div").classes("cb-stream-activity-log"):
                                             for item in activity_items:
@@ -1508,8 +1554,6 @@ def _render_mobile_stream_messages(
                                     body_classes = "cb-stream-body"
                                     if status == "failed" and error_text:
                                         body_classes = f"{body_classes} cb-stream-error"
-                                    elif progress_text and not output_text and not output_segments:
-                                        body_classes = f"{body_classes} cb-stream-progress"
                                     if output_segments:
                                         for segment in output_segments:
                                             segment_kind = str(segment.get("kind") or "")

@@ -630,6 +630,8 @@ class MobileStateTests(unittest.TestCase):
         self.assertEqual("thread-001", tasks[0]["session_id"])
         self.assertEqual("用户问题", tasks[0]["prompt"])
         self.assertEqual("先检查状态", tasks[0]["progress_text"])
+        self.assertEqual("先检查状态", tasks[0]["reasoning_text"])
+        self.assertEqual("", tasks[0]["live_output_text"])
         self.assertEqual("最终回答", tasks[0]["output"])
 
     def test_codex_thread_history_keeps_supplemental_user_messages_separate(self) -> None:

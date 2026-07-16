@@ -424,6 +424,48 @@ class AgentHubCancellationTests(unittest.TestCase):
         self.assertEqual("正在处理", payload["task"]["progress_text"])
         self.assertEqual("wechat", mocked_push.call_args.kwargs["channel"])
 
+    def test_stream_updates_keep_reasoning_and_live_output_separate(self) -> None:
+        workdir = self.temp_path / "workspace"
+        session_file = self.temp_path / "sessions" / "main.txt"
+        workdir.mkdir(parents=True, exist_ok=True)
+        session_file.parent.mkdir(parents=True, exist_ok=True)
+        config = HubConfig(
+            codex_command="codex",
+            claude_command="claude",
+            opencode_command="opencode",
+            agents=[AgentConfig("main", "Main", str(workdir), str(session_file), backend="codex")],
+        )
+        task = HubTask(
+            id="task-stream-001",
+            agent_id="main",
+            agent_name="Main",
+            backend="codex",
+            source="stream-web",
+            sender_id="",
+            prompt="hello",
+            status="running",
+            created_at="2026-04-24T00:00:00",
+            session_name="default",
+            workdir=str(workdir),
+        )
+        state_path = self.temp_path / "state" / "agent_hub_state.json"
+        with (
+            patch("agent_hub.STATE_PATH", state_path),
+            patch("agent_hub.discover_external_agent_processes", return_value=[]),
+        ):
+            hub = MultiCodexHub(config)
+            hub.tasks.append(task)
+            hub._update_task_stream_text(task.id, "reasoning_text", "先检查项目")
+            hub._update_task_stream_text(task.id, "live_output_text", "正在生成回答")
+
+        saved_task = json.loads(state_path.read_text(encoding="utf-8"))["tasks"][0]
+        self.assertEqual("先检查项目", task.reasoning_text)
+        self.assertEqual("正在生成回答", task.live_output_text)
+        self.assertEqual("正在生成回答", task.progress_text)
+        self.assertEqual(2, task.progress_seq)
+        self.assertEqual("先检查项目", saved_task["reasoning_text"])
+        self.assertEqual("正在生成回答", saved_task["live_output_text"])
+
     def test_qq_progress_update_pushes_to_qq_bridge_channel(self) -> None:
         workdir = self.temp_path / "workspace"
         session_file = self.temp_path / "sessions" / "main.txt"

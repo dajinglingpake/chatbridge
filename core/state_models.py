@@ -177,6 +177,8 @@ class HubTask:
     context_token: str = ""
     codex_search_enabled: bool = False
     progress_text: str = ""
+    live_output_text: str = ""
+    reasoning_text: str = ""
     progress_at: str = ""
     progress_seq: int = 0
     context_left_percent: int | None = None
@@ -194,6 +196,8 @@ class HubTask:
         output = str(raw.get("output") or "") if include_text else ""
         error = str(raw.get("error") or "") if include_text else ""
         progress_text = str(raw.get("progress_text") or "") if include_text else ""
+        live_output_text = str(raw.get("live_output_text") or "") if include_text else ""
+        reasoning_text = str(raw.get("reasoning_text") or "") if include_text else ""
         return cls(
             id=task_id,
             agent_id=agent_id or "main",
@@ -221,6 +225,8 @@ class HubTask:
             context_token=str(raw.get("context_token") or "").strip(),
             codex_search_enabled=_bool_value(raw.get("codex_search_enabled")),
             progress_text=progress_text,
+            live_output_text=live_output_text,
+            reasoning_text=reasoning_text,
             progress_at=str(raw.get("progress_at") or "").strip(),
             progress_seq=int(raw.get("progress_seq") or 0),
             context_left_percent=_optional_percent(raw.get("context_left_percent")),

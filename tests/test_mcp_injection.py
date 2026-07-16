@@ -66,7 +66,8 @@ class RecordingCodexThreadBackend(RecordingBackend):
 
 class McpServerInjectionTests(unittest.TestCase):
     def test_codex_app_server_streams_reasoning_separately_from_final_answer(self) -> None:
-        progress: list[str] = []
+        live_output: list[str] = []
+        reasoning: list[str] = []
         client = _CodexAppServerClient("codex", creationflags=0, start_new_session=False, slim_exec=True)
         client._messages.put(
             {
@@ -130,14 +131,15 @@ class McpServerInjectionTests(unittest.TestCase):
             "thread-1",
             "turn-1",
             timeout=1,
-            on_progress=progress.append,
-            reasoning_progress_label=lambda text: f"思考：{text}",
+            on_progress=None,
+            on_live_output=live_output.append,
+            on_reasoning=reasoning.append,
         )
 
         self.assertEqual("最终回答", output)
         self.assertEqual(75, context_left_percent)
-        self.assertEqual(["思考：先检查项目结构"], progress)
-        self.assertNotIn("最终回答片段", progress[0])
+        self.assertEqual(["先检查项目结构"], reasoning)
+        self.assertEqual(["最终回答片段", "最终回答"], live_output)
 
     def test_codex_app_server_normalizes_threads_and_reasoning_history(self) -> None:
         backend = CodexBackend()
@@ -1445,6 +1447,7 @@ class McpServerCodexBackendTests(unittest.TestCase):
                 model="",
                 prompt_prefix="",
             )
+            reasoning: list[str] = []
             context = BackendContext(
                 codex_command="codex",
                 claude_command="claude",
@@ -1452,6 +1455,7 @@ class McpServerCodexBackendTests(unittest.TestCase):
                 session_dir=session_dir,
                 creationflags=0,
                 hub_task_timeout_seconds=1,
+                on_reasoning=reasoning.append,
             )
             backend = CodexBackend()
 
@@ -1463,6 +1467,7 @@ class McpServerCodexBackendTests(unittest.TestCase):
                     self.events = iter(
                         [
                             {"type": "thread.started", "thread_id": "thread-active"},
+                            {"type": "item.completed", "item": {"type": "reasoning", "text": "inspect the current state"}},
                             {"type": "response.output_text.delta", "delta": "part 1"},
                             {"type": "response.output_text.delta", "delta": "part 2"},
                             {"type": "response.output_text.delta", "delta": "part 3"},
@@ -1498,6 +1503,7 @@ class McpServerCodexBackendTests(unittest.TestCase):
 
         self.assertEqual("final output", result["output"])
         self.assertEqual("thread-active", result["session_id"])
+        self.assertEqual(["inspect the current state"], reasoning)
         terminate.assert_not_called()
 
     def test_codex_backend_extracts_json_rpc_delta_progress(self) -> None:
@@ -1506,6 +1512,18 @@ class McpServerCodexBackendTests(unittest.TestCase):
         self.assertEqual(
             "streaming",
             backend._extract_text_delta({"method": "item/agentMessage/delta", "params": {"delta": "streaming"}}),
+        )
+        self.assertEqual(
+            ("inspect state", False),
+            backend._extract_reasoning_update(
+                {"type": "item.completed", "item": {"type": "reasoning", "text": "inspect state"}}
+            ),
+        )
+        self.assertEqual(
+            ("inspect", True),
+            backend._extract_reasoning_update(
+                {"method": "item/reasoning/summaryTextDelta", "params": {"delta": "inspect"}}
+            ),
         )
 
 if __name__ == "__main__":

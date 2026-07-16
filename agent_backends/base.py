@@ -32,6 +32,8 @@ class BackendContext:
     start_new_session: bool = False
     on_process_started: Callable[[int], None] | None = None
     on_progress: Callable[[str], None] | None = None
+    on_live_output: Callable[[str], None] | None = None
+    on_reasoning: Callable[[str], None] | None = None
     on_context_left_percent: Callable[[int], None] | None = None
     is_cancel_requested: Callable[[], bool] | None = None
     mcp_server: McpServerConfig | None = None

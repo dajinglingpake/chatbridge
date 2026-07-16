@@ -1010,6 +1010,8 @@ def _raw_task_payload(raw: dict[str, object], *, stream_order: int = 0) -> dict[
         "output": output,
         "error": _raw_text(raw, "error"),
         "progress_text": _raw_text(raw, "progress_text"),
+        "live_output_text": _raw_text(raw, "live_output_text"),
+        "reasoning_text": _raw_text(raw, "reasoning_text"),
         "progress_at": _mobile_display_time(_raw_clean_text(raw, "progress_at"), assume_utc_naive=assume_utc_naive),
         "progress_seq": _raw_progress_seq(raw),
         "context_left_percent": _raw_optional_percent(raw.get("context_left_percent")),
@@ -1018,7 +1020,7 @@ def _raw_task_payload(raw: dict[str, object], *, stream_order: int = 0) -> dict[
     }
 
 
-def _raw_hub_task_signature_part(raw: dict[str, object]) -> tuple[str, str, str, str, str, int, int, int, str]:
+def _raw_hub_task_signature_part(raw: dict[str, object]) -> tuple[object, ...]:
     return (
         _raw_clean_text(raw, "id"),
         _raw_clean_text(raw, "status"),
@@ -1026,6 +1028,8 @@ def _raw_hub_task_signature_part(raw: dict[str, object]) -> tuple[str, str, str,
         _raw_clean_text(raw, "progress_at"),
         _raw_clean_text(raw, "finished_at"),
         len(_raw_text(raw, "progress_text")),
+        len(_raw_text(raw, "live_output_text")),
+        len(_raw_text(raw, "reasoning_text")),
         len(_raw_text(raw, "output")),
         len(_raw_text(raw, "error")),
         str(_raw_optional_percent(raw.get("context_left_percent")) or ""),
@@ -1227,6 +1231,8 @@ def _task_payload(task: HubTask, *, stream_order: int = 0) -> dict[str, object]:
         "output": task.output,
         "error": task.error,
         "progress_text": task.progress_text,
+        "live_output_text": task.live_output_text,
+        "reasoning_text": task.reasoning_text,
         "progress_at": _mobile_display_time(task.progress_at, assume_utc_naive=assume_utc_naive),
         "progress_seq": task.progress_seq,
         "context_left_percent": task.context_left_percent,
@@ -1235,7 +1241,7 @@ def _task_payload(task: HubTask, *, stream_order: int = 0) -> dict[str, object]:
     }
 
 
-def _hub_task_signature_part(task: HubTask) -> tuple[str, str, str, str, str, int, int, int, str]:
+def _hub_task_signature_part(task: HubTask) -> tuple[object, ...]:
     return (
         str(task.id or ""),
         str(task.status or ""),
@@ -1243,6 +1249,8 @@ def _hub_task_signature_part(task: HubTask) -> tuple[str, str, str, str, str, in
         str(task.progress_at or ""),
         str(task.finished_at or ""),
         len(str(task.progress_text or "")),
+        len(str(task.live_output_text or "")),
+        len(str(task.reasoning_text or "")),
         len(str(task.output or "")),
         len(str(task.error or "")),
         str(task.context_left_percent or ""),
@@ -1283,6 +1291,8 @@ def _payload_task_signature_part(task: dict[str, object]) -> tuple[object, ...]:
         str(task.get("progress_at") or ""),
         str(task.get("finished_at") or ""),
         len(str(task.get("progress_text") or "")),
+        len(str(task.get("live_output_text") or "")),
+        len(str(task.get("reasoning_text") or "")),
         len(str(task.get("output") or "")),
         len(str(task.get("error") or "")),
         str(task.get("context_left_percent") or ""),
@@ -2695,6 +2705,8 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
                     "output": output,
                     "error": "",
                     "progress_text": reasoning,
+                    "live_output_text": "",
+                    "reasoning_text": reasoning,
                     "progress_at": "",
                     "progress_seq": 1 if reasoning else 0,
                     "context_left_percent": None,
@@ -2726,6 +2738,8 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
                 "output": "",
                 "error": thread_error,
                 "progress_text": "",
+                "live_output_text": "",
+                "reasoning_text": "",
                 "progress_at": "",
                 "progress_seq": 0,
                 "context_left_percent": None,
@@ -2815,6 +2829,8 @@ def _state_signature(state: dict[str, object]) -> str:
                 "status": task.get("status"),
                 "progress_seq": task.get("progress_seq"),
                 "progress_text": task.get("progress_text"),
+                "live_output_text": task.get("live_output_text"),
+                "reasoning_text": task.get("reasoning_text"),
                 "output_len": len(str(task.get("output") or "")),
                 "error_len": len(str(task.get("error") or "")),
             }
