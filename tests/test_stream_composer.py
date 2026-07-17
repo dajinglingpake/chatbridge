@@ -9,8 +9,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from ui.app import _codex_rollout_runtime_hint, _load_persisted_stream_session, _persist_stream_session, _stream_initial_history_limit, _update_codex_thread_runtime_statuses, group_codex_threads_by_workspace
-from ui.sections import _stream_client_time, _stream_display_time, _stream_image_is_previewable, _stream_markdown, _stream_task_sort_key, _stream_task_uses_utc_naive_time, _stream_text, render_mobile_stream_section
+from ui.app import _codex_rollout_runtime_hint, _codex_rollout_runtime_started_at, _load_persisted_stream_session, _persist_stream_session, _stream_initial_history_limit, _update_codex_thread_runtime_statuses, group_codex_threads_by_workspace
+from ui.sections import _stream_client_time, _stream_display_time, _stream_image_is_previewable, _stream_markdown, _stream_task_sort_key, _stream_task_uses_utc_naive_time, _stream_text, _stream_time_delta_ms, _stream_timeline_items, render_mobile_stream_section
 
 
 class FakeElement:
@@ -161,6 +161,7 @@ class StreamComposerTests(unittest.TestCase):
             _stream_client_time("2026-07-05T10:54:52", assume_utc_naive=True),
         )
         self.assertRegex(_stream_client_time("2026-07-05T10:54:52", assume_utc_naive=True), r"[+-]\d\d:\d\d$")
+        self.assertEqual(0, _stream_time_delta_ms("2026-07-05T10:54:52Z", "2026-07-05T10:54:53"))
 
     def test_stream_render_uses_mobile_state_times_as_already_displayable(self) -> None:
         task = {"source": "stream-web", "backend": "codex", "created_at": "2026-07-05T18:54:52"}
@@ -1730,6 +1731,103 @@ class StreamComposerTests(unittest.TestCase):
         self.assertEqual([], runtime_turns)
         self.assertEqual(1, len(working_loaders))
 
+    def test_external_codex_runtime_keeps_completed_reply_time_and_adds_separate_running_time(self) -> None:
+        ui = FakeUI()
+        mobile_state = {
+            "counts": {"running": 0, "queued": 0},
+            "agents": [{"id": "codex", "name": "Codex", "backend": "codex"}],
+            "selected_codex_thread": {
+                "id": "thread-live",
+                "runtime_status": "running",
+                "runtime_started_at": "2026-07-17T05:19:45",
+                "updated_at": "2026-07-17T05:20:00",
+            },
+            "tasks": [
+                {
+                    "id": "codex-thread-live-turn-1",
+                    "agent_id": "codex",
+                    "agent_name": "Codex",
+                    "backend": "codex",
+                    "source": "codex-app-server",
+                    "session_name": "codex:thread-live",
+                    "status": "succeeded",
+                    "created_at": "2026-07-17T05:19:00",
+                    "finished_at": "2026-07-17T05:19:30",
+                    "prompt": "上一轮问题",
+                    "output": "上一段回答",
+                }
+            ],
+            "session_task_counts": {"codex:thread-live": 1},
+        }
+
+        render_mobile_stream_section(
+            ui,
+            _translator,
+            mobile_state,
+            "codex:thread-live",
+            [],
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+        )
+
+        turns = [item for item in ui.elements if "cb-stream-turn" in item.class_text.split()]
+        runtime_turns = [item for item in ui.elements if "data-codex-runtime-running=1" in item.props_text]
+        markdown_texts = [item.text for item in ui.elements if item.kind == "markdown" and "cb-stream-markdown" in item.class_text.split()]
+        footer_labels = [item.text for item in ui.elements if "cb-stream-footer-label" in item.class_text.split()]
+        running_times = [item.text for item in ui.elements if "cb-stream-running-time" in item.class_text.split()]
+        live_elapsed = [item.text for item in ui.elements if "cb-stream-live-elapsed" in item.class_text.split()]
+        execution_prefixes = [item.text for item in ui.elements if "cb-stream-running-duration-prefix" in item.class_text.split()]
+
+        self.assertEqual(2, len(turns))
+        self.assertEqual(1, len(runtime_turns))
+        self.assertEqual(["上一段回答", "正在处理"], markdown_texts)
+        self.assertTrue(any("2026-07-17T05:19:30" in text for text in footer_labels))
+        self.assertEqual(["2026-07-17T05:19:45"], running_times)
+        self.assertEqual(1, len(live_elapsed))
+        self.assertEqual(["执行时长"], execution_prefixes)
+
+    def test_external_codex_runtime_without_probe_start_uses_updated_time_for_execution_timer(self) -> None:
+        ui = FakeUI()
+        mobile_state = {
+            "counts": {"running": 0, "queued": 0},
+            "agents": [{"id": "codex", "name": "Codex", "backend": "codex"}],
+            "selected_codex_thread": {
+                "id": "thread-live",
+                "runtime_status": "running",
+                "updated_at": "2026-07-17T05:20:00",
+            },
+            "tasks": [],
+            "session_task_counts": {"codex:thread-live": 0},
+        }
+
+        render_mobile_stream_section(
+            ui,
+            _translator,
+            mobile_state,
+            "codex:thread-live",
+            [],
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+        )
+
+        running_times = [item.text for item in ui.elements if "cb-stream-running-time" in item.class_text.split()]
+        live_elapsed = [item.text for item in ui.elements if "cb-stream-live-elapsed" in item.class_text.split()]
+        execution_prefixes = [item.text for item in ui.elements if "cb-stream-running-duration-prefix" in item.class_text.split()]
+
+        self.assertEqual(["2026-07-17T05:20:00"], running_times)
+        self.assertEqual(1, len(live_elapsed))
+        self.assertEqual(["执行时长"], execution_prefixes)
+
     def test_running_assistant_text_gets_live_typewriter_key(self) -> None:
         ui = FakeUI()
         mobile_state = {
@@ -1958,10 +2056,16 @@ class StreamComposerTests(unittest.TestCase):
         working_loaders = [item for item in ui.elements if "cb-stream-working-loader" in item.class_text.split()]
         working_loader_dots = [item for item in ui.elements if "cb-stream-working-loader-dot" in item.class_text.split()]
         turn_footers = [item for item in ui.elements if "cb-stream-turn-footer" in item.class_text.split()]
+        running_times = [item.text for item in ui.elements if "cb-stream-running-time" in item.class_text.split()]
+        live_elapsed = [item.text for item in ui.elements if "cb-stream-live-elapsed" in item.class_text.split()]
+        execution_prefixes = [item.text for item in ui.elements if "cb-stream-running-duration-prefix" in item.class_text.split()]
 
         self.assertEqual(1, len(turn_footers))
         self.assertEqual(1, len(working_loaders))
         self.assertEqual(6, len(working_loader_dots))
+        self.assertEqual(["2026-07-18T01:00:00"], running_times)
+        self.assertEqual(1, len(live_elapsed))
+        self.assertEqual(["执行时长"], execution_prefixes)
 
     def test_reasoning_and_commands_follow_their_original_timeline(self) -> None:
         ui = FakeUI()
@@ -1985,6 +2089,7 @@ class StreamComposerTests(unittest.TestCase):
                             "id": "reasoning-1",
                             "event": "codex_reasoning",
                             "type": "reasoning",
+                            "at": "2026-07-17T05:19:01",
                             "detail": first_reasoning,
                             "metadata": {},
                         },
@@ -1992,13 +2097,21 @@ class StreamComposerTests(unittest.TestCase):
                             "id": "command-1",
                             "event": "codex_command",
                             "type": "success",
+                            "at": "2026-07-17T05:19:02",
                             "detail": "pytest -q",
-                            "metadata": {"command": "pytest -q", "status": "completed", "output": "629 passed", "exit_code": 0},
+                            "metadata": {
+                                "command": "pytest -q",
+                                "status": "completed",
+                                "output": "629 passed",
+                                "exit_code": 0,
+                                "durationMs": "2600",
+                            },
                         },
                         {
                             "id": "reasoning-2",
                             "event": "codex_reasoning",
                             "type": "reasoning",
+                            "at": "2026-07-17T05:19:03",
                             "detail": second_reasoning,
                             "metadata": {},
                         },
@@ -2016,6 +2129,7 @@ class StreamComposerTests(unittest.TestCase):
             if "cb-stream-reasoning" in item.class_text.split() or "cb-stream-command" in item.class_text.split()
         ]
         reasoning_bodies = [item.text for item in ui.elements if "cb-stream-reasoning-body" in item.class_text.split()]
+        timeline_times = [item.text for item in ui.elements if "cb-stream-timeline-time" in item.class_text.split()]
 
         self.assertEqual(
             ["reasoning", "command", "reasoning"],
@@ -2025,6 +2139,14 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("data-reasoning-key=task-timeline%3Areasoning-1", timeline_cards[0].props_text)
         self.assertIn("data-command-key=task-timeline%3Acommand-1", timeline_cards[1].props_text)
         self.assertIn("data-reasoning-key=task-timeline%3Areasoning-2", timeline_cards[2].props_text)
+        self.assertEqual(
+            [
+                "2026-07-17T05:19:01",
+                "执行时长 3 秒 · 2026-07-17T05:19:02",
+                "2026-07-17T05:19:03",
+            ],
+            timeline_times,
+        )
 
     def test_consecutive_reasoning_items_merge_until_the_next_tool_boundary(self) -> None:
         ui = FakeUI()
@@ -2104,6 +2226,147 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("data-reasoning-key=task-grouped-reasoning%3Areasoning-1", timeline_cards[0].props_text)
         self.assertIn("data-command-key=task-grouped-reasoning%3Atool-1", timeline_cards[1].props_text)
         self.assertIn("data-reasoning-key=task-grouped-reasoning%3Areasoning-3", timeline_cards[2].props_text)
+
+    def test_subagent_activity_aggregates_by_thread_without_changing_timeline_position(self) -> None:
+        activity_items: list[dict[str, object]] = [
+            {"id": "reasoning-1", "event": "codex_reasoning", "detail": "先拆分任务", "metadata": {}},
+            {
+                "id": "subagent-started",
+                "event": "codex_subagent",
+                "at": "2026-07-17T05:19:00",
+                "detail": "/root/repo_audit",
+                "metadata": {
+                    "agent_path": "/root/repo_audit",
+                    "agent_thread_id": "thread-child-1",
+                    "kind": "started",
+                },
+            },
+            {
+                "id": "command-1",
+                "event": "codex_command",
+                "detail": "git status --short",
+                "metadata": {"command": "git status --short", "status": "completed"},
+            },
+        ]
+        activity_items.extend(
+            {
+                "id": f"subagent-interacted-{index}",
+                "event": "codex_subagent",
+                "at": "2026-07-17T05:19:02",
+                "detail": "/root/repo_audit",
+                "metadata": {
+                    "agent_path": "/root/repo_audit",
+                    "agent_thread_id": "thread-child-1",
+                    "kind": "interacted",
+                },
+            }
+            for index in range(500)
+        )
+
+        timeline = _stream_timeline_items(activity_items, reasoning_text="", task_status="running")
+
+        self.assertEqual(["reasoning", "subagent", "command"], [item["kind"] for item in timeline])
+        subagent = timeline[1]["item"]
+        self.assertEqual("subagent:thread-child-1", subagent["id"])
+        self.assertEqual("interacted", subagent["kind"])
+        self.assertEqual("running", subagent["status"])
+        self.assertEqual("2000", subagent["duration_ms"])
+
+    def test_subagent_status_uses_parent_terminal_state_and_explicit_interruption(self) -> None:
+        started = {
+            "event": "codex_subagent",
+            "detail": "/root/docs_audit",
+            "metadata": {"agent_path": "/root/docs_audit", "agent_thread_id": "thread-child-1", "kind": "started"},
+        }
+        interrupted = {
+            "event": "codex_subagent",
+            "detail": "/root/test_probe",
+            "metadata": {"agent_path": "/root/test_probe", "agent_thread_id": "thread-child-2", "kind": "interrupted"},
+        }
+
+        running = _stream_timeline_items([started], reasoning_text="", task_status="running")
+        historical = _stream_timeline_items([started, interrupted], reasoning_text="", task_status="succeeded")
+
+        self.assertEqual("running", running[0]["item"]["status"])
+        self.assertEqual("completed", historical[0]["item"]["status"])
+        self.assertEqual("interrupted", historical[1]["item"]["status"])
+
+    def test_subagent_cards_render_one_compact_disclosure_per_thread_with_stable_keys(self) -> None:
+        ui = FakeUI()
+        mobile_state = {
+            "counts": {"running": 0, "queued": 0},
+            "agents": [{"id": "codex", "name": "Codex", "backend": "codex"}],
+            "tasks": [
+                {
+                    "id": "task-subagents",
+                    "agent_id": "codex",
+                    "backend": "codex",
+                    "session_name": "focus",
+                    "status": "succeeded",
+                    "created_at": "2026-07-17T05:19:00",
+                    "prompt": "并行检查",
+                    "activity_items": [
+                        {
+                            "id": "subagent-started",
+                            "event": "codex_subagent",
+                            "at": "2026-07-17T05:19:01",
+                            "detail": "/root/repo_audit",
+                            "metadata": {
+                                "agent_path": "/root/repo_audit",
+                                "agent_thread_id": "thread-child-1",
+                                "kind": "started",
+                            },
+                        },
+                        {
+                            "id": "subagent-interacted",
+                            "event": "codex_subagent",
+                            "at": "2026-07-17T05:19:02",
+                            "detail": "/root/repo_audit",
+                            "metadata": {
+                                "agent_path": "/root/repo_audit",
+                                "agent_thread_id": "thread-child-1",
+                                "kind": "interacted",
+                            },
+                        },
+                        {
+                            "id": "subagent-interrupted",
+                            "event": "codex_subagent",
+                            "at": "2026-07-17T05:19:03",
+                            "detail": "/root/test_probe",
+                            "metadata": {
+                                "agent_path": "/root/test_probe",
+                                "agent_thread_id": "thread-child-2",
+                                "kind": "interrupted",
+                            },
+                        },
+                    ],
+                }
+            ],
+            "session_task_counts": {"focus": 1},
+        }
+
+        render_mobile_stream_section(ui, _translator, mobile_state, "focus", [], _noop, _noop, _noop, _noop, _noop, _noop, _noop)
+
+        cards = [item for item in ui.elements if "cb-stream-subagent" in item.class_text.split()]
+        labels = [item.text for item in ui.elements if "cb-stream-subagent-label" in item.class_text.split()]
+        names = [item.text for item in ui.elements if "cb-stream-subagent-name" in item.class_text.split()]
+        paths = [item.text for item in ui.elements if "cb-stream-subagent-path" in item.class_text.split()]
+        thread_ids = [item.text for item in ui.elements if "cb-stream-subagent-thread" in item.class_text.split()]
+        event_times = [item.text for item in ui.elements if "cb-stream-timeline-time" in item.class_text.split()]
+
+        self.assertEqual(2, len(cards))
+        self.assertIn("cb-stream-command-completed", cards[0].class_text.split())
+        self.assertIn("cb-stream-command-interrupted", cards[1].class_text.split())
+        self.assertIn("data-command-key=task-subagents%3Asubagent%3Athread-child-1", cards[0].props_text)
+        self.assertIn("data-command-key=task-subagents%3Asubagent%3Athread-child-2", cards[1].props_text)
+        self.assertEqual(["repo_audit 子代理已更新", "test_probe 子代理已中断"], labels)
+        self.assertEqual(["repo_audit", "test_probe"], names)
+        self.assertEqual(["/root/repo_audit", "/root/test_probe"], paths)
+        self.assertEqual(["thread-child-1", "thread-child-2"], thread_ids)
+        self.assertEqual(
+            ["2026-07-17T05:19:02", "2026-07-17T05:19:03"],
+            event_times,
+        )
 
     def test_historical_tool_call_is_rendered_in_the_original_timeline(self) -> None:
         ui = FakeUI()
@@ -2187,6 +2450,18 @@ class StreamComposerTests(unittest.TestCase):
 
         self.assertRegex(source, r"\.cb-stream-reasoning-preview\s*\{[^}]*justify-content:\s*flex-end")
         self.assertRegex(source, r"\.cb-stream-command-heading\s*\{[^}]*justify-content:\s*flex-end")
+
+    def test_stream_metadata_rows_share_the_same_right_alignment(self) -> None:
+        source = Path("ui/app.py").read_text(encoding="utf-8")
+
+        self.assertRegex(source, r"\.cb-stream-timeline-time-row\s*\{[^}]*justify-content:\s*flex-end")
+        self.assertNotRegex(source, r"\.cb-stream-timeline-time-row\s*\{[^}]*padding:")
+        self.assertRegex(source, r"\.cb-stream-turn-footer\s*\{[^}]*justify-content:\s*flex-end")
+        self.assertRegex(source, r"\.cb-stream-user-footer\s*\{[^}]*justify-content:\s*flex-end")
+        self.assertRegex(source, r"\.cb-stream-turn-footer \.cb-stream-copy-button\s*\{[^}]*margin-right:\s*auto")
+        self.assertRegex(source, r"\.cb-stream-user-footer \.cb-stream-copy-button\s*\{[^}]*margin-right:\s*auto")
+        self.assertRegex(source, r"\.cb-stream-running-controls\s*\{[^}]*margin-right:\s*auto")
+        self.assertRegex(source, r"\.cb-stream-running-meta\s*\{[^}]*margin-left:\s*auto")
 
     def test_command_disclosure_persists_open_state_across_stream_refreshes(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")
@@ -2412,7 +2687,8 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("document.addEventListener('mousewheel', handleWheel, { capture: true, passive: false });", scroll_body)
         self.assertIn("window.__cbStreamAfterPatch = (options = {}) => {", scroll_body)
         self.assertIn("setupStreamBehavior", scroll_body)
-        self.assertIn("updateComposerMetrics();\n                        updateLiveElapsed();", scroll_body)
+        self.assertIn("updateComposerMetrics();", scroll_body)
+        self.assertIn("updateLiveExecutionTime();", scroll_body)
         self.assertNotIn("window.__cbStreamBehaviorTimer = window.setInterval(() => {\n                        setupStreamBehavior();", scroll_body)
         self.assertNotIn("triggerLoadOlderIfNeeded", scroll_body)
         self.assertNotIn("document.querySelectorAll('.cb-stream-turn')", scroll_body)
@@ -2902,7 +3178,19 @@ class StreamComposerTests(unittest.TestCase):
             stale_path = root / "stale.jsonl"
 
             active_path.write_text(
-                json.dumps({"type": "response_item", "payload": {"type": "function_call"}}) + "\n",
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "timestamp": "2026-07-17T05:19:00Z",
+                                "type": "event_msg",
+                                "payload": {"type": "task_started"},
+                            }
+                        ),
+                        json.dumps({"type": "response_item", "payload": {"type": "function_call"}}),
+                    ]
+                )
+                + "\n",
                 encoding="utf-8",
             )
             completed_path.write_text(
@@ -2934,7 +3222,9 @@ class StreamComposerTests(unittest.TestCase):
 
             self.assertTrue(changed)
             self.assertEqual(["running", "idle", "idle"], [thread["runtime_status"] for thread in threads])
+            self.assertEqual("2026-07-17T05:19:00Z", threads[0]["runtime_started_at"])
             self.assertTrue(_codex_rollout_runtime_hint(active_path))
+            self.assertEqual("2026-07-17T05:19:00Z", _codex_rollout_runtime_started_at(active_path))
             self.assertFalse(_codex_rollout_runtime_hint(completed_path))
 
             with patch("ui.app._codex_rollout_runtime_hint", wraps=_codex_rollout_runtime_hint) as read_tail:
@@ -2951,6 +3241,32 @@ class StreamComposerTests(unittest.TestCase):
 
             self.assertTrue(completed)
             self.assertEqual("idle", threads[0]["runtime_status"])
+            self.assertEqual("", threads[0]["runtime_started_at"])
+
+    def test_codex_runtime_status_uses_stable_detection_time_when_start_is_outside_probe(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "active-without-start.jsonl"
+            path.write_text(
+                json.dumps({"type": "response_item", "payload": {"type": "function_call"}}) + "\n",
+                encoding="utf-8",
+            )
+            now = time.time()
+            os.utime(path, (now, now))
+            thread = {"id": "active-without-start", "path": str(path), "status": "notLoaded"}
+            probes: dict[str, object] = {}
+
+            with patch("ui.app._codex_rollout_runtime_started_at", return_value=""):
+                changed = _update_codex_thread_runtime_statuses([thread], probes, now=now)
+
+            detected_at = str(thread.get("runtime_started_at") or "")
+            self.assertTrue(changed)
+            self.assertEqual("running", thread["runtime_status"])
+            self.assertTrue(detected_at)
+
+            unchanged = _update_codex_thread_runtime_statuses([thread], probes, now=now + 1)
+
+            self.assertFalse(unchanged)
+            self.assertEqual(detected_at, thread["runtime_started_at"])
 
     def test_codex_runtime_status_timer_does_not_reload_thread_pages(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")
@@ -3264,7 +3580,7 @@ class StreamComposerTests(unittest.TestCase):
         )
         self.assertIn("color: var(--cb-ink) !important;", source)
         self.assertIn(".cb-stream-user-footer .cb-stream-copy-button", source)
-        self.assertIn("margin-right: -0.25rem;", source)
+        self.assertIn("margin-right: auto;", source)
         self.assertIn(".cb-stream-turn-footer .cb-stream-copy-button", source)
         self.assertIn("margin-left: -0.25rem;", source)
         self.assertIn(".cb-stream-copy-button .q-btn__content", source)
@@ -3379,6 +3695,57 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn('"ui.web.mobile.stream_turn_footer_duration_time"', sections_source)
         self.assertNotIn("wrap.setAttribute('role', 'button')", source)
         self.assertIn("window.setTimeout(() => {", source)
+
+    def test_each_completed_reply_shows_its_own_task_duration(self) -> None:
+        ui = FakeUI()
+        tasks = [
+            {
+                "id": "task-footer-1",
+                "agent_id": "codex",
+                "backend": "codex",
+                "session_name": "focus",
+                "status": "succeeded",
+                "created_at": "2026-07-04T05:20:00",
+                "started_at": "2026-07-04T05:20:00",
+                "finished_at": "2026-07-04T05:21:00",
+                "output": "first reply",
+            },
+            {
+                "id": "task-footer-2",
+                "agent_id": "codex",
+                "backend": "codex",
+                "session_name": "focus",
+                "status": "succeeded",
+                "created_at": "2026-07-04T05:22:00",
+                "started_at": "2026-07-04T05:22:00",
+                "finished_at": "2026-07-04T05:24:00",
+                "output": "second reply",
+            },
+            {
+                "id": "task-footer-running-output",
+                "agent_id": "codex",
+                "backend": "codex",
+                "session_name": "focus",
+                "status": "succeeded",
+                "created_at": "2026-07-04T05:25:00",
+                "started_at": "2026-07-04T05:25:00",
+                "progress_at": "2026-07-04T05:25:00",
+                "output": "partial reply",
+            },
+        ]
+        mobile_state = {
+            "counts": {"running": 0, "queued": 0},
+            "agents": [{"id": "codex", "name": "Codex", "backend": "codex"}],
+            "tasks": tasks,
+            "session_task_counts": {"focus": 3},
+        }
+
+        render_mobile_stream_section(ui, _translator, mobile_state, "focus", [], _noop, _noop, _noop, _noop, _noop, _noop, _noop)
+
+        footer_labels = [item.text for item in ui.elements if "cb-stream-footer-label" in item.class_text.split()]
+        self.assertIn("耗时 1 分 0 秒 · 2026-07-04T05:21:00", footer_labels)
+        self.assertIn("耗时 2 分 0 秒 · 2026-07-04T05:24:00", footer_labels)
+        self.assertNotIn("耗时 0 秒 · 2026-07-04T05:25:00", footer_labels)
 
     def test_stream_code_blocks_get_paseo_like_copy_control(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")

@@ -42,6 +42,7 @@ CODEX_THREAD_RUNTIME_STATUS_LIMIT = 100
 CODEX_THREAD_RUNTIME_RECENT_SECONDS = 5.0
 CODEX_THREAD_RUNTIME_STALE_SECONDS = 300.0
 CODEX_THREAD_RUNTIME_TAIL_BYTES = 65536
+CODEX_THREAD_RUNTIME_START_TAIL_BYTES = 8388608
 WEB_THEME_OPTIONS = ("dark", "light", "forest")
 STREAM_UI_LOG_PATH = APP_DIR / ".runtime" / "logs" / "ui_stream_refresh.jsonl"
 STREAM_UI_SELECTION_PATH = APP_DIR / ".runtime" / "state" / "ui_stream_selection.json"
@@ -192,7 +193,7 @@ def group_codex_threads_by_workspace(threads: list[object]) -> list[dict[str, ob
     )
 
 
-def _codex_rollout_runtime_hint(path_value: object) -> bool | None:
+def _codex_rollout_tail_lines(path_value: object, *, max_bytes: int) -> list[bytes] | None:
     path = Path(str(path_value or "").strip())
     if path.suffix.lower() != ".jsonl":
         return None
@@ -200,7 +201,7 @@ def _codex_rollout_runtime_hint(path_value: object) -> bool | None:
         with path.open("rb") as handle:
             handle.seek(0, os.SEEK_END)
             size = handle.tell()
-            offset = max(0, size - CODEX_THREAD_RUNTIME_TAIL_BYTES)
+            offset = max(0, size - max_bytes)
             handle.seek(offset)
             data = handle.read()
     except OSError:
@@ -209,7 +210,14 @@ def _codex_rollout_runtime_hint(path_value: object) -> bool | None:
         _separator, found, data = data.partition(b"\n")
         if not found:
             return None
-    for raw_line in reversed(data.splitlines()):
+    return data.splitlines()
+
+
+def _codex_rollout_runtime_hint(path_value: object) -> bool | None:
+    lines = _codex_rollout_tail_lines(path_value, max_bytes=CODEX_THREAD_RUNTIME_TAIL_BYTES)
+    if lines is None:
+        return None
+    for raw_line in reversed(lines):
         try:
             record = json.loads(raw_line.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -244,6 +252,33 @@ def _codex_rollout_runtime_hint(path_value: object) -> bool | None:
     return None
 
 
+def _codex_rollout_runtime_started_at(path_value: object) -> str:
+    lines = _codex_rollout_tail_lines(path_value, max_bytes=CODEX_THREAD_RUNTIME_START_TAIL_BYTES)
+    if lines is None:
+        return ""
+    for raw_line in reversed(lines):
+        try:
+            record = json.loads(raw_line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        record_type = str(record.get("type") or "").strip()
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        payload_type = str(payload.get("type") or "").strip()
+        phase = str(payload.get("phase") or "").strip()
+        if record_type == "event_msg":
+            if payload_type in {"task_complete", "task_cancelled", "task_canceled", "turn_aborted", "turn_completed"}:
+                return ""
+            if payload_type == "task_started":
+                return str(record.get("timestamp") or "").strip()
+            if payload_type == "agent_message" and phase == "final_answer":
+                return ""
+        if record_type == "response_item" and payload_type in {"agent_message", "message"} and phase == "final_answer":
+            return ""
+    return ""
+
+
 def _update_codex_thread_runtime_statuses(
     threads: list[dict[str, object]],
     probes: dict[str, object],
@@ -274,13 +309,31 @@ def _update_codex_thread_runtime_statuses(
                 age_seconds = max(0.0, now_value - file_stat.st_mtime)
                 cached = probes.get(thread_id) if isinstance(probes.get(thread_id), dict) else {}
                 running_hint = cached.get("running_hint") if str(cached.get("signature") or "") == signature else None
+                runtime_started_at = str(cached.get("runtime_started_at") or "").strip()
                 if str(cached.get("signature") or "") != signature and age_seconds <= CODEX_THREAD_RUNTIME_STALE_SECONDS:
                     running_hint = _codex_rollout_runtime_hint(path_text)
+                    if running_hint is True and not runtime_started_at:
+                        runtime_started_at = _codex_rollout_runtime_started_at(path_text)
+                        if not runtime_started_at:
+                            runtime_started_at = datetime.fromtimestamp(now_value).astimezone().isoformat(timespec="seconds")
                 if age_seconds > CODEX_THREAD_RUNTIME_STALE_SECONDS:
                     running_hint = False
-                probes[thread_id] = {"signature": signature, "running_hint": running_hint}
+                if running_hint is not True:
+                    runtime_started_at = ""
+                probes[thread_id] = {
+                    "signature": signature,
+                    "running_hint": running_hint,
+                    "runtime_started_at": runtime_started_at,
+                }
                 if running_hint is True or (running_hint is None and age_seconds <= CODEX_THREAD_RUNTIME_RECENT_SECONDS):
                     runtime_status = "running"
+                thread_runtime_started_at = runtime_started_at if runtime_status == "running" else ""
+                if str(thread.get("runtime_started_at") or "") != thread_runtime_started_at:
+                    thread["runtime_started_at"] = thread_runtime_started_at
+                    changed = True
+        if runtime_status != "running" and str(thread.get("runtime_started_at") or ""):
+            thread["runtime_started_at"] = ""
+            changed = True
         if str(thread.get("runtime_status") or "") != runtime_status:
             thread["runtime_status"] = runtime_status
             changed = True
@@ -1736,11 +1789,33 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         }
         .cb-stream-timeline {
             display: grid;
-            gap: 0.5rem;
+            gap: 0.65rem;
             margin-bottom: 0.75rem;
+        }
+        .cb-stream-timeline-entry {
+            display: grid;
+            gap: 0.22rem;
+            min-width: 0;
         }
         .cb-stream-timeline .cb-stream-reasoning {
             margin-bottom: 0;
+        }
+        .cb-stream-timeline-time-row {
+            display: flex;
+            justify-content: flex-end;
+            min-height: 1rem;
+        }
+        .cb-stream-timeline-time {
+            color: var(--cb-muted);
+            line-height: 1rem;
+            white-space: nowrap;
+        }
+        .cb-stream-item-meta {
+            color: var(--cb-muted);
+            font-size: 0.72rem;
+            font-variant-numeric: tabular-nums;
+            line-height: 1.1rem;
+            white-space: nowrap;
         }
         .cb-stream-command {
             overflow: hidden;
@@ -1796,6 +1871,9 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         .cb-stream-command-tool .cb-stream-command-status-icon::before {
             content: "build";
         }
+        .cb-stream-subagent .cb-stream-command-status-icon::before {
+            content: "group";
+        }
         .cb-stream-command-running .cb-stream-command-status-icon {
             animation: cb-command-running 1.25s ease-in-out infinite;
         }
@@ -1829,6 +1907,12 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             font-size: 0.8rem;
             font-weight: 750;
             line-height: 1.35;
+        }
+        .cb-stream-subagent-label {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
         .cb-stream-command-command-preview,
         .cb-stream-command-preview {
@@ -2119,11 +2203,13 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             font-size: 13px;
         }
         .cb-stream-turn-footer {
+            justify-content: flex-end;
             margin-top: 1rem;
             padding-bottom: 1.5rem;
         }
         .cb-stream-user-footer {
             margin-top: 0.5rem;
+            justify-content: flex-end;
             opacity: 0.88;
         }
         .cb-stream-user-footer,
@@ -2161,10 +2247,12 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             font-size: 1rem;
         }
         .cb-stream-user-footer .cb-stream-copy-button {
-            margin-right: -0.25rem;
+            margin-left: -0.25rem;
+            margin-right: auto;
         }
         .cb-stream-turn-footer .cb-stream-copy-button {
             margin-left: -0.25rem;
+            margin-right: auto;
         }
         .cb-stream-stop-button {
             min-height: 1.5rem;
@@ -2180,6 +2268,9 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             display: inline-block;
             min-height: 1.25rem;
             line-height: 1.25rem;
+        }
+        .cb-stream-turn-footer .cb-stream-footer-label-wrap {
+            margin-left: auto;
         }
         .cb-stream-footer-label-wrap[role="button"] {
             cursor: pointer;
@@ -2262,9 +2353,31 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         }
         .cb-stream-live-elapsed {
             color: var(--cb-muted);
-            font-size: 13px;
             font-variant-numeric: tabular-nums;
             white-space: nowrap;
+        }
+        .cb-stream-running-controls {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.25rem;
+            margin-right: auto;
+        }
+        .cb-stream-running-meta {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.3rem;
+            margin-left: auto;
+            color: var(--cb-muted);
+            font-size: 0.72rem;
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+        }
+        .cb-stream-running-duration-prefix,
+        .cb-stream-meta-separator {
+            color: var(--cb-muted);
+        }
+        .cb-stream-running-time {
+            font-variant-numeric: tabular-nums;
         }
         @keyframes cb-synced-loader {
             0% {
@@ -2927,7 +3040,10 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             for thread in sidebar_threads
             if str(thread.get("id") or "").strip()
         }
-        selected_before = str(selected_thread.get("runtime_status") or "")
+        selected_before = (
+            str(selected_thread.get("runtime_status") or ""),
+            str(selected_thread.get("runtime_started_at") or ""),
+        )
 
         probe_threads: list[dict[str, object]] = []
         if selected_id:
@@ -2945,13 +3061,17 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             for thread in sidebar_threads:
                 if str(thread.get("id") or "").strip() == selected_id:
                     thread["runtime_status"] = selected_status
+                    thread["runtime_started_at"] = str(selected_thread.get("runtime_started_at") or "")
 
         sidebar_changed = any(
             sidebar_before.get(str(thread.get("id") or "").strip(), "") != str(thread.get("runtime_status") or "")
             for thread in sidebar_threads
             if str(thread.get("id") or "").strip()
         )
-        selected_changed = selected_before != str(selected_thread.get("runtime_status") or "")
+        selected_changed = selected_before != (
+            str(selected_thread.get("runtime_status") or ""),
+            str(selected_thread.get("runtime_started_at") or ""),
+        )
         return sidebar_changed, selected_changed
 
     def _sync_selected_codex_runtime_status(stream_state: dict[str, object]) -> None:
@@ -2992,10 +3112,12 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                 "status": raw_status,
                 "archived": archived,
                 "runtime_status": "idle",
+                "runtime_started_at": "",
             }
             _refresh_codex_runtime_statuses()
         runtime_thread = _stream_selected_codex_runtime_thread()
         selected_payload["runtime_status"] = str(runtime_thread.get("runtime_status") or "idle")
+        selected_payload["runtime_started_at"] = str(runtime_thread.get("runtime_started_at") or "")
 
     def _stream_state_snapshot() -> dict[str, object]:
         session_name = str(state["selected_session_name"] or "").strip()
@@ -3045,6 +3167,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         runtime_signature = (
             str(selected_runtime.get("id") or ""),
             str(selected_runtime.get("runtime_status") or ""),
+            str(selected_runtime.get("runtime_started_at") or ""),
         )
         return (*signature, runtime_signature)
 
@@ -4431,7 +4554,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     if (hours > 0) return `${hours}:${pad(minutes)}:${pad(seconds)}`;
                     return `${minutes}:${pad(seconds)}`;
                 };
-                const updateLiveElapsed = () => {
+                const updateLiveExecutionTime = () => {
                     document.querySelectorAll('.cb-stream-live-elapsed[data-started-at]').forEach((node) => {
                         const startedAt = Date.parse(node.dataset.startedAt || '');
                         if (!Number.isFinite(startedAt)) return;
@@ -5109,7 +5232,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     setupReasoningDisclosures();
                     setupCommandDisclosures();
                     updateComposerMetrics();
-                    updateLiveElapsed();
+                    updateLiveExecutionTime();
                     setupLiveTypewriter();
                 };
                 const setupStreamWheelFallback = () => {
@@ -5295,7 +5418,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     }
                     window.__cbStreamBehaviorTimer = window.setInterval(() => {
                         updateComposerMetrics();
-                        updateLiveElapsed();
+                        updateLiveExecutionTime();
                     }, 1000);
                 };
                 const ensureAutoScrollObserver = () => {

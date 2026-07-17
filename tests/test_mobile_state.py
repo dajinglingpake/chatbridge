@@ -604,8 +604,8 @@ class MobileStateTests(unittest.TestCase):
             "path": "C:/Users/test/.codex/sessions/thread-001.jsonl",
             "updated_at": "2026-07-04T20:00:00",
             "messages": [
-                {"turn_id": "turn-1", "role": "user", "text": "用户问题"},
-                {"turn_id": "turn-1", "role": "reasoning", "text": "先检查状态"},
+                {"turn_id": "turn-1", "role": "user", "text": "用户问题", "at": "2026-07-04T20:00:00"},
+                {"turn_id": "turn-1", "role": "reasoning", "text": "先检查状态", "at": "2026-07-04T20:00:01"},
                 {
                     "turn_id": "turn-1",
                     "role": "activity",
@@ -613,12 +613,12 @@ class MobileStateTests(unittest.TestCase):
                     "activity": {
                         "event": "codex_tool_call",
                         "type": "info",
-                        "at": "2026-07-04T20:00:01",
+                        "at": "2026-07-04T20:00:02",
                         "detail": "shell: pytest",
                         "metadata": {"item_type": "tool_call", "name": "shell"},
                     },
                 },
-                {"turn_id": "turn-1", "role": "assistant", "text": "最终回答"},
+                {"turn_id": "turn-1", "role": "assistant", "text": "最终回答", "at": "2026-07-04T20:00:03"},
             ],
         }
 
@@ -636,11 +636,78 @@ class MobileStateTests(unittest.TestCase):
         self.assertEqual("先检查状态", tasks[0]["reasoning_text"])
         self.assertEqual("", tasks[0]["live_output_text"])
         self.assertEqual("最终回答", tasks[0]["output"])
+        self.assertEqual("2026-07-04T20:00:00", tasks[0]["started_at"])
+        self.assertEqual("2026-07-04T20:00:02", tasks[0]["progress_at"])
+        self.assertEqual("2026-07-04T20:00:03", tasks[0]["finished_at"])
         self.assertEqual(
             ["codex_reasoning", "codex_tool_call"],
             [item["event"] for item in tasks[0]["activity_items"]],
         )
         self.assertEqual("先检查状态", tasks[0]["activity_items"][0]["detail"])
+
+    def test_codex_thread_history_uses_rollout_turn_times_for_final_reply_duration(self) -> None:
+        thread = {
+            "id": "thread-timed",
+            "updated_at": "2026-07-17T05:20:30",
+            "messages": [
+                {"id": "item-1", "turn_id": "turn-timed", "role": "reasoning", "text": "处理中"},
+                {"id": "item-2", "turn_id": "turn-timed", "role": "assistant", "text": "最终回答"},
+            ],
+        }
+
+        with patch(
+            "ui.mobile._codex_raw_view_image_payload",
+            return_value={
+                "turn_times": {
+                    "turn-timed": {
+                        "started_at": "2026-07-17T05:19:00",
+                        "finished_at": "2026-07-17T05:20:00",
+                    }
+                },
+            },
+        ):
+            tasks = _codex_thread_task_payloads(thread)
+
+        self.assertEqual("2026-07-17T05:19:00", tasks[0]["created_at"])
+        self.assertEqual("2026-07-17T05:19:00", tasks[0]["started_at"])
+        self.assertEqual("2026-07-17T05:20:00", tasks[0]["finished_at"])
+
+    def test_codex_thread_history_normalizes_subagent_activity(self) -> None:
+        thread = {
+            "id": "thread-subagent",
+            "updated_at": "2026-07-17T05:20:00",
+            "messages": [
+                {"turn_id": "turn-1", "role": "user", "text": "并行检查"},
+                {
+                    "id": "call-subagent-1",
+                    "turn_id": "turn-1",
+                    "role": "activity",
+                    "activity": {
+                        "event": "codex_item",
+                        "type": "info",
+                        "at": "2026-07-17T05:19:01",
+                        "detail": json.dumps(
+                            {
+                                "agentPath": "/root/repo_audit",
+                                "agentThreadId": "019f6c07-db5b-7500-8999-d4e0c62ba52a",
+                                "kind": "started",
+                            }
+                        ),
+                        "metadata": {"item_type": "subAgentActivity", "item_id": "call-subagent-1"},
+                    },
+                },
+                {"turn_id": "turn-1", "role": "assistant", "text": "检查完成"},
+            ],
+        }
+
+        tasks = _codex_thread_task_payloads(thread)
+
+        activity = tasks[0]["activity_items"][0]
+        self.assertEqual("codex_subagent", activity["event"])
+        self.assertEqual("/root/repo_audit", activity["detail"])
+        self.assertEqual("/root/repo_audit", activity["metadata"]["agent_path"])
+        self.assertEqual("019f6c07-db5b-7500-8999-d4e0c62ba52a", activity["metadata"]["agent_thread_id"])
+        self.assertEqual("started", activity["metadata"]["kind"])
 
     def test_codex_history_merges_local_command_into_the_matching_turn(self) -> None:
         history_tasks = [

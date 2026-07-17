@@ -1483,7 +1483,7 @@ def _find_codex_rollout_jsonl(thread_id: str) -> Path | None:
 def _codex_raw_view_image_payload(thread_id: str) -> dict[str, object]:
     cleaned = str(thread_id or "").strip()
     if not cleaned:
-        return {"previews": {}, "outputs": {}, "output_segments": {}, "image_refs": {}}
+        return {"previews": {}, "outputs": {}, "output_segments": {}, "image_refs": {}, "turn_times": {}}
     path = _find_codex_rollout_jsonl(cleaned)
     try:
         path_signature = (str(path), path.stat().st_mtime_ns, path.stat().st_size) if path else ("", 0, 0)
@@ -1500,12 +1500,14 @@ def _codex_raw_view_image_payload(thread_id: str) -> dict[str, object]:
             } if isinstance(cached.get("outputs"), dict) else {},
             "output_segments": _copy_codex_output_segments_by_turn(cached.get("output_segments")),
             "image_refs": _copy_codex_image_refs(cached.get("image_refs")),
+            "turn_times": _copy_codex_turn_times(cached.get("turn_times")),
         }
     previews_by_turn: dict[str, list[dict[str, str]]] = {}
     events_by_turn: dict[str, list[dict[str, object]]] = {}
     image_events: list[dict[str, object]] = []
     pending_image_events: dict[str, dict[str, object]] = {}
     image_refs: dict[str, dict[str, object]] = {}
+    turn_times_by_turn: dict[str, dict[str, str]] = {}
     if path is not None:
         try:
             with path.open("rb") as handle:
@@ -1520,8 +1522,22 @@ def _codex_raw_view_image_payload(thread_id: str) -> dict[str, object]:
                         continue
                     payload = item.get("payload") if isinstance(item, dict) and isinstance(item.get("payload"), dict) else {}
                     metadata = payload.get("internal_chat_message_metadata_passthrough")
-                    turn_id = str(metadata.get("turn_id") or "").strip() if isinstance(metadata, dict) else ""
+                    turn_id = str(
+                        (metadata.get("turn_id") if isinstance(metadata, dict) else "")
+                        or payload.get("turn_id")
+                        or ""
+                    ).strip()
                     event_type = str(payload.get("type") or "")
+                    record_at = str(item.get("timestamp") or "").strip() if isinstance(item, dict) else ""
+                    if turn_id and record_at:
+                        turn_times = turn_times_by_turn.setdefault(turn_id, {"started_at": "", "finished_at": ""})
+                        if event_type in {"task_started", "user_message"} or (event_type == "message" and payload.get("role") == "user"):
+                            turn_times["started_at"] = turn_times["started_at"] or record_at
+                        if event_type in {"task_complete", "task_cancelled", "task_canceled", "turn_aborted", "turn_completed"}:
+                            turn_times["finished_at"] = record_at
+                        phase = str(payload.get("phase") or "").strip()
+                        if phase == "final_answer" and event_type in {"agent_message", "message"}:
+                            turn_times["finished_at"] = record_at
                     if event_type == "message" and payload.get("role") == "assistant":
                         if not turn_id:
                             continue
@@ -1669,12 +1685,14 @@ def _codex_raw_view_image_payload(thread_id: str) -> dict[str, object]:
         "outputs": dict(outputs_by_turn),
         "output_segments": _copy_codex_output_segments_by_turn(output_segments_by_turn),
         "image_refs": _copy_codex_image_refs(image_refs),
+        "turn_times": _copy_codex_turn_times(turn_times_by_turn),
     }
     return {
         "previews": previews_by_turn,
         "outputs": outputs_by_turn,
         "output_segments": output_segments_by_turn,
         "image_refs": image_refs,
+        "turn_times": turn_times_by_turn,
     }
 
 
@@ -1841,20 +1859,18 @@ def _copy_codex_output_segments_by_turn(value: object) -> dict[str, list[dict[st
     return copied
 
 
-def _codex_raw_view_image_previews_by_turn(thread_id: str) -> dict[str, list[dict[str, str]]]:
-    return _copy_preview_map(_codex_raw_view_image_payload(thread_id).get("previews"))
-
-
-def _codex_raw_output_segments_by_turn(thread_id: str) -> dict[str, list[dict[str, str]]]:
-    return _copy_codex_output_segments_by_turn(_codex_raw_view_image_payload(thread_id).get("output_segments"))
-
-
-def _codex_raw_output_with_view_images_by_turn(thread_id: str) -> dict[str, str]:
-    outputs = _codex_raw_view_image_payload(thread_id).get("outputs")
+def _copy_codex_turn_times(value: object) -> dict[str, dict[str, str]]:
+    if not isinstance(value, dict):
+        return {}
     return {
-        str(turn_id): str(output)
-        for turn_id, output in outputs.items()
-    } if isinstance(outputs, dict) else {}
+        str(turn_id): {
+            "started_at": str(times.get("started_at") or "").strip(),
+            "finished_at": str(times.get("finished_at") or "").strip(),
+        }
+        for turn_id, times in value.items()
+        if isinstance(times, dict)
+    }
+
 
 def _codex_raw_message_text(payload: dict[str, object]) -> str:
     content = payload.get("content")
@@ -2529,12 +2545,46 @@ def _codex_message_activity_item(message: dict[str, object], *, fallback_at: str
         for key, value in raw_metadata.items()
         if str(key).strip() and str(value).strip()
     }
+    detail_value = activity.get("detail") or message.get("text") or ""
+    detail = str(detail_value).strip()
+    item_type = str(metadata.get("item_type") or metadata.get("itemType") or "")
+    normalized_item_type = "".join(character for character in item_type.lower() if character.isalnum())
+    if event == "codex_subagent" or normalized_item_type == "subagentactivity":
+        detail_payload = detail_value if isinstance(detail_value, dict) else {}
+        if not detail_payload and detail:
+            try:
+                parsed_detail = json.loads(detail)
+            except (TypeError, ValueError):
+                parsed_detail = {}
+            if isinstance(parsed_detail, dict):
+                detail_payload = parsed_detail
+        aliases = {
+            "agent_path": ("agent_path", "agentPath", "detail.agent_path", "detail.agentPath"),
+            "agent_thread_id": ("agent_thread_id", "agentThreadId", "detail.agent_thread_id", "detail.agentThreadId"),
+            "kind": ("kind", "detail.kind"),
+        }
+        for target, keys in aliases.items():
+            value = next(
+                (
+                    candidate
+                    for candidate in (
+                        *(metadata.get(key) for key in keys),
+                        *(detail_payload.get(key) for key in keys),
+                    )
+                    if str(candidate or "").strip()
+                ),
+                "",
+            )
+            if value:
+                metadata[target] = str(value).strip()
+        event = "codex_subagent"
+        detail = metadata.get("agent_path") or detail
     return {
         "id": str(message.get("id") or metadata.get("item_id") or "").strip(),
         "event": event,
         "type": str(activity.get("type") or "info").strip() or "info",
         "at": at,
-        "detail": str(activity.get("detail") or message.get("text") or "").strip(),
+        "detail": detail,
         "metadata": metadata,
     }
 
@@ -2710,12 +2760,26 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
     messages = thread.get("messages") if isinstance(thread.get("messages"), list) else []
     selected_turns, turn_order_lookup = _codex_thread_selected_turns(thread, limit)
     selected_turn_set = set(selected_turns)
-    view_image_previews_by_turn = _codex_raw_view_image_previews_by_turn(thread_id)
-    raw_output_with_images_by_turn = _codex_raw_output_with_view_images_by_turn(thread_id)
-    raw_output_segments_by_turn = _codex_raw_output_segments_by_turn(thread_id)
+    raw_rollout_payload = _codex_raw_view_image_payload(thread_id)
+    view_image_previews_by_turn = _copy_preview_map(raw_rollout_payload.get("previews"))
+    raw_outputs = raw_rollout_payload.get("outputs")
+    raw_output_with_images_by_turn = {
+        str(turn_id): str(output)
+        for turn_id, output in raw_outputs.items()
+    } if isinstance(raw_outputs, dict) else {}
+    raw_output_segments_by_turn = _copy_codex_output_segments_by_turn(raw_rollout_payload.get("output_segments"))
+    raw_turn_times_by_turn = {
+        turn_id: {
+            "started_at": _mobile_display_time(times.get("started_at")),
+            "finished_at": _mobile_display_time(times.get("finished_at")),
+        }
+        for turn_id, times in _copy_codex_turn_times(raw_rollout_payload.get("turn_times")).items()
+    }
     def new_display_turn(*, created_at: str = "", item_order: int = 0, message_id: str = "") -> dict[str, object]:
         return {
             "created_at": created_at,
+            "assistant_at": "",
+            "activity_at": "",
             "item_order": item_order,
             "message_id": message_id,
             "user": [],
@@ -2743,7 +2807,8 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
             turn_created_at[turn_id] = at
     last_known_at = ""
     for index, turn_id in enumerate(selected_turns):
-        known_at = turn_created_at.get(turn_id, "")
+        raw_started_at = str(raw_turn_times_by_turn.get(turn_id, {}).get("started_at") or "").strip()
+        known_at = turn_created_at.get(turn_id, "") or raw_started_at
         if known_at:
             last_known_at = known_at
             continue
@@ -2755,7 +2820,8 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
         turn_id = str(message.get("turn_id") or message.get("id") or "").strip()
         role = str(message.get("role") or "").strip()
         text = str(message.get("text") or "").strip()
-        fallback_at = _codex_message_at(message) or turn_created_at.get(turn_id, "") or turn_fallback_at.get(turn_id, "") or created_base
+        raw_started_at = str(raw_turn_times_by_turn.get(turn_id, {}).get("started_at") or "").strip()
+        fallback_at = _codex_message_at(message) or turn_created_at.get(turn_id, "") or raw_started_at or turn_fallback_at.get(turn_id, "") or created_base
         display_turns = display_turns_by_turn[turn_id]
         if role == "user" and text:
             display_turn = new_display_turn(
@@ -2769,6 +2835,8 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
                     display_turn[key].extend(preamble[key])
                 if preamble["created_at"] and not display_turn["created_at"]:
                     display_turn["created_at"] = preamble["created_at"]
+                display_turn["assistant_at"] = preamble["assistant_at"]
+                display_turn["activity_at"] = preamble["activity_at"]
                 if preamble["message_id"] and not display_turn["message_id"]:
                     display_turn["message_id"] = preamble["message_id"]
             display_turn["user"].append(text)
@@ -2782,8 +2850,12 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
             display_turn["message_id"] = str(message.get("id") or "").strip()
         if role == "assistant" and text:
             display_turn["assistant"].append(text)
+            if fallback_at:
+                display_turn["assistant_at"] = fallback_at
         elif role == "reasoning" and text:
             display_turn["reasoning"].append(text)
+            if fallback_at:
+                display_turn["activity_at"] = fallback_at
             reasoning_id = str(message.get("id") or "").strip() or f"reasoning-{len(display_turn['activity']) + 1}"
             display_turn["activity"].append(
                 {
@@ -2799,6 +2871,8 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
             activity = _codex_message_activity_item(message, fallback_at=fallback_at)
             if activity is not None:
                 display_turn["activity"].append(activity)
+                if str(activity.get("at") or "").strip():
+                    display_turn["activity_at"] = str(activity["at"])
 
     tasks: list[dict[str, object]] = []
     cwd = str(thread.get("cwd") or "").strip()
@@ -2812,7 +2886,11 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
         uses_split_display = len(display_turns) > 1
         for display_index, parts in enumerate(display_turns, start=1):
             is_terminal_display = display_index == len(display_turns)
-            created_at = str(parts["created_at"] or turn_created_at.get(turn_id, "") or turn_fallback_at.get(turn_id, "") or created_base)
+            raw_turn_times = raw_turn_times_by_turn.get(turn_id, {})
+            raw_started_at = str(raw_turn_times.get("started_at") or "").strip()
+            raw_finished_at = str(raw_turn_times.get("finished_at") or "").strip()
+            created_at = str(parts["created_at"] or turn_created_at.get(turn_id, "") or raw_started_at or turn_fallback_at.get(turn_id, "") or created_base)
+            started_at = raw_started_at or created_at
             prompt = "\n\n".join(str(part) for part in parts["user"]).strip()
             prompt_images: list[str] = []
             seen_prompt_images: set[str] = set()
@@ -2830,6 +2908,11 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
                 for segment in raw_output_segments_by_turn.get(turn_id, [])
                 if isinstance(segment, dict) and not uses_split_display
             ]
+            finished_at = (
+                raw_finished_at
+                if raw_started_at
+                else (str(parts["assistant_at"] or "") if output or output_segments else "")
+            )
             output_image_previews = _output_image_previews(output)
             seen_output_sources = {
                 str(preview.get("source") or "").strip()
@@ -2868,8 +2951,8 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
                     "status": "succeeded",
                     "stream_order": turn_order_lookup.get(turn_id, 0) * 1000 + display_index,
                     "created_at": created_at,
-                    "started_at": "",
-                    "finished_at": "",
+                    "started_at": started_at,
+                    "finished_at": finished_at,
                     "prompt": prompt,
                     "images": prompt_images,
                     "image_previews": [*prompt_image_previews, *output_image_previews],
@@ -2880,7 +2963,7 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
                     "progress_text": reasoning,
                     "live_output_text": "",
                     "reasoning_text": reasoning,
-                    "progress_at": "",
+                    "progress_at": str(parts["activity_at"] or ""),
                     "progress_seq": 1 if reasoning else 0,
                     "context_left_percent": None,
                     "activity_items": activity_items,
