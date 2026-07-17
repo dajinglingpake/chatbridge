@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import json
+import os
 import re
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from ui.app import _stream_initial_history_limit, group_codex_threads_by_workspace
+from ui.app import _codex_rollout_runtime_hint, _stream_initial_history_limit, _update_codex_thread_runtime_statuses, group_codex_threads_by_workspace
 from ui.sections import _stream_client_time, _stream_display_time, _stream_image_is_previewable, _stream_markdown, _stream_task_sort_key, _stream_task_uses_utc_naive_time, _stream_text, render_mobile_stream_section
 
 
@@ -1598,6 +1601,121 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("排队发送", send_buttons[0].props_text)
         self.assertEqual("keyboard_return", send_buttons[0].attrs["icon"])
 
+    def test_external_codex_runtime_is_rendered_like_a_passive_running_task(self) -> None:
+        ui = FakeUI()
+        mobile_state = {
+            "counts": {"running": 0, "queued": 0},
+            "agents": [{"id": "codex", "name": "Codex", "backend": "codex"}],
+            "selected_codex_thread": {"id": "thread-live", "runtime_status": "running"},
+            "tasks": [
+                {
+                    "id": "codex-thread-live-turn-1",
+                    "agent_id": "codex",
+                    "agent_name": "Codex",
+                    "backend": "codex",
+                    "source": "codex-app-server",
+                    "session_name": "codex:thread-live",
+                    "status": "succeeded",
+                    "created_at": "2026-07-17T05:19:00",
+                    "prompt": "上一轮问题",
+                    "output": "上一段回答",
+                },
+                {
+                    "id": "codex-thread-live-turn-2",
+                    "agent_id": "codex",
+                    "agent_name": "Codex",
+                    "backend": "codex",
+                    "source": "codex-app-server",
+                    "session_name": "codex:thread-live",
+                    "status": "succeeded",
+                    "created_at": "2026-07-17T05:20:00",
+                    "prompt": "继续",
+                    "output": "",
+                },
+            ],
+            "session_task_counts": {"codex:thread-live": 2},
+        }
+
+        def translator(key: str, **_kwargs: object) -> str:
+            return {"ui.web.mobile.stream_working": "正在处理"}.get(key, key)
+
+        render_mobile_stream_section(
+            ui,
+            translator,
+            mobile_state,
+            "codex:thread-live",
+            [],
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+        )
+
+        runtime_turns = [item for item in ui.elements if "data-codex-runtime-running=1" in item.props_text]
+        live_markdowns = [item for item in ui.elements if "cb-stream-live-text" in item.class_text.split()]
+        working_loaders = [item for item in ui.elements if "cb-stream-working-loader" in item.class_text.split()]
+        stop_buttons = [item for item in ui.elements if "cb-stream-stop-button" in item.class_text.split()]
+        composer_stop_buttons = [item for item in ui.elements if "cb-composer-stop-button" in item.class_text.split()]
+        turns = [item for item in ui.elements if "cb-stream-turn" in item.class_text.split()]
+        send_buttons = [item for item in ui.elements if "cb-composer-send-button" in item.class_text.split()]
+
+        self.assertEqual(1, len(runtime_turns))
+        self.assertEqual(["正在处理"], [item.text for item in live_markdowns])
+        self.assertIn("data-stream-text-key=codex-thread-live-turn-2", live_markdowns[0].props_text)
+        self.assertEqual(1, len(working_loaders))
+        self.assertEqual([], stop_buttons)
+        self.assertEqual([], composer_stop_buttons)
+        self.assertEqual(2, len(turns))
+        self.assertEqual(1, len(send_buttons))
+        self.assertIn("排队发送", send_buttons[0].props_text)
+        self.assertEqual("keyboard_return", send_buttons[0].attrs["icon"])
+
+    def test_external_codex_runtime_does_not_duplicate_a_real_running_task(self) -> None:
+        ui = FakeUI()
+        mobile_state = {
+            "counts": {"running": 1, "queued": 0},
+            "agents": [{"id": "codex", "name": "Codex", "backend": "codex"}],
+            "selected_codex_thread": {"id": "thread-live", "runtime_status": "running"},
+            "tasks": [
+                {
+                    "id": "task-running",
+                    "agent_id": "codex",
+                    "agent_name": "Codex",
+                    "backend": "codex",
+                    "session_name": "codex:thread-live",
+                    "status": "running",
+                    "created_at": "2026-07-17T05:19:00",
+                    "prompt": "继续",
+                    "progress_text": "正在处理",
+                }
+            ],
+            "session_task_counts": {"codex:thread-live": 1},
+        }
+
+        render_mobile_stream_section(
+            ui,
+            _translator,
+            mobile_state,
+            "codex:thread-live",
+            [],
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+        )
+
+        runtime_turns = [item for item in ui.elements if "data-codex-runtime-running=1" in item.props_text]
+        working_loaders = [item for item in ui.elements if "cb-stream-working-loader" in item.class_text.split()]
+
+        self.assertEqual([], runtime_turns)
+        self.assertEqual(1, len(working_loaders))
+
     def test_running_assistant_text_gets_live_typewriter_key(self) -> None:
         ui = FakeUI()
         mobile_state = {
@@ -2699,6 +2817,74 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn('state["stream_sidebar_codex_done"] = True', body)
         self.assertNotIn("_load_codex_threads_cached", body)
         self.assertNotIn("_load_all_codex_threads", body)
+
+    def test_codex_thread_runtime_status_uses_rollout_tail_without_rescanning_unchanged_files(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            active_path = root / "active.jsonl"
+            completed_path = root / "completed.jsonl"
+            stale_path = root / "stale.jsonl"
+
+            active_path.write_text(
+                json.dumps({"type": "response_item", "payload": {"type": "function_call"}}) + "\n",
+                encoding="utf-8",
+            )
+            completed_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"type": "event_msg", "payload": {"type": "task_started"}}),
+                        json.dumps({"type": "event_msg", "payload": {"type": "task_complete"}}),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            stale_path.write_text(
+                json.dumps({"type": "response_item", "payload": {"type": "custom_tool_call"}}) + "\n",
+                encoding="utf-8",
+            )
+            now = time.time()
+            os.utime(active_path, (now, now))
+            os.utime(completed_path, (now, now))
+            os.utime(stale_path, (now - 600, now - 600))
+            threads = [
+                {"id": "active", "path": str(active_path), "status": "notLoaded"},
+                {"id": "completed", "path": str(completed_path), "status": "notLoaded"},
+                {"id": "stale", "path": str(stale_path), "status": "notLoaded"},
+            ]
+            probes: dict[str, object] = {}
+
+            changed = _update_codex_thread_runtime_statuses(threads, probes, now=now)
+
+            self.assertTrue(changed)
+            self.assertEqual(["running", "idle", "idle"], [thread["runtime_status"] for thread in threads])
+            self.assertTrue(_codex_rollout_runtime_hint(active_path))
+            self.assertFalse(_codex_rollout_runtime_hint(completed_path))
+
+            with patch("ui.app._codex_rollout_runtime_hint", wraps=_codex_rollout_runtime_hint) as read_tail:
+                unchanged = _update_codex_thread_runtime_statuses(threads, probes, now=now + 1)
+
+            self.assertFalse(unchanged)
+            read_tail.assert_not_called()
+
+            with active_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"type": "event_msg", "payload": {"type": "task_complete"}}) + "\n")
+            os.utime(active_path, (now + 2, now + 2))
+
+            completed = _update_codex_thread_runtime_statuses(threads, probes, now=now + 2)
+
+            self.assertTrue(completed)
+            self.assertEqual("idle", threads[0]["runtime_status"])
+
+    def test_codex_runtime_status_timer_does_not_reload_thread_pages(self) -> None:
+        source = Path("ui/app.py").read_text(encoding="utf-8")
+        refresh_start = source.index("def refresh_stream() -> None:")
+        refresh_end = source.index("client.on_connect", refresh_start)
+        refresh_body = source[refresh_start:refresh_end]
+
+        self.assertIn("_refresh_codex_runtime_statuses()", refresh_body)
+        self.assertNotIn("load_codex_threads_page", refresh_body)
+        self.assertNotIn("read_codex_thread", refresh_body)
 
     def test_hidden_sidebar_does_not_mount_session_lists_until_opened(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")

@@ -2503,6 +2503,7 @@ def _mobile_codex_thread_payload(thread: dict[str, object]) -> dict[str, object]
         "branch": str(thread.get("branch") or "").strip(),
         "archived": bool(thread.get("archived")),
         "status": str(thread.get("status") or "").strip(),
+        "path": str(thread.get("path") or "").strip(),
     }
 
 

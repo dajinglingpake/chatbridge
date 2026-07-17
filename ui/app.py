@@ -37,6 +37,10 @@ ASYNC_SERVICE_ACTIONS = {
 }
 STREAM_HISTORY_PAGE_SIZE = 20
 STREAM_SIDEBAR_PAGE_SIZE = 40
+CODEX_THREAD_RUNTIME_STATUS_LIMIT = 100
+CODEX_THREAD_RUNTIME_RECENT_SECONDS = 5.0
+CODEX_THREAD_RUNTIME_STALE_SECONDS = 300.0
+CODEX_THREAD_RUNTIME_TAIL_BYTES = 65536
 WEB_THEME_OPTIONS = ("dark", "light", "forest")
 STREAM_UI_LOG_PATH = APP_DIR / ".runtime" / "logs" / "ui_stream_refresh.jsonl"
 STREAM_UI_DEBUG_LOG_ENABLED = os.environ.get("CHATBRIDGE_UI_DEBUG_LOG", "").strip().lower() in {"1", "true", "yes", "on"}
@@ -172,6 +176,104 @@ def group_codex_threads_by_workspace(threads: list[object]) -> list[dict[str, ob
         ),
         reverse=True,
     )
+
+
+def _codex_rollout_runtime_hint(path_value: object) -> bool | None:
+    path = Path(str(path_value or "").strip())
+    if path.suffix.lower() != ".jsonl":
+        return None
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            offset = max(0, size - CODEX_THREAD_RUNTIME_TAIL_BYTES)
+            handle.seek(offset)
+            data = handle.read()
+    except OSError:
+        return None
+    if offset:
+        _separator, found, data = data.partition(b"\n")
+        if not found:
+            return None
+    for raw_line in reversed(data.splitlines()):
+        try:
+            record = json.loads(raw_line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        record_type = str(record.get("type") or "").strip()
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        payload_type = str(payload.get("type") or "").strip()
+        phase = str(payload.get("phase") or "").strip()
+        if record_type == "event_msg":
+            if payload_type in {"task_complete", "task_cancelled", "task_canceled", "turn_aborted", "turn_completed"}:
+                return False
+            if payload_type == "task_started":
+                return True
+            if payload_type == "agent_message" and phase == "final_answer":
+                return False
+            if payload_type in {"agent_reasoning", "exec_command_begin", "mcp_tool_call_begin", "user_message"}:
+                return True
+        if record_type == "response_item":
+            if payload_type in {"agent_message", "message"} and phase == "final_answer":
+                return False
+            if payload_type in {
+                "custom_tool_call",
+                "custom_tool_call_output",
+                "function_call",
+                "function_call_output",
+                "mcp_tool_call",
+                "reasoning",
+            }:
+                return True
+    return None
+
+
+def _update_codex_thread_runtime_statuses(
+    threads: list[dict[str, object]],
+    probes: dict[str, object],
+    *,
+    now: float | None = None,
+) -> bool:
+    checked = 0
+    changed = False
+    active_thread_ids: set[str] = set()
+    now_value = time.time() if now is None else float(now)
+    known_running_statuses = {"active", "inprogress", "in_progress", "running", "working"}
+    for thread in threads:
+        thread_id = str(thread.get("id") or thread.get("session_id") or "").strip()
+        if not thread_id:
+            continue
+        active_thread_ids.add(thread_id)
+        raw_status = str(thread.get("status") or "").strip().lower()
+        runtime_status = "running" if raw_status in known_running_statuses else "idle"
+        if not bool(thread.get("archived")) and checked < CODEX_THREAD_RUNTIME_STATUS_LIMIT:
+            checked += 1
+            path_text = str(thread.get("path") or "").strip()
+            try:
+                file_stat = Path(path_text).stat() if path_text else None
+            except OSError:
+                file_stat = None
+            if file_stat is not None:
+                signature = f"{file_stat.st_mtime_ns}:{file_stat.st_size}"
+                age_seconds = max(0.0, now_value - file_stat.st_mtime)
+                cached = probes.get(thread_id) if isinstance(probes.get(thread_id), dict) else {}
+                running_hint = cached.get("running_hint") if str(cached.get("signature") or "") == signature else None
+                if str(cached.get("signature") or "") != signature and age_seconds <= CODEX_THREAD_RUNTIME_STALE_SECONDS:
+                    running_hint = _codex_rollout_runtime_hint(path_text)
+                if age_seconds > CODEX_THREAD_RUNTIME_STALE_SECONDS:
+                    running_hint = False
+                probes[thread_id] = {"signature": signature, "running_hint": running_hint}
+                if running_hint is True or (running_hint is None and age_seconds <= CODEX_THREAD_RUNTIME_RECENT_SECONDS):
+                    runtime_status = "running"
+        if str(thread.get("runtime_status") or "") != runtime_status:
+            thread["runtime_status"] = runtime_status
+            changed = True
+    for thread_id in list(probes):
+        if thread_id not in active_thread_ids:
+            probes.pop(thread_id, None)
+    return changed
 
 
 def _load_nicegui():
@@ -640,6 +742,22 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         .cb-chip-danger {
             background: var(--cb-danger-soft);
             color: var(--cb-danger);
+        }
+        .cb-chip-running {
+            background: var(--cb-info-soft);
+            color: var(--cb-info);
+        }
+        .cb-chip-running::before {
+            content: "";
+            width: 0.45rem;
+            height: 0.45rem;
+            border-radius: 999px;
+            background: currentColor;
+            box-shadow: 0 0 0 0 currentColor;
+            animation: cb-codex-running-pulse 1.4s ease-out infinite;
+        }
+        @keyframes cb-codex-running-pulse {
+            70%, 100% { box-shadow: 0 0 0 0.35rem transparent; }
         }
         .cb-table {
             overflow: auto;
@@ -2600,6 +2718,8 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         "stream_sidebar_codex_archived": False,
         "stream_sidebar_codex_done": False,
         "stream_sidebar_codex_error": "",
+        "stream_sidebar_codex_runtime_probes": {},
+        "stream_selected_codex_runtime_thread": {},
         "sidebar_content_loaded": False,
     }
     state = _ClientState(state_defaults, lambda: context.client.storage)
@@ -2769,6 +2889,97 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
     def _stream_global_task_limit(session_name: str) -> int:
         return 0 if str(session_name or "").strip() else 1
 
+    def _stream_codex_runtime_probes() -> dict[str, object]:
+        probes = state.get("stream_sidebar_codex_runtime_probes")
+        if not isinstance(probes, dict):
+            probes = {}
+            state["stream_sidebar_codex_runtime_probes"] = probes
+        return probes
+
+    def _stream_selected_codex_runtime_thread() -> dict[str, object]:
+        thread = state.get("stream_selected_codex_runtime_thread")
+        return thread if isinstance(thread, dict) else {}
+
+    def _refresh_codex_runtime_statuses() -> tuple[bool, bool]:
+        sidebar_value = state.get("stream_sidebar_codex_threads")
+        sidebar_threads = [thread for thread in sidebar_value if isinstance(thread, dict)] if isinstance(sidebar_value, list) else []
+        selected_thread = _stream_selected_codex_runtime_thread()
+        selected_id = str(selected_thread.get("id") or "").strip()
+        sidebar_before = {
+            str(thread.get("id") or "").strip(): str(thread.get("runtime_status") or "")
+            for thread in sidebar_threads
+            if str(thread.get("id") or "").strip()
+        }
+        selected_before = str(selected_thread.get("runtime_status") or "")
+
+        probe_threads: list[dict[str, object]] = []
+        if selected_id:
+            probe_threads.append(selected_thread)
+        probe_threads.extend(
+            thread
+            for thread in sidebar_threads
+            if str(thread.get("id") or "").strip() != selected_id
+        )
+        if probe_threads:
+            _update_codex_thread_runtime_statuses(probe_threads, _stream_codex_runtime_probes())
+
+        if selected_id:
+            selected_status = str(selected_thread.get("runtime_status") or "idle")
+            for thread in sidebar_threads:
+                if str(thread.get("id") or "").strip() == selected_id:
+                    thread["runtime_status"] = selected_status
+
+        sidebar_changed = any(
+            sidebar_before.get(str(thread.get("id") or "").strip(), "") != str(thread.get("runtime_status") or "")
+            for thread in sidebar_threads
+            if str(thread.get("id") or "").strip()
+        )
+        selected_changed = selected_before != str(selected_thread.get("runtime_status") or "")
+        return sidebar_changed, selected_changed
+
+    def _sync_selected_codex_runtime_status(stream_state: dict[str, object]) -> None:
+        selected_session = str(state.get("selected_session_name") or "").strip()
+        selected_id = codex_thread_id_from_session_name(selected_session)
+        selected_payload = stream_state.get("selected_codex_thread")
+        if not selected_id or not isinstance(selected_payload, dict):
+            state["stream_selected_codex_runtime_thread"] = {}
+            return
+
+        path_text = str(selected_payload.get("path") or "").strip()
+        raw_status = str(selected_payload.get("status") or "").strip()
+        archived = bool(selected_payload.get("archived"))
+        sidebar_value = state.get("stream_sidebar_codex_threads")
+        if isinstance(sidebar_value, list):
+            sidebar_thread = next(
+                (
+                    thread
+                    for thread in sidebar_value
+                    if isinstance(thread, dict) and str(thread.get("id") or "").strip() == selected_id
+                ),
+                {},
+            )
+            if isinstance(sidebar_thread, dict):
+                path_text = path_text or str(sidebar_thread.get("path") or "").strip()
+                raw_status = raw_status or str(sidebar_thread.get("status") or "").strip()
+                archived = archived or bool(sidebar_thread.get("archived"))
+
+        current = _stream_selected_codex_runtime_thread()
+        identity_changed = (
+            str(current.get("id") or "").strip() != selected_id
+            or str(current.get("path") or "").strip() != path_text
+        )
+        if identity_changed:
+            state["stream_selected_codex_runtime_thread"] = {
+                "id": selected_id,
+                "path": path_text,
+                "status": raw_status,
+                "archived": archived,
+                "runtime_status": "idle",
+            }
+            _refresh_codex_runtime_statuses()
+        runtime_thread = _stream_selected_codex_runtime_thread()
+        selected_payload["runtime_status"] = str(runtime_thread.get("runtime_status") or "idle")
+
     def _stream_state_snapshot() -> dict[str, object]:
         session_name = str(state["selected_session_name"] or "").strip()
         stream_state = build_stream_state_snapshot(
@@ -2777,17 +2988,21 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             session_task_limit=_stream_session_task_limit(session_name),
         )
         if session_name:
+            _sync_selected_codex_runtime_status(stream_state)
             return stream_state
         inferred_session = _resolve_stream_active_session(stream_state)
         if inferred_session == "default":
+            _sync_selected_codex_runtime_status(stream_state)
             return stream_state
         state["selected_session_name"] = inferred_session
         state["stream_force_bottom_session"] = inferred_session
-        return build_stream_state_snapshot(
+        stream_state = build_stream_state_snapshot(
             selected_session_name=inferred_session,
             task_limit=_stream_global_task_limit(inferred_session),
             session_task_limit=_stream_session_task_limit(inferred_session),
         )
+        _sync_selected_codex_runtime_status(stream_state)
+        return stream_state
 
     def _stream_render_snapshot() -> tuple[dict[str, object], str]:
         cached_snapshot = state.get("stream_panel_render_snapshot")
@@ -2804,11 +3019,17 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
 
     def _stream_signature_snapshot() -> tuple:
         session_name = str(state["selected_session_name"] or "").strip()
-        return build_stream_signature_snapshot(
+        signature = build_stream_signature_snapshot(
             selected_session_name=session_name,
             task_limit=_stream_global_task_limit(session_name),
             session_task_limit=_stream_session_task_limit(session_name),
         )
+        selected_runtime = _stream_selected_codex_runtime_thread()
+        runtime_signature = (
+            str(selected_runtime.get("id") or ""),
+            str(selected_runtime.get("runtime_status") or ""),
+        )
+        return (*signature, runtime_signature)
 
     def _stream_task_order_key(task: dict[str, object]) -> tuple[tuple[int, float, str], str, str]:
         raw_order = str(task.get("stream_order") or "")
@@ -3494,6 +3715,10 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         threads = state.get("stream_sidebar_codex_threads")
         return [thread for thread in threads if isinstance(thread, dict)] if isinstance(threads, list) else []
 
+    def _refresh_sidebar_codex_runtime_status() -> bool:
+        sidebar_changed, _selected_changed = _refresh_codex_runtime_statuses()
+        return sidebar_changed
+
     def _load_sidebar_codex_threads() -> None:
         state["stream_sidebar_codex_loaded"] = True
         if bool(state.get("stream_sidebar_codex_done")):
@@ -3519,6 +3744,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             seen_ids.add(thread_id)
             loaded_threads.append(thread)
         state["stream_sidebar_codex_threads"] = loaded_threads
+        _refresh_sidebar_codex_runtime_status()
         next_cursor = str(payload.get("next_cursor") or "").strip()
         if next_cursor:
             state["stream_sidebar_codex_cursor"] = next_cursor
@@ -3694,6 +3920,11 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                             default={},
                         )
                         latest_at = str(latest_thread.get("updated_at") or "").strip() if isinstance(latest_thread, dict) else ""
+                        running_count = sum(
+                            1
+                            for thread in group_threads
+                            if isinstance(thread, dict) and str(thread.get("runtime_status") or "") == "running"
+                        )
                         selected_in_group = any(
                             isinstance(thread, dict)
                             and str(thread.get("session_name") or "").strip() == state["selected_session_name"]
@@ -3705,13 +3936,22 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                                 with ui.column().classes("min-w-0 flex-1 gap-1"):
                                     with ui.row().classes("w-full items-start justify-between gap-2 flex-wrap"):
                                         ui.label(group_label).classes("font-semibold break-all text-left")
-                                        ui.label(
-                                            t(
-                                                "ui.web.mobile.codex_workspace_count",
-                                                "{count} 个会话",
-                                                count=str(len(group_threads)),
-                                            )
-                                        ).classes("cb-chip cb-chip-ok")
+                                        with ui.row().classes("gap-1 items-center flex-wrap"):
+                                            if running_count:
+                                                ui.label(
+                                                    t(
+                                                        "ui.web.mobile.codex_workspace_running",
+                                                        "{count} 个运行中",
+                                                        count=str(running_count),
+                                                    )
+                                                ).classes("cb-chip cb-chip-running")
+                                            ui.label(
+                                                t(
+                                                    "ui.web.mobile.codex_workspace_count",
+                                                    "{count} 个会话",
+                                                    count=str(len(group_threads)),
+                                                )
+                                            ).classes("cb-chip cb-chip-ok")
                                     meta = " | ".join(item for item in [group_cwd, latest_at] if item)
                                     if meta:
                                         ui.label(meta).classes("text-xs cb-muted break-all text-left")
@@ -3732,6 +3972,8 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                                         with ui.column().classes("w-full items-stretch gap-1 text-left"):
                                             ui.label(str(thread.get("title") or thread_id)).classes("font-semibold break-all text-left")
                                             with ui.row().classes("w-full gap-1 items-center flex-wrap"):
+                                                if str(thread.get("runtime_status") or "") == "running":
+                                                    ui.label(t("ui.web.mobile.codex_thread_running", "运行中")).classes("cb-chip cb-chip-running")
                                                 if bool(thread.get("archived")):
                                                     ui.label(t("ui.web.mobile.codex_thread_archived", "已归档")).classes("cb-chip cb-chip-warn")
                                                 if str(thread.get("branch") or "").strip():
@@ -5153,6 +5395,9 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                 try:
                     if state.get("stream_switch_refresh_pending"):
                         return
+                    sidebar_runtime_changed, _selected_runtime_changed = _refresh_codex_runtime_statuses()
+                    if state.get("stream_sidebar_codex_loaded") and sidebar_runtime_changed:
+                        sidebar_sessions_view.refresh()
                     selected_stream_session = str(state["selected_session_name"] or "").strip()
                     if not codex_thread_id_from_session_name(selected_stream_session):
                         next_hub_file_signature = stream_hub_state_file_signature()

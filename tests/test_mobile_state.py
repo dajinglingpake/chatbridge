@@ -601,6 +601,7 @@ class MobileStateTests(unittest.TestCase):
             "title": "真实会话",
             "preview": "继续任务",
             "cwd": "I:/AI/chatbridge",
+            "path": "C:/Users/test/.codex/sessions/thread-001.jsonl",
             "updated_at": "2026-07-04T20:00:00",
             "messages": [
                 {"turn_id": "turn-1", "role": "user", "text": "用户问题"},
@@ -626,6 +627,7 @@ class MobileStateTests(unittest.TestCase):
 
         self.assertEqual("codex:thread-001", sidebar_item["session_name"])
         self.assertEqual("chatbridge", sidebar_item["project"])
+        self.assertEqual("C:/Users/test/.codex/sessions/thread-001.jsonl", sidebar_item["path"])
         self.assertEqual(1, len(tasks))
         self.assertEqual("codex:thread-001", tasks[0]["session_name"])
         self.assertEqual("thread-001", tasks[0]["session_id"])

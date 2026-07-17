@@ -1486,32 +1486,71 @@ def _prepare_stream_render_context(mobile_state: dict[str, object], selected_ses
     selected_session = selected_session_name.strip()
     active_session = selected_session or (session_order[0] if session_order else "default")
     session_tasks = sorted(sessions.get(active_session, []), key=_stream_task_sort_key)
+    displayed_session_count = len(session_tasks)
+    session_total_count = _stream_session_task_count(mobile_state, active_session)
+    has_older_session_tasks = session_total_count > max(displayed_session_count, STREAM_MANUAL_HISTORY_LIMIT)
+    latest_task = session_tasks[-1] if session_tasks else None
+    latest_task_id = str(latest_task.get("id") or "").strip() if isinstance(latest_task, dict) else ""
     has_running_session_task = any(str(task.get("status") or "").strip() == "running" for task in session_tasks)
+    codex_runtime_running = (
+        active_session.startswith("codex:")
+        and str(selected_codex_thread.get("runtime_status") or "").strip() == "running"
+    )
+    render_session_tasks = list(session_tasks)
+    if codex_runtime_running and not has_running_session_task:
+        runtime_task = dict(render_session_tasks[-1]) if render_session_tasks else {
+            "id": "",
+            "session_name": active_session,
+            "source": "codex-app-server",
+            "prompt": "",
+            "output": "",
+            "error": "",
+            "activity_items": [],
+        }
+        runtime_task.update(
+            {
+                "status": "running",
+                "runtime_indicator": True,
+                "runtime_key": f"codex-runtime-{str(selected_codex_thread.get('id') or active_session[6:]).strip()}",
+                "cancelable": False,
+            }
+        )
+        if render_session_tasks:
+            render_session_tasks[-1] = runtime_task
+        else:
+            render_session_tasks.append(runtime_task)
+        has_running_session_task = True
     queued_composer_tasks = [
         task
-        for task in session_tasks
+        for task in render_session_tasks
         if has_running_session_task and str(task.get("status") or "").strip() == "queued"
     ]
     stream_tasks = [
         task
-        for task in session_tasks
+        for task in render_session_tasks
         if not (has_running_session_task and str(task.get("status") or "").strip() == "queued")
     ]
-    session_total_count = _stream_session_task_count(mobile_state, active_session)
-    displayed_session_count = len(session_tasks)
-    has_older_session_tasks = session_total_count > max(displayed_session_count, STREAM_MANUAL_HISTORY_LIMIT)
-    latest_task = session_tasks[-1] if session_tasks else None
-    latest_task_id = str(latest_task.get("id") or "").strip() if isinstance(latest_task, dict) else ""
     latest_active_task = next(
         (
             task
-            for task in reversed(session_tasks)
+            for task in reversed(render_session_tasks)
             if str(task.get("status") or "").strip() == ("running" if has_running_session_task else "queued")
             and str(task.get("id") or "").strip()
         ),
         None,
     )
     latest_active_task_id = str(latest_active_task.get("id") or "").strip() if isinstance(latest_active_task, dict) else ""
+    latest_cancelable_task = next(
+        (
+            task
+            for task in reversed(render_session_tasks)
+            if str(task.get("status") or "").strip() == ("running" if has_running_session_task else "queued")
+            and str(task.get("id") or "").strip()
+            and task.get("cancelable") is not False
+        ),
+        None,
+    )
+    latest_cancelable_task_id = str(latest_cancelable_task.get("id") or "").strip() if isinstance(latest_cancelable_task, dict) else ""
     status_task = latest_active_task if isinstance(latest_active_task, dict) else latest_task
     default_agent = str(status_task.get("agent_id") or default_agent_item.get("id") or "main") if isinstance(status_task, dict) else str(default_agent_item.get("id") or "main")
     default_backend = str(status_task.get("backend") or default_agent_item.get("backend") or "") if isinstance(status_task, dict) else str(default_agent_item.get("backend") or "")
@@ -1528,9 +1567,11 @@ def _prepare_stream_render_context(mobile_state: dict[str, object], selected_ses
         "is_loading": bool(selected_codex_thread.get("loading")) and not session_tasks,
         "latest_task_id": latest_task_id,
         "latest_active_task_id": latest_active_task_id,
+        "latest_cancelable_task_id": latest_cancelable_task_id,
         "default_agent": default_agent,
         "default_backend": default_backend,
         "context_left_percent": context_left_percent,
+        "codex_runtime_running": codex_runtime_running,
     }
 
 def render_mobile_stream_shell(
@@ -1629,6 +1670,7 @@ def _render_mobile_stream_messages(
                     timeline_items = _stream_timeline_items(raw_activity_items, reasoning_text=reasoning_text, task_status=status)
                     assume_utc_naive_time = _stream_task_uses_utc_naive_time(task)
                     task_id = str(task.get("id") or "").strip()
+                    runtime_indicator = bool(task.get("runtime_indicator"))
                     should_show_activity = bool(activity_items) and (
                         has_codex_activity
                         or task_id == latest_task_id
@@ -1641,7 +1683,10 @@ def _render_mobile_stream_messages(
                         is_working_placeholder = True
                     assistant_has_content = bool(assistant_text or output_segments or timeline_items)
                     turn_classes = "cb-stream-turn cb-stream-turn-with-footer" if assistant_has_content or should_show_activity else "cb-stream-turn"
-                    with ui.element("div").classes(turn_classes):
+                    turn_element = ui.element("div")
+                    if runtime_indicator:
+                        turn_element.props("data-codex-runtime-running=1")
+                    with turn_element.classes(turn_classes):
                         if prompt_text:
                             with ui.element("div").classes("cb-stream-message cb-stream-user"):
                                 with ui.element("div").classes("cb-stream-user-content"):
@@ -1736,7 +1781,8 @@ def _render_mobile_stream_messages(
                                                         ui.image(preview_source).props(_stream_lightbox_props(preview_source, preview_label, t)).classes("cb-stream-image-attachment cb-stream-image-lightbox-trigger")
                                         markdown = ui.markdown(_stream_markdown(assistant_text, t)).classes(f"{body_classes} cb-stream-markdown")
                                         if status in {"running", "queued"}:
-                                            live_props = f"data-stream-live=1 data-stream-text-key={quote(task_id or str(task.get('id') or ''), safe='')}"
+                                            live_key = task_id or str(task.get("runtime_key") or "")
+                                            live_props = f"data-stream-live=1 data-stream-text-key={quote(live_key, safe='')}"
                                             if is_working_placeholder:
                                                 live_props = f"{live_props} data-stream-placeholder=1"
                                             markdown.props(live_props).classes(f"{body_classes} cb-stream-markdown cb-stream-live-text")
@@ -1750,7 +1796,7 @@ def _render_mobile_stream_messages(
                                                 if started_at:
                                                     client_started_at = _stream_client_time(started_at, assume_utc_naive=assume_utc_naive_time)
                                                     ui.label(_stream_live_elapsed_text(task, t)).props(f'data-started-at="{client_started_at}"').classes("cb-stream-live-elapsed")
-                                                if task_id:
+                                                if task_id and task.get("cancelable") is not False:
                                                     stop_label = _tr(t, "ui.web.mobile.cancel_task", "停止任务")
                                                     ui.button(
                                                         "",
@@ -1846,6 +1892,7 @@ def _render_mobile_stream_composer(
     active_session = str(context.get("active_session") or "default")
     queued_composer_tasks = [task for task in context.get("queued_composer_tasks", []) if isinstance(task, dict)]
     latest_active_task_id = str(context.get("latest_active_task_id") or "")
+    latest_cancelable_task_id = str(context.get("latest_cancelable_task_id") or "")
     default_agent = str(context.get("default_agent") or "main")
     default_backend = str(context.get("default_backend") or "")
     context_left_percent = context.get("context_left_percent")
@@ -1938,13 +1985,13 @@ def _render_mobile_stream_composer(
                                 with ui.element("span").classes("cb-context-meter-track"):
                                     ui.element("span").classes("cb-context-meter-fill").style(f"width: {context_left_percent}%")
                                 ui.label(meter_label).classes("cb-context-meter-label")
-                        if latest_active_task_id:
+                        if latest_cancelable_task_id:
                             stop_label = _tr(t, "ui.web.mobile.cancel_task", "停止任务")
                             ui.button(
                                 "",
-                                on_click=lambda task_id=latest_active_task_id: on_cancel_task(task_id),
+                                on_click=lambda task_id=latest_cancelable_task_id: on_cancel_task(task_id),
                                 icon="stop",
-                            ).props(f'unelevated round color=negative title="{stop_label}" aria-label="{stop_label}" data-task-id={latest_active_task_id}').classes("cb-composer-stop-button cb-composer-cancel-button")
+                            ).props(f'unelevated round color=negative title="{stop_label}" aria-label="{stop_label}" data-task-id={latest_cancelable_task_id}').classes("cb-composer-stop-button cb-composer-cancel-button")
                         send_label = (
                             _tr(t, "ui.web.mobile.queue_message", "排队发送")
                             if latest_active_task_id
