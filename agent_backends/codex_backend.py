@@ -128,6 +128,10 @@ class _CodexAppServerClient:
         last_output_progress_at = 0.0
         last_reasoning_progress = ""
         last_reasoning_progress_at = 0.0
+        last_reasoning_item_id = ""
+        reasoning_activities: dict[str, str] = {}
+        last_reasoning_activity_at: dict[str, float] = {}
+        last_reasoning_activity_text: dict[str, str] = {}
         command_activities: dict[str, dict[str, object]] = {}
         last_command_output_at: dict[str, float] = {}
         context_left_percent: int | None = None
@@ -165,6 +169,19 @@ class _CodexAppServerClient:
             if not item_id or on_activity is None:
                 return
             on_activity(dict(activity))
+
+        def emit_reasoning_activity(item_id: str, text: str, *, force: bool = False) -> None:
+            cleaned = text.strip()
+            if not item_id or not cleaned or on_activity is None:
+                return
+            if last_reasoning_activity_text.get(item_id) == cleaned:
+                return
+            now = time.time()
+            if not force and now - last_reasoning_activity_at.get(item_id, 0.0) < PROGRESS_PUSH_INTERVAL_SECONDS:
+                return
+            last_reasoning_activity_at[item_id] = now
+            last_reasoning_activity_text[item_id] = cleaned
+            on_activity(self._reasoning_activity_payload(item_id, cleaned))
 
         def push_command_activity(item: dict[str, Any], *, at_ms: object = None) -> None:
             activity = self._command_activity_payload(item, at_ms=at_ms)
@@ -221,12 +238,21 @@ class _CodexAppServerClient:
             if method in {"item/reasoning/summaryTextDelta", "item/reasoning/textDelta"}:
                 delta = self._extract_delta(message)
                 if delta:
+                    reasoning_item_id = str(params.get("itemId") or params.get("item_id") or "reasoning").strip() or "reasoning"
+                    reasoning_activities[reasoning_item_id] = f"{reasoning_activities.get(reasoning_item_id, '')}{delta}"
+                    emit_reasoning_activity(reasoning_item_id, reasoning_activities[reasoning_item_id])
+                    if last_reasoning_item_id and reasoning_item_id != last_reasoning_item_id and pending_reasoning_delta:
+                        pending_reasoning_delta = f"{pending_reasoning_delta.rstrip()}\n\n"
+                    last_reasoning_item_id = reasoning_item_id
                     pending_reasoning_delta += delta
                     push_reasoning(pending_reasoning_delta)
             next_context_left = self._extract_context_left_percent(message)
             if next_context_left is not None:
                 context_left_percent = next_context_left
             if method == "turn/completed":
+                for reasoning_item_id, reasoning_text in reasoning_activities.items():
+                    emit_reasoning_activity(reasoning_item_id, reasoning_text, force=True)
+                push_reasoning(pending_reasoning_delta, force=True)
                 error = turn.get("error") if isinstance(turn, dict) else None
                 if error:
                     raise RuntimeError(self._extract_error_message(error))
@@ -235,7 +261,6 @@ class _CodexAppServerClient:
                     raise RuntimeError(f"Codex app-server turn {status}")
                 if not output.strip() and pending_answer_delta.strip():
                     output = pending_answer_delta.strip()
-                push_reasoning(pending_reasoning_delta, force=True)
                 push_live_output(output or pending_answer_delta, force=True)
                 return output, context_left_percent
         raise RuntimeError(f"timed out waiting for app-server turn: {turn_id}")
@@ -337,6 +362,17 @@ class _CodexAppServerClient:
         if isinstance(raw, str) and raw.strip():
             return raw.strip()
         return "\n".join(fragment.strip() for fragment in collect_text_fragments(item) if fragment.strip()).strip()
+
+    @classmethod
+    def _reasoning_activity_payload(cls, item_id: str, text: str, *, at_ms: object = None) -> dict[str, object]:
+        return {
+            "id": item_id,
+            "event": "codex_reasoning",
+            "type": "reasoning",
+            "at": cls._activity_timestamp(at_ms),
+            "detail": text.strip(),
+            "metadata": {},
+        }
 
     @classmethod
     def _command_activity_payload(cls, item: dict[str, Any], *, at_ms: object = None) -> dict[str, object]:
@@ -691,6 +727,10 @@ class CodexBackend(AgentBackend):
         pending_reasoning = ""
         last_reasoning = ""
         last_reasoning_at = 0.0
+        last_reasoning_item_id = ""
+        reasoning_activities: dict[str, str] = {}
+        last_reasoning_activity_at: dict[str, float] = {}
+        last_reasoning_activity_text: dict[str, str] = {}
         context_left_percent: int | None = None
         assert proc.stderr is not None
         stdout_events: queue.Queue[dict[str, object] | None] = queue.Queue()
@@ -760,7 +800,31 @@ class CodexBackend(AgentBackend):
             reasoning_update, reasoning_is_delta = self._extract_reasoning_update(event)
             if reasoning_update:
                 cleaned_reasoning = reasoning_update.strip()
+                reasoning_item_id = self._extract_reasoning_item_id(event)
+                if not reasoning_item_id:
+                    reasoning_item_id = "reasoning" if reasoning_is_delta else f"reasoning-{len(reasoning_activities) + 1}"
                 if reasoning_is_delta:
+                    reasoning_activities[reasoning_item_id] = f"{reasoning_activities.get(reasoning_item_id, '')}{reasoning_update}"
+                else:
+                    reasoning_activities[reasoning_item_id] = cleaned_reasoning
+                now = time.time()
+                if (
+                    context.on_activity is not None
+                    and last_reasoning_activity_text.get(reasoning_item_id) != reasoning_activities[reasoning_item_id].strip()
+                    and (not reasoning_is_delta or now - last_reasoning_activity_at.get(reasoning_item_id, 0.0) >= PROGRESS_PUSH_INTERVAL_SECONDS)
+                ):
+                    last_reasoning_activity_at[reasoning_item_id] = now
+                    last_reasoning_activity_text[reasoning_item_id] = reasoning_activities[reasoning_item_id].strip()
+                    context.on_activity(
+                        _CodexAppServerClient._reasoning_activity_payload(
+                            reasoning_item_id,
+                            reasoning_activities[reasoning_item_id],
+                        )
+                    )
+                if reasoning_is_delta:
+                    if last_reasoning_item_id and reasoning_item_id != last_reasoning_item_id and pending_reasoning:
+                        pending_reasoning = f"{pending_reasoning.rstrip()}\n\n"
+                    last_reasoning_item_id = reasoning_item_id
                     pending_reasoning += reasoning_update
                 elif not pending_reasoning:
                     pending_reasoning = cleaned_reasoning
@@ -808,6 +872,11 @@ class CodexBackend(AgentBackend):
                 context.on_progress(trailing_chunk)
         reasoning_callback = context.on_reasoning or context.on_progress
         trailing_reasoning = pending_reasoning.strip()
+        if context.on_activity is not None:
+            for reasoning_item_id, reasoning_text in reasoning_activities.items():
+                if last_reasoning_activity_text.get(reasoning_item_id) == reasoning_text.strip():
+                    continue
+                context.on_activity(_CodexAppServerClient._reasoning_activity_payload(reasoning_item_id, reasoning_text))
         if reasoning_callback is not None and trailing_reasoning and trailing_reasoning != last_reasoning:
             last_progress_perf_at = time.perf_counter()
             reasoning_callback(trailing_reasoning)
@@ -1023,6 +1092,7 @@ class CodexBackend(AgentBackend):
         normalized_type = item_type.replace("-", "_").replace(".", "_")
         event = {
             "commandExecution": "codex_command",
+            "mcpToolCall": "codex_tool_call",
             "toolCall": "codex_tool_call",
             "tool_call": "codex_tool_call",
             "function_call": "codex_tool_call",
@@ -1035,6 +1105,7 @@ class CodexBackend(AgentBackend):
         }.get(item_type) or {
             "commandexecution": "codex_command",
             "command_execution": "codex_command",
+            "mcptoolcall": "codex_tool_call",
             "toolcall": "codex_tool_call",
             "tool_call": "codex_tool_call",
             "todo": "codex_todo",
@@ -1044,7 +1115,8 @@ class CodexBackend(AgentBackend):
             "compaction": "codex_compaction",
             "error": "codex_error",
         }.get(normalized_type.lower(), "codex_item")
-        activity_type = "error" if event == "codex_error" else "info"
+        normalized_status = str(item.get("status") or "").replace("_", "").lower()
+        activity_type = "error" if event == "codex_error" or normalized_status in {"failed", "declined"} else "success" if normalized_status == "completed" else "info"
         detail = cls._app_server_activity_detail(item, item_type=item_type)
         metadata = cls._app_server_activity_metadata(item, item_type=item_type, item_id=item_id)
         if not detail and event == "codex_item" and not metadata:
@@ -1063,6 +1135,8 @@ class CodexBackend(AgentBackend):
         normalized_item_type = item_type.replace("-", "_").replace(".", "_").lower()
         if normalized_item_type in {"commandexecution", "command_execution"}:
             return str(item.get("command") or item_type).strip()
+        if normalized_item_type in {"mcptoolcall", "toolcall", "tool_call", "function_call"}:
+            return cls._app_server_tool_call_command(item)
         if isinstance(detail, dict) and normalized_item_type in {"toolcall", "tool_call", "function_call"}:
             detail_type = str(detail.get("type") or item.get("name") or "").strip()
             for key in ("command", "description", "text", "log", "message"):
@@ -1112,10 +1186,18 @@ class CodexBackend(AgentBackend):
         metadata: dict[str, str] = {"item_type": item_type}
         if item_id:
             metadata["item_id"] = item_id
-        for key in ("callId", "name", "status", "phase", "trigger", "preTokens", "command", "cwd", "exitCode", "durationMs", "source"):
+        for key in ("callId", "name", "server", "tool", "status", "phase", "trigger", "preTokens", "command", "cwd", "exitCode", "durationMs", "source"):
             value = item.get(key)
             if value is not None and str(value).strip():
                 metadata[key] = str(value).strip()
+        normalized_item_type = item_type.replace("-", "_").replace(".", "_").lower()
+        if normalized_item_type in {"mcptoolcall", "toolcall", "tool_call", "function_call"}:
+            command = cls._app_server_tool_call_command(item)
+            output = cls._app_server_tool_call_output(item)
+            if command:
+                metadata["command"] = command
+            if output:
+                metadata["output"] = output
         aggregated_output = item.get("aggregatedOutput")
         if isinstance(aggregated_output, str) and aggregated_output:
             metadata["output"] = aggregated_output[-COMMAND_OUTPUT_LIMIT:]
@@ -1132,6 +1214,49 @@ class CodexBackend(AgentBackend):
                 if cleaned_key and value is not None and cleaned_key not in {"log"}:
                     metadata[f"detail.{cleaned_key}"] = cls._compact_app_server_value(value, limit=220)
         return metadata
+
+    @classmethod
+    def _app_server_tool_call_command(cls, item: dict[str, Any]) -> str:
+        server = str(item.get("server") or item.get("name") or "").strip()
+        tool = str(item.get("tool") or "").strip()
+        label = ".".join(part for part in (server, tool) if part) or "tool"
+        arguments = item.get("arguments")
+        if not isinstance(arguments, dict):
+            detail = item.get("detail")
+            if isinstance(detail, dict):
+                detail_type = str(detail.get("type") or item.get("name") or label).strip() or label
+                for key in ("command", "description", "text", "message"):
+                    value = detail.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return f"{detail_type}: {value.strip()}"
+            compact = cls._compact_app_server_value(arguments, limit=4000) if arguments not in (None, "") else ""
+            return f"{label} {compact}".strip()
+        title = str(arguments.get("title") or "").strip()
+        header = f"{label} - {title}" if title else label
+        for key in ("cmd", "command", "code"):
+            value = arguments.get(key)
+            if isinstance(value, str) and value.strip():
+                return f"{header}\n{value.strip()}"[:8000]
+        compact = cls._compact_app_server_value(arguments, limit=4000)
+        return f"{header}\n{compact}" if compact and compact != "{}" else header
+
+    @staticmethod
+    def _app_server_tool_call_output(item: dict[str, Any]) -> str:
+        fragments = [fragment.strip() for fragment in collect_text_fragments(item.get("result")) if fragment.strip()]
+        detail = item.get("detail")
+        if isinstance(detail, dict):
+            for key in ("log", "output", "result"):
+                value = detail.get(key)
+                if isinstance(value, str) and value.strip():
+                    fragments.append(value.strip())
+        error = item.get("error")
+        if isinstance(error, str) and error.strip():
+            fragments.append(error.strip())
+        elif isinstance(error, dict):
+            message = str(error.get("message") or error.get("error") or "").strip()
+            if message:
+                fragments.append(message)
+        return "\n".join(fragments)[-COMMAND_OUTPUT_LIMIT:]
 
     @classmethod
     def _app_server_item_timestamp(cls, item: dict[str, Any]) -> str:
@@ -1275,6 +1400,23 @@ class CodexBackend(AgentBackend):
         if not isinstance(item, dict) or str(item.get("type") or "") != "command_execution":
             return {}
         return _CodexAppServerClient._command_activity_payload(item)
+
+    @staticmethod
+    def _extract_reasoning_item_id(value: object) -> str:
+        if not isinstance(value, dict):
+            return ""
+        params = value.get("params") if isinstance(value.get("params"), dict) else {}
+        item = value.get("item") if isinstance(value.get("item"), dict) else {}
+        if not item and isinstance(params.get("item"), dict):
+            item = params["item"]
+        return str(
+            params.get("itemId")
+            or params.get("item_id")
+            or item.get("id")
+            or item.get("itemId")
+            or value.get("item_id")
+            or ""
+        ).strip()
 
     @staticmethod
     def _extract_reasoning_update(value: object) -> tuple[str, bool]:

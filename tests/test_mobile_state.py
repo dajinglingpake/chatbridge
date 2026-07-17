@@ -25,6 +25,7 @@ from ui.mobile import (
     _decode_signed_local_image_path,
     _is_mobile_no_store_path,
     _mobile_codex_thread_payload,
+    _merge_codex_thread_local_timeline,
     _image_preview_payload,
     _select_mobile_tasks,
     _task_activity_items,
@@ -633,6 +634,135 @@ class MobileStateTests(unittest.TestCase):
         self.assertEqual("先检查状态", tasks[0]["reasoning_text"])
         self.assertEqual("", tasks[0]["live_output_text"])
         self.assertEqual("最终回答", tasks[0]["output"])
+        self.assertEqual(
+            ["codex_reasoning", "codex_tool_call"],
+            [item["event"] for item in tasks[0]["activity_items"]],
+        )
+        self.assertEqual("先检查状态", tasks[0]["activity_items"][0]["detail"])
+
+    def test_codex_history_merges_local_command_into_the_matching_turn(self) -> None:
+        history_tasks = [
+            {
+                "id": "history-1",
+                "prompt": "run status",
+                "output": "first result",
+                "created_at": "2026-07-17T01:00:00",
+                "activity_items": [{"id": "reasoning-old-1", "event": "codex_reasoning", "detail": "first reasoning"}],
+            },
+            {
+                "id": "history-2",
+                "prompt": "run status",
+                "output": "second result",
+                "created_at": "2026-07-17T02:00:00",
+                "activity_items": [{"id": "reasoning-old-2", "event": "codex_reasoning", "detail": "second reasoning"}],
+            },
+        ]
+        local_tasks = [
+            {
+                "id": "local-2",
+                "session_id": "thread-1",
+                "prompt": "run status",
+                "output": "second result",
+                "created_at": "2026-07-17T02:00:01",
+                "activity_items": [
+                    {
+                        "id": "command-2",
+                        "event": "codex_command",
+                        "detail": "git status --short",
+                        "metadata": {"command": "git status --short", "output": "clean"},
+                    }
+                ],
+            }
+        ]
+
+        merged = _merge_codex_thread_local_timeline(history_tasks, local_tasks, thread_id="thread-1")
+
+        self.assertEqual(["codex_reasoning"], [item["event"] for item in merged[0]["activity_items"]])
+        self.assertEqual(
+            ["codex_reasoning", "codex_command"],
+            [item["event"] for item in merged[1]["activity_items"]],
+        )
+        self.assertEqual("git status --short", merged[1]["activity_items"][1]["metadata"]["command"])
+
+    def test_codex_history_keeps_history_reasoning_when_adding_local_commands(self) -> None:
+        history_tasks = [
+            {
+                "id": "history-1",
+                "prompt": "inspect",
+                "output": "done",
+                "created_at": "2026-07-17T02:00:00",
+                "activity_items": [{"id": "history-reasoning", "event": "codex_reasoning", "detail": "combined reasoning"}],
+            }
+        ]
+        local_timeline = [
+            {"id": "reasoning-1", "event": "codex_reasoning", "detail": "before command"},
+            {"id": "command-1", "event": "codex_command", "detail": "pytest -q", "metadata": {"command": "pytest -q"}},
+            {"id": "reasoning-2", "event": "codex_reasoning", "detail": "after command"},
+        ]
+        local_tasks = [
+            {
+                "id": "local-1",
+                "session_id": "thread-1",
+                "prompt": "inspect",
+                "output": "done",
+                "created_at": "2026-07-17T02:00:01",
+                "activity_items": local_timeline,
+            }
+        ]
+
+        merged = _merge_codex_thread_local_timeline(history_tasks, local_tasks, thread_id="thread-1")
+
+        self.assertEqual(
+            ["codex_reasoning", "codex_command"],
+            [item["event"] for item in merged[0]["activity_items"]],
+        )
+        self.assertEqual(["history-reasoning", "command-1"], [item["id"] for item in merged[0]["activity_items"]])
+
+    def test_codex_history_inserts_local_command_without_reordering_tool_calls(self) -> None:
+        history_tasks = [
+            {
+                "id": "history-1",
+                "prompt": "inspect",
+                "output": "done",
+                "created_at": "2026-07-17T02:00:00",
+                "activity_items": [
+                    {"id": "reasoning-1", "event": "codex_reasoning", "detail": "before command"},
+                    {
+                        "id": "tool-1",
+                        "event": "codex_tool_call",
+                        "detail": "node_repl.js - inspect state",
+                        "metadata": {"command": "node_repl.js - inspect state", "status": "completed"},
+                    },
+                    {"id": "reasoning-2", "event": "codex_reasoning", "detail": "after command"},
+                ],
+            }
+        ]
+        local_tasks = [
+            {
+                "id": "local-1",
+                "session_id": "thread-1",
+                "prompt": "inspect",
+                "output": "done",
+                "created_at": "2026-07-17T02:00:01",
+                "activity_items": [
+                    {"id": "reasoning-1", "event": "codex_reasoning", "detail": "before command"},
+                    {
+                        "id": "command-1",
+                        "event": "codex_command",
+                        "detail": "git status --short",
+                        "metadata": {"command": "git status --short", "status": "completed"},
+                    },
+                    {"id": "reasoning-2", "event": "codex_reasoning", "detail": "after command"},
+                ],
+            }
+        ]
+
+        merged = _merge_codex_thread_local_timeline(history_tasks, local_tasks, thread_id="thread-1")
+
+        self.assertEqual(
+            ["reasoning-1", "tool-1", "command-1", "reasoning-2"],
+            [item["id"] for item in merged[0]["activity_items"]],
+        )
 
     def test_codex_thread_history_keeps_supplemental_user_messages_separate(self) -> None:
         thread = {
@@ -1206,6 +1336,45 @@ class MobileStateTests(unittest.TestCase):
         read_thread.assert_not_called()
         self.assertEqual(1, payloads.call_count)
         self.assertIn(("codex:thread-1", "1"), first[1])
+
+    def test_codex_thread_signature_tracks_related_local_command_updates(self) -> None:
+        mobile._CODEX_THREAD_DETAIL_CACHE.clear()
+        mobile._CODEX_THREAD_DETAIL_INFLIGHT.clear()
+        thread = {
+            "id": "thread-1",
+            "updated_at": "2026-07-04T20:00:00",
+            "messages": [
+                {"turn_id": "turn-1", "role": "user", "text": "prompt"},
+                {"turn_id": "turn-1", "role": "assistant", "text": "answer"},
+            ],
+        }
+        base_task = vars(_signature_task("local-command", "qq-private-1"))
+        base_task.update(
+            {
+                "session_id": "thread-1",
+                "prompt": "prompt",
+                "activity_items": [{"id": "command-1", "event": "codex_command", "detail": "pytest -q"}],
+            }
+        )
+        updated_task = {**base_task, "progress_seq": 2}
+
+        try:
+            mobile._CODEX_THREAD_DETAIL_CACHE["thread-1"] = {
+                "loaded_at": mobile.time.monotonic(),
+                "thread": thread,
+                "signature_parts_by_limit": {},
+            }
+            with patch(
+                "ui.mobile._load_raw_hub_state",
+                side_effect=[{"tasks": [base_task], "agents": []}, {"tasks": [updated_task], "agents": []}],
+            ):
+                first = build_stream_signature_snapshot(selected_session_name="codex:thread-1", task_limit=1, session_task_limit=30)
+                second = build_stream_signature_snapshot(selected_session_name="codex:thread-1", task_limit=1, session_task_limit=30)
+        finally:
+            mobile._CODEX_THREAD_DETAIL_CACHE.clear()
+            mobile._CODEX_THREAD_DETAIL_INFLIGHT.clear()
+
+        self.assertNotEqual(first, second)
 
     def test_stream_state_reuses_cached_codex_thread_payloads(self) -> None:
         mobile._CODEX_THREAD_DETAIL_CACHE.clear()

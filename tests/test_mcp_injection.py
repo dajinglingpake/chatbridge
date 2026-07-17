@@ -72,6 +72,18 @@ class McpServerInjectionTests(unittest.TestCase):
         client = _CodexAppServerClient("codex", creationflags=0, start_new_session=False, slim_exec=True)
         client._messages.put(
             {
+                "method": "item/reasoning/summaryTextDelta",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": "reasoning-1",
+                    "summaryIndex": 0,
+                    "delta": "先检查项目结构",
+                },
+            }
+        )
+        client._messages.put(
+            {
                 "method": "item/started",
                 "params": {
                     "threadId": "thread-1",
@@ -126,9 +138,9 @@ class McpServerInjectionTests(unittest.TestCase):
                 "params": {
                     "threadId": "thread-1",
                     "turnId": "turn-1",
-                    "itemId": "reasoning-1",
+                    "itemId": "reasoning-2",
                     "summaryIndex": 0,
-                    "delta": "先检查项目结构",
+                    "delta": "完成测试结果核对",
                 },
             }
         )
@@ -190,14 +202,18 @@ class McpServerInjectionTests(unittest.TestCase):
 
         self.assertEqual("最终回答", output)
         self.assertEqual(75, context_left_percent)
-        self.assertEqual(["先检查项目结构"], reasoning)
+        self.assertEqual(["先检查项目结构", "先检查项目结构\n\n完成测试结果核对"], reasoning)
         self.assertEqual(["最终回答片段", "最终回答"], live_output)
-        self.assertEqual(3, len(activities))
-        self.assertEqual("codex_command", activities[-1]["event"])
-        self.assertEqual("success", activities[-1]["type"])
-        self.assertEqual("pytest -q", activities[-1]["detail"])
-        self.assertEqual("623 passed\n", activities[-1]["metadata"]["output"])
-        self.assertEqual(0, activities[-1]["metadata"]["exit_code"])
+        self.assertEqual(
+            ["codex_reasoning", "codex_command", "codex_command", "codex_command", "codex_reasoning"],
+            [activity["event"] for activity in activities],
+        )
+        self.assertEqual(["reasoning-1", "reasoning-2"], [activity["id"] for activity in activities if activity["event"] == "codex_reasoning"])
+        command_activity = [activity for activity in activities if activity["event"] == "codex_command"][-1]
+        self.assertEqual("success", command_activity["type"])
+        self.assertEqual("pytest -q", command_activity["detail"])
+        self.assertEqual("623 passed\n", command_activity["metadata"]["output"])
+        self.assertEqual(0, command_activity["metadata"]["exit_code"])
 
     def test_codex_app_server_normalizes_threads_and_reasoning_history(self) -> None:
         backend = CodexBackend()
@@ -269,6 +285,34 @@ class McpServerInjectionTests(unittest.TestCase):
         self.assertEqual(messages[2]["at"], activities[0]["at"])
         self.assertEqual("shell", activities[0]["metadata"]["name"])
         self.assertEqual("auto", activities[2]["metadata"]["trigger"])
+
+    def test_codex_app_server_normalizes_mcp_tool_calls_for_history(self) -> None:
+        message = CodexBackend._normalize_app_server_item(
+            {
+                "type": "mcpToolCall",
+                "id": "exec-1",
+                "server": "node_repl",
+                "tool": "js",
+                "status": "completed",
+                "arguments": {"title": "运行测试", "code": "run_tests()"},
+                "result": {"content": [{"type": "text", "text": "633 tests passed"}]},
+                "durationMs": 1200,
+            },
+            turn_id="turn-1",
+            turn_order=1,
+            item_order=3,
+            fallback_at="2026-07-17T02:00:00",
+        )
+
+        self.assertIsNotNone(message)
+        assert message is not None
+        self.assertEqual("activity", message["role"])
+        self.assertEqual("codex_tool_call", message["activity"]["event"])
+        self.assertEqual("success", message["activity"]["type"])
+        self.assertEqual("node_repl.js - 运行测试\nrun_tests()", message["activity"]["detail"])
+        self.assertEqual("node_repl.js - 运行测试\nrun_tests()", message["activity"]["metadata"]["command"])
+        self.assertEqual("633 tests passed", message["activity"]["metadata"]["output"])
+        self.assertEqual("1200", message["activity"]["metadata"]["durationMs"])
 
     def test_codex_app_server_normalizes_command_execution_history(self) -> None:
         activity = CodexBackend._app_server_activity_payload(
@@ -1547,6 +1591,7 @@ class McpServerCodexBackendTests(unittest.TestCase):
                 prompt_prefix="",
             )
             reasoning: list[str] = []
+            activities: list[dict[str, object]] = []
             context = BackendContext(
                 codex_command="codex",
                 claude_command="claude",
@@ -1555,6 +1600,7 @@ class McpServerCodexBackendTests(unittest.TestCase):
                 creationflags=0,
                 hub_task_timeout_seconds=1,
                 on_reasoning=reasoning.append,
+                on_activity=activities.append,
             )
             backend = CodexBackend()
 
@@ -1603,6 +1649,8 @@ class McpServerCodexBackendTests(unittest.TestCase):
         self.assertEqual("final output", result["output"])
         self.assertEqual("thread-active", result["session_id"])
         self.assertEqual(["inspect the current state"], reasoning)
+        self.assertEqual(["codex_reasoning"], [activity["event"] for activity in activities])
+        self.assertEqual("inspect the current state", activities[0]["detail"])
         terminate.assert_not_called()
 
     def test_codex_backend_extracts_json_rpc_delta_progress(self) -> None:

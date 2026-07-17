@@ -323,7 +323,16 @@ def build_stream_signature_snapshot(
         selected_limit = _safe_limit(session_task_limit, MOBILE_SESSION_TASK_LIMIT)
         codex_task_parts, codex_turn_count = _codex_thread_signature_parts_cached(selected_codex_thread_id, limit=selected_limit)
         window.session_task_counts[codex_thread_session_name(selected_codex_thread_id)] = codex_turn_count
-        task_parts = list(codex_task_parts) + task_parts
+        raw_tasks = raw_state.get("tasks") if isinstance(raw_state.get("tasks"), list) else []
+        window_task_ids = {_raw_clean_text(task, "id") for task in window.tasks}
+        related_task_parts = [
+            _raw_hub_task_signature_part(task)
+            for task in raw_tasks
+            if isinstance(task, dict)
+            and str(task.get("session_id") or "").strip() == selected_codex_thread_id
+            and _raw_clean_text(task, "id") not in window_task_ids
+        ]
+        task_parts = list(codex_task_parts) + related_task_parts + task_parts
 
     selected_session = selected_session_name.strip()
     if selected_session:
@@ -1924,6 +1933,129 @@ def _select_mobile_tasks(
         merged_tasks.append(task)
     return merged_tasks
 
+
+def _merge_codex_thread_local_timeline(
+    history_tasks: list[dict[str, object]],
+    local_tasks: list[object],
+    *,
+    thread_id: str,
+) -> list[dict[str, object]]:
+    cleaned_thread_id = thread_id.strip()
+    merged = _copy_codex_thread_task_payloads(history_tasks)
+    if not cleaned_thread_id or not merged:
+        return merged
+
+    prompt_candidates: dict[str, list[int]] = {}
+    for index, task in enumerate(merged):
+        prompt = str(task.get("prompt") or "").strip()
+        if prompt:
+            prompt_candidates.setdefault(prompt, []).append(index)
+
+    claimed_targets: set[int] = set()
+    for local_task in local_tasks:
+        value = local_task.get if isinstance(local_task, dict) else lambda key, default=None: getattr(local_task, key, default)
+        if str(value("session_id") or "").strip() != cleaned_thread_id:
+            continue
+        prompt = str(value("prompt") or "").strip()
+        candidates = [index for index in prompt_candidates.get(prompt, []) if index not in claimed_targets]
+        raw_activity_items = value("activity_items", [])
+        local_timeline = [
+            dict(item)
+            for item in raw_activity_items
+            if isinstance(item, dict) and str(item.get("event") or "") in {"codex_reasoning", "codex_command"}
+        ] if isinstance(raw_activity_items, list) else []
+        if not candidates or not any(str(item.get("event") or "") == "codex_command" for item in local_timeline):
+            continue
+
+        local_output = str(value("output") or "").strip()
+        output_matches = [index for index in candidates if local_output and str(merged[index].get("output") or "").strip() == local_output]
+        if output_matches:
+            candidates = output_matches
+        local_time_key = _stream_time_sort_key(value("created_at"))
+        if local_time_key[0] == 0:
+            target_index = min(
+                candidates,
+                key=lambda index: abs(_stream_time_sort_key(merged[index].get("created_at"))[1] - local_time_key[1])
+                if _stream_time_sort_key(merged[index].get("created_at"))[0] == 0
+                else float("inf"),
+            )
+        else:
+            target_index = candidates[-1]
+        claimed_targets.add(target_index)
+
+        existing = [dict(item) for item in merged[target_index].get("activity_items", []) if isinstance(item, dict)]
+        existing_ids = {
+            str(item.get("id") or ""): index
+            for index, item in enumerate(existing)
+            if str(item.get("id") or "")
+        }
+        for local_item in local_timeline:
+            item_id = str(local_item.get("id") or "")
+            existing_index = existing_ids.get(item_id)
+            if existing_index is None:
+                continue
+            existing_item = existing[existing_index]
+            if str(existing_item.get("event") or "") != str(local_item.get("event") or ""):
+                continue
+            existing[existing_index] = {**existing_item, **local_item}
+
+        seen_commands = {
+            (
+                str(item.get("id") or ""),
+                str(item.get("detail") or ""),
+                str((item.get("metadata") or {}).get("command") or "") if isinstance(item.get("metadata"), dict) else "",
+            )
+            for item in existing
+            if str(item.get("event") or "") == "codex_command"
+        }
+        for local_index, item in enumerate(local_timeline):
+            if str(item.get("event") or "") != "codex_command":
+                continue
+            identity = (
+                str(item.get("id") or ""),
+                str(item.get("detail") or ""),
+                str((item.get("metadata") or {}).get("command") or "") if isinstance(item.get("metadata"), dict) else "",
+            )
+            if identity in seen_commands:
+                continue
+
+            existing_ids = {
+                str(existing_item.get("id") or ""): index
+                for index, existing_item in enumerate(existing)
+                if str(existing_item.get("id") or "")
+            }
+            next_reasoning_index = next(
+                (
+                    existing_ids[item_id]
+                    for later_item in local_timeline[local_index + 1:]
+                    if str(later_item.get("event") or "") == "codex_reasoning"
+                    and (item_id := str(later_item.get("id") or "")) in existing_ids
+                ),
+                len(existing),
+            )
+            previous_reasoning_index = next(
+                (
+                    existing_ids[item_id]
+                    for earlier_item in reversed(local_timeline[:local_index])
+                    if str(earlier_item.get("event") or "") == "codex_reasoning"
+                    and (item_id := str(earlier_item.get("id") or "")) in existing_ids
+                ),
+                -1,
+            )
+            insert_at = next_reasoning_index
+            command_time_key = _stream_time_sort_key(item.get("at"))
+            if command_time_key[0] == 0:
+                for existing_index in range(previous_reasoning_index + 1, next_reasoning_index):
+                    existing_time_key = _stream_time_sort_key(existing[existing_index].get("at"))
+                    if existing_time_key[0] == 0 and existing_time_key[1] > command_time_key[1]:
+                        insert_at = existing_index
+                        break
+            existing.insert(insert_at, item)
+            seen_commands.add(identity)
+        merged[target_index]["activity_items"] = existing
+
+    return merged
+
 def _build_mobile_state(
     *,
     selected_session_name: str = "",
@@ -1960,6 +2092,12 @@ def _build_mobile_state(
             selected_codex_thread = _load_codex_thread_cached(selected_codex_thread_id)
             selected_limit = _safe_limit(session_task_limit, MOBILE_SESSION_TASK_LIMIT)
             codex_thread_tasks = _codex_thread_task_payloads_cached(selected_codex_thread_id, selected_codex_thread, limit=selected_limit)
+            raw_tasks = raw_state.get("tasks") if isinstance(raw_state.get("tasks"), list) else []
+            codex_thread_tasks = _merge_codex_thread_local_timeline(
+                codex_thread_tasks,
+                [task for task in raw_tasks if isinstance(task, dict)],
+                thread_id=selected_codex_thread_id,
+            )
             window.session_task_counts[codex_thread_session_name(selected_codex_thread_id)] = _codex_thread_turn_count_cached(selected_codex_thread_id, selected_codex_thread)
             task_payloads = codex_thread_tasks + task_payloads
         return {
@@ -2017,6 +2155,11 @@ def _build_mobile_state(
         selected_codex_thread = _load_codex_thread_cached(selected_codex_thread_id)
         selected_limit = _safe_limit(session_task_limit, MOBILE_SESSION_TASK_LIMIT)
         codex_thread_tasks = _codex_thread_task_payloads_cached(selected_codex_thread_id, selected_codex_thread, limit=selected_limit)
+        codex_thread_tasks = _merge_codex_thread_local_timeline(
+            codex_thread_tasks,
+            list(dashboard.hub_state.tasks),
+            thread_id=selected_codex_thread_id,
+        )
         window.session_task_counts[codex_thread_session_name(selected_codex_thread_id)] = _codex_thread_turn_count_cached(selected_codex_thread_id, selected_codex_thread)
     agents = [
         {
@@ -2129,6 +2272,12 @@ def _build_stream_state(
         selected_codex_thread = _load_codex_thread_cached(selected_codex_thread_id)
         selected_limit = _safe_limit(session_task_limit, MOBILE_SESSION_TASK_LIMIT)
         codex_thread_tasks = _codex_thread_task_payloads_cached(selected_codex_thread_id, selected_codex_thread, limit=selected_limit)
+        raw_tasks = raw_state.get("tasks") if isinstance(raw_state.get("tasks"), list) else []
+        codex_thread_tasks = _merge_codex_thread_local_timeline(
+            codex_thread_tasks,
+            [task for task in raw_tasks if isinstance(task, dict)],
+            thread_id=selected_codex_thread_id,
+        )
         window.session_task_counts[codex_thread_session_name(selected_codex_thread_id)] = _codex_thread_turn_count_cached(selected_codex_thread_id, selected_codex_thread)
         task_payloads = codex_thread_tasks + task_payloads
 
@@ -2380,6 +2529,7 @@ def _codex_message_activity_item(message: dict[str, object], *, fallback_at: str
         if str(key).strip() and str(value).strip()
     }
     return {
+        "id": str(message.get("id") or metadata.get("item_id") or "").strip(),
         "event": event,
         "type": str(activity.get("type") or "info").strip() or "info",
         "at": at,
@@ -2472,12 +2622,12 @@ def _codex_message_at(message: dict[str, object]) -> str:
 
 def _codex_message_sort_key(index: int, message: dict[str, object], turn_order_lookup: dict[str, int]) -> tuple[int, int, str, int, int]:
     turn_id = str(message.get("turn_id") or message.get("id") or "").strip()
-    at = _codex_message_at(message) or _codex_uuid_v7_time(turn_id)
+    item_order = _codex_message_int(message.get("item_order"))
     return (
         turn_order_lookup.get(turn_id, 0),
-        0 if at else 1,
-        at,
-        _codex_message_int(message.get("item_order")),
+        0 if item_order > 0 else 1,
+        "" if item_order > 0 else f"{index:08d}",
+        item_order,
         index,
     )
 
@@ -2629,8 +2779,21 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
             display_turn["created_at"] = fallback_at
         if not display_turn["message_id"]:
             display_turn["message_id"] = str(message.get("id") or "").strip()
-        if role in {"assistant", "reasoning"} and text:
-            display_turn[role].append(text)
+        if role == "assistant" and text:
+            display_turn["assistant"].append(text)
+        elif role == "reasoning" and text:
+            display_turn["reasoning"].append(text)
+            reasoning_id = str(message.get("id") or "").strip() or f"reasoning-{len(display_turn['activity']) + 1}"
+            display_turn["activity"].append(
+                {
+                    "id": reasoning_id,
+                    "event": "codex_reasoning",
+                    "type": "reasoning",
+                    "at": fallback_at,
+                    "detail": text,
+                    "metadata": {},
+                }
+            )
         elif role == "activity":
             activity = _codex_message_activity_item(message, fallback_at=fallback_at)
             if activity is not None:

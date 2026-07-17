@@ -1779,6 +1779,225 @@ class StreamComposerTests(unittest.TestCase):
         self.assertEqual(["INITIAL OUTPUT MARKER " + ("old output " * 30) + "latest output: collecting final tests..."], command_outputs)
         self.assertEqual(["正在运行命令"], command_labels)
 
+    def test_reasoning_and_commands_follow_their_original_timeline(self) -> None:
+        ui = FakeUI()
+        first_reasoning = "第一阶段：检查项目结构。" + ("继续分析结构细节。" * 16)
+        second_reasoning = "第二阶段：命令结束后核对结果。" + ("继续分析测试结果。" * 16)
+        mobile_state = {
+            "counts": {"running": 1, "queued": 0},
+            "agents": [{"id": "codex", "name": "Codex", "backend": "codex"}],
+            "tasks": [
+                {
+                    "id": "task-timeline",
+                    "agent_id": "codex",
+                    "backend": "codex",
+                    "session_name": "focus",
+                    "status": "running",
+                    "created_at": "2026-07-17T05:19:00",
+                    "prompt": "inspect and test",
+                    "reasoning_text": f"{first_reasoning}\n\n{second_reasoning}",
+                    "activity_items": [
+                        {
+                            "id": "reasoning-1",
+                            "event": "codex_reasoning",
+                            "type": "reasoning",
+                            "detail": first_reasoning,
+                            "metadata": {},
+                        },
+                        {
+                            "id": "command-1",
+                            "event": "codex_command",
+                            "type": "success",
+                            "detail": "pytest -q",
+                            "metadata": {"command": "pytest -q", "status": "completed", "output": "629 passed", "exit_code": 0},
+                        },
+                        {
+                            "id": "reasoning-2",
+                            "event": "codex_reasoning",
+                            "type": "reasoning",
+                            "detail": second_reasoning,
+                            "metadata": {},
+                        },
+                    ],
+                }
+            ],
+            "session_task_counts": {"focus": 1},
+        }
+
+        render_mobile_stream_section(ui, _translator, mobile_state, "focus", [], _noop, _noop, _noop, _noop, _noop, _noop, _noop)
+
+        timeline_cards = [
+            item
+            for item in ui.elements
+            if "cb-stream-reasoning" in item.class_text.split() or "cb-stream-command" in item.class_text.split()
+        ]
+        reasoning_bodies = [item.text for item in ui.elements if "cb-stream-reasoning-body" in item.class_text.split()]
+
+        self.assertEqual(
+            ["reasoning", "command", "reasoning"],
+            ["reasoning" if "cb-stream-reasoning" in item.class_text.split() else "command" for item in timeline_cards],
+        )
+        self.assertEqual([first_reasoning, second_reasoning], reasoning_bodies)
+        self.assertIn("data-reasoning-key=task-timeline%3Areasoning-1", timeline_cards[0].props_text)
+        self.assertIn("data-command-key=task-timeline%3Acommand-1", timeline_cards[1].props_text)
+        self.assertIn("data-reasoning-key=task-timeline%3Areasoning-2", timeline_cards[2].props_text)
+
+    def test_consecutive_reasoning_items_merge_until_the_next_tool_boundary(self) -> None:
+        ui = FakeUI()
+        first_reasoning = "先规划检查范围。" + ("继续确认项目边界。" * 12)
+        second_reasoning = "再确定读取顺序。" + ("继续安排读取步骤。" * 12)
+        third_reasoning = "根据结果检查差异。" + ("继续核对实际结果。" * 12)
+        fourth_reasoning = "最后准备回答。" + ("继续整理结论内容。" * 12)
+        mobile_state = {
+            "counts": {"running": 0, "queued": 0},
+            "agents": [{"id": "codex", "name": "Codex", "backend": "codex"}],
+            "tasks": [
+                {
+                    "id": "task-grouped-reasoning",
+                    "agent_id": "codex",
+                    "backend": "codex",
+                    "source": "codex-app-server",
+                    "session_name": "codex:thread-1",
+                    "status": "succeeded",
+                    "created_at": "2026-07-17T05:19:00",
+                    "prompt": "inspect",
+                    "output": "done",
+                    "activity_items": [
+                        {"id": "reasoning-1", "event": "codex_reasoning", "detail": first_reasoning, "metadata": {}},
+                        {"id": "reasoning-2", "event": "codex_reasoning", "detail": second_reasoning, "metadata": {}},
+                        {
+                            "id": "tool-1",
+                            "event": "codex_tool_call",
+                            "type": "success",
+                            "detail": "node_repl.js - 读取项目",
+                            "metadata": {"command": "node_repl.js - 读取项目", "status": "completed", "output": "ready"},
+                        },
+                        {"id": "reasoning-3", "event": "codex_reasoning", "detail": third_reasoning, "metadata": {}},
+                        {"id": "reasoning-4", "event": "codex_reasoning", "detail": fourth_reasoning, "metadata": {}},
+                    ],
+                }
+            ],
+            "session_task_counts": {"codex:thread-1": 1},
+        }
+
+        render_mobile_stream_section(
+            ui,
+            _translator,
+            mobile_state,
+            "codex:thread-1",
+            [],
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+        )
+
+        timeline_cards = [
+            item
+            for item in ui.elements
+            if "cb-stream-reasoning" in item.class_text.split() or "cb-stream-command" in item.class_text.split()
+        ]
+        reasoning_bodies = [item.text for item in ui.elements if "cb-stream-reasoning-body" in item.class_text.split()]
+
+        self.assertEqual(
+            ["reasoning", "tool", "reasoning"],
+            [
+                "reasoning"
+                if "cb-stream-reasoning" in item.class_text.split()
+                else "tool"
+                if "cb-stream-command-tool" in item.class_text.split()
+                else "command"
+                for item in timeline_cards
+            ],
+        )
+        self.assertEqual(
+            [f"{first_reasoning}\n\n{second_reasoning}", f"{third_reasoning}\n\n{fourth_reasoning}"],
+            reasoning_bodies,
+        )
+        self.assertIn("data-reasoning-key=task-grouped-reasoning%3Areasoning-1", timeline_cards[0].props_text)
+        self.assertIn("data-command-key=task-grouped-reasoning%3Atool-1", timeline_cards[1].props_text)
+        self.assertIn("data-reasoning-key=task-grouped-reasoning%3Areasoning-3", timeline_cards[2].props_text)
+
+    def test_historical_tool_call_is_rendered_in_the_original_timeline(self) -> None:
+        ui = FakeUI()
+        mobile_state = {
+            "counts": {"running": 0, "queued": 0},
+            "agents": [{"id": "codex", "name": "Codex", "backend": "codex"}],
+            "tasks": [
+                {
+                    "id": "task-tool-timeline",
+                    "agent_id": "codex",
+                    "backend": "codex",
+                    "source": "codex-app-server",
+                    "session_name": "codex:thread-1",
+                    "status": "succeeded",
+                    "created_at": "2026-07-17T05:19:00",
+                    "prompt": "inspect and test",
+                    "output": "done",
+                    "activity_items": [
+                        {"id": "reasoning-1", "event": "codex_reasoning", "detail": "先读取项目状态", "metadata": {}},
+                        {
+                            "id": "tool-1",
+                            "event": "codex_tool_call",
+                            "type": "success",
+                            "detail": "node_repl.js - 读取项目入口文档\ninspect_project()",
+                            "metadata": {
+                                "command": "node_repl.js - 读取项目入口文档\ninspect_project()",
+                                "status": "completed",
+                                "output": "project ready",
+                                "durationMs": "34601",
+                            },
+                        },
+                        {"id": "reasoning-2", "event": "codex_reasoning", "detail": "再核对工具结果", "metadata": {}},
+                    ],
+                }
+            ],
+            "session_task_counts": {"codex:thread-1": 1},
+        }
+
+        render_mobile_stream_section(
+            ui,
+            _translator,
+            mobile_state,
+            "codex:thread-1",
+            [],
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+        )
+
+        timeline_cards = [
+            item
+            for item in ui.elements
+            if "cb-stream-reasoning" in item.class_text.split() or "cb-stream-command" in item.class_text.split()
+        ]
+        command_labels = [item.text for item in ui.elements if "cb-stream-command-label" in item.class_text.split()]
+        section_labels = [item.text for item in ui.elements if "cb-stream-command-section-label" in item.class_text.split()]
+        command_outputs = [item.text for item in ui.elements if "cb-stream-command-output" in item.class_text.split()]
+
+        self.assertEqual(
+            ["reasoning", "tool", "reasoning"],
+            [
+                "reasoning"
+                if "cb-stream-reasoning" in item.class_text.split()
+                else "tool"
+                if "cb-stream-command-tool" in item.class_text.split()
+                else "command"
+                for item in timeline_cards
+            ],
+        )
+        self.assertEqual(["已运行工具"], command_labels)
+        self.assertEqual(["工具调用", "结果"], section_labels)
+        self.assertEqual(["project ready"], command_outputs)
+        self.assertIn("data-command-key=task-tool-timeline%3Atool-1", timeline_cards[1].props_text)
+
     def test_streaming_previews_are_bottom_aligned(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")
 

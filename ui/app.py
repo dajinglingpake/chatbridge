@@ -1602,10 +1602,13 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             from { opacity: 0; transform: translateY(-0.25rem); }
             to { opacity: 1; transform: translateY(0); }
         }
-        .cb-stream-command-log {
+        .cb-stream-timeline {
             display: grid;
             gap: 0.5rem;
             margin-bottom: 0.75rem;
+        }
+        .cb-stream-timeline .cb-stream-reasoning {
+            margin-bottom: 0;
         }
         .cb-stream-command {
             overflow: hidden;
@@ -1657,6 +1660,9 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         }
         .cb-stream-command-status-icon::before {
             content: "terminal";
+        }
+        .cb-stream-command-tool .cb-stream-command-status-icon::before {
+            content: "build";
         }
         .cb-stream-command-running .cb-stream-command-status-icon {
             animation: cb-command-running 1.25s ease-in-out infinite;

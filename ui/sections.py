@@ -1092,41 +1092,82 @@ def _stream_activity_items(value: object) -> list[dict[str, object]]:
     return items
 
 
-def _stream_command_items(value: object, *, task_status: str = "") -> list[dict[str, object]]:
-    if not isinstance(value, list):
-        return []
+def _stream_command_item(item: dict[str, object], *, index: int, terminal_task: bool) -> dict[str, object] | None:
+    event = str(item.get("event") or "")
+    if event not in {"codex_command", "codex_tool_call"}:
+        return None
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    command = str(metadata.get("command") or item.get("detail") or "").strip()
+    if not command:
+        return None
+    raw_status = str(metadata.get("status") or "inProgress").replace("_", "").lower()
+    status = (
+        "running"
+        if raw_status in {"inprogress", "pending", "running"}
+        else "failed"
+        if raw_status in {"declined", "error", "failed"}
+        else "interrupted"
+        if raw_status in {"aborted", "cancelled", "canceled", "interrupted"}
+        else "completed"
+    )
+    exit_code = metadata.get("exit_code") if "exit_code" in metadata else metadata.get("exitCode")
+    if str(exit_code or "").lstrip("-").isdigit() and int(str(exit_code)) != 0:
+        status = "failed"
+    if terminal_task and status == "running":
+        status = "interrupted"
+    return {
+        "id": str(item.get("id") or f"command-{index + 1}"),
+        "activity_kind": "tool" if event == "codex_tool_call" else "command",
+        "command": command,
+        "cwd": str(metadata.get("cwd") or "").strip(),
+        "status": status,
+        "output": str(metadata.get("output") or metadata.get("aggregatedOutput") or "")[-12000:],
+        "exit_code": "" if exit_code is None else str(exit_code),
+        "duration_ms": str(metadata.get("duration_ms") or metadata.get("durationMs") or "").strip(),
+        "at": str(item.get("at") or "").strip(),
+    }
+
+
+def _stream_timeline_items(value: object, *, reasoning_text: str, task_status: str = "") -> list[dict[str, object]]:
     terminal_task = task_status in {"succeeded", "failed", "canceled", "unknown_after_restart"}
-    items: list[dict[str, object]] = []
-    for index, item in enumerate(value):
-        if not isinstance(item, dict) or str(item.get("event") or "") != "codex_command":
-            continue
-        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-        command = str(metadata.get("command") or item.get("detail") or "").strip()
-        if not command:
-            continue
-        raw_status = str(metadata.get("status") or "inProgress").replace("_", "").lower()
-        status = "running" if raw_status in {"inprogress", "running"} else "failed" if raw_status in {"failed", "declined"} else "completed"
-        exit_code = metadata.get("exit_code") if "exit_code" in metadata else metadata.get("exitCode")
-        if str(exit_code or "").lstrip("-").isdigit() and int(str(exit_code)) != 0:
-            status = "failed"
-        if terminal_task and status == "running":
-            status = "interrupted"
-        items.append(
-            {
-                "id": str(item.get("id") or f"command-{index + 1}"),
-                "command": command,
-                "cwd": str(metadata.get("cwd") or "").strip(),
-                "status": status,
-                "output": str(metadata.get("output") or metadata.get("aggregatedOutput") or "")[-12000:],
-                "exit_code": "" if exit_code is None else str(exit_code),
-                "duration_ms": str(metadata.get("duration_ms") or metadata.get("durationMs") or "").strip(),
-                "at": str(item.get("at") or "").strip(),
-            }
-        )
-    return items[-24:]
+    timeline: list[dict[str, object]] = []
+    has_explicit_reasoning = False
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("event") or "") == "codex_reasoning":
+                metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+                text = _stream_text(metadata.get("text") or item.get("detail"), limit=12000)
+                if text:
+                    has_explicit_reasoning = True
+                    if timeline and timeline[-1].get("kind") == "reasoning":
+                        timeline[-1]["text"] = f"{str(timeline[-1].get('text') or '').rstrip()}\n\n{text.lstrip()}"
+                    else:
+                        timeline.append(
+                            {
+                                "kind": "reasoning",
+                                "id": str(item.get("id") or f"reasoning-{index + 1}"),
+                                "text": text,
+                            }
+                        )
+                continue
+            command_item = _stream_command_item(item, index=index, terminal_task=terminal_task)
+            if command_item is not None:
+                timeline.append({"kind": "command", "item": command_item})
+    if reasoning_text and not has_explicit_reasoning:
+        timeline.insert(0, {"kind": "reasoning", "id": "", "text": reasoning_text})
+    return timeline
 
 
-def _stream_command_status_label(status: str, t: Translator) -> str:
+def _stream_command_status_label(status: str, t: Translator, *, activity_kind: str = "command") -> str:
+    if activity_kind == "tool":
+        return {
+            "running": _tr(t, "ui.web.mobile.tool_running", "正在运行工具"),
+            "completed": _tr(t, "ui.web.mobile.tool_completed", "已运行工具"),
+            "failed": _tr(t, "ui.web.mobile.tool_failed", "工具运行失败"),
+            "interrupted": _tr(t, "ui.web.mobile.tool_interrupted", "工具已中断"),
+        }.get(status, _tr(t, "ui.web.mobile.tool_activity", "工具活动"))
     return {
         "running": _tr(t, "ui.web.mobile.command_running", "正在运行命令"),
         "completed": _tr(t, "ui.web.mobile.command_completed", "已运行命令"),
@@ -1135,8 +1176,41 @@ def _stream_command_status_label(status: str, t: Translator) -> str:
     }.get(status, _tr(t, "ui.web.mobile.command_activity", "命令活动"))
 
 
+def _render_stream_reasoning_item(
+    ui: UIFactoryLike,
+    t: Translator,
+    text: str,
+    *,
+    task_id: str,
+    item_id: str,
+    index: int,
+) -> None:
+    reasoning_preview, reasoning_has_more = _stream_reasoning_preview(text)
+    if reasoning_has_more:
+        key_source = task_id if not item_id else f"{task_id}:{item_id}"
+        reasoning_key = quote(key_source or f"reasoning-{index}", safe="")
+        with ui.element("details").props(f"data-reasoning-details=1 data-reasoning-key={reasoning_key}").classes("cb-stream-reasoning"):
+            with ui.element("summary").classes("cb-stream-reasoning-summary"):
+                with ui.element("div").classes("cb-stream-reasoning-heading"):
+                    ui.element("span").classes("cb-stream-reasoning-icon")
+                    ui.label(_tr(t, "ui.web.mobile.stream_reasoning", "思考过程")).classes("cb-stream-reasoning-label")
+                with ui.element("span").classes("cb-stream-reasoning-toggle"):
+                    ui.label(_tr(t, "ui.web.mobile.stream_reasoning_expand", "展开")).classes("cb-stream-reasoning-toggle-label cb-stream-reasoning-toggle-label-open")
+                    ui.label(_tr(t, "ui.web.mobile.stream_reasoning_collapse", "收起")).classes("cb-stream-reasoning-toggle-label cb-stream-reasoning-toggle-label-close")
+                    ui.element("span").classes("cb-stream-reasoning-chevron")
+                ui.label(reasoning_preview).classes("cb-stream-reasoning-preview")
+            ui.markdown(_stream_markdown(text, t)).classes("cb-stream-reasoning-body cb-stream-markdown")
+        return
+    with ui.element("div").props("data-reasoning-preview=1").classes("cb-stream-reasoning cb-stream-reasoning-static"):
+        with ui.element("div").classes("cb-stream-reasoning-heading"):
+            ui.element("span").classes("cb-stream-reasoning-icon")
+            ui.label(_tr(t, "ui.web.mobile.stream_reasoning", "思考过程")).classes("cb-stream-reasoning-label")
+        ui.label(reasoning_preview).classes("cb-stream-reasoning-preview")
+
+
 def _render_stream_command_item(ui: UIFactoryLike, t: Translator, item: dict[str, object], *, task_id: str, index: int) -> None:
     status = str(item.get("status") or "running")
+    activity_kind = str(item.get("activity_kind") or "command")
     command = str(item.get("command") or "")
     output = str(item.get("output") or "")
     command_preview = " ".join(command.split())
@@ -1144,11 +1218,11 @@ def _render_stream_command_item(ui: UIFactoryLike, t: Translator, item: dict[str
         command_preview = f"{command_preview[:157].rstrip()}..."
     output_preview, _ = _stream_tail_preview(output, limit=180)
     command_key = quote(f"{task_id}:{item.get('id') or index}", safe="")
-    with ui.element("details").props(f"data-command-details=1 data-command-key={command_key}").classes(f"cb-stream-command cb-stream-command-{status}"):
+    with ui.element("details").props(f"data-command-details=1 data-command-key={command_key}").classes(f"cb-stream-command cb-stream-command-{status} cb-stream-command-{activity_kind}"):
         with ui.element("summary").classes("cb-stream-command-summary"):
             ui.element("span").classes("cb-stream-command-status-icon")
             with ui.element("div").classes("cb-stream-command-heading"):
-                ui.label(_stream_command_status_label(status, t)).classes("cb-stream-command-label")
+                ui.label(_stream_command_status_label(status, t, activity_kind=activity_kind)).classes("cb-stream-command-label")
                 ui.label(command_preview).classes("cb-stream-command-command-preview")
                 if output_preview:
                     ui.label(output_preview).classes("cb-stream-command-preview")
@@ -1157,10 +1231,12 @@ def _render_stream_command_item(ui: UIFactoryLike, t: Translator, item: dict[str
                 ui.label(_tr(t, "ui.web.mobile.stream_reasoning_collapse", "收起")).classes("cb-stream-command-toggle-label cb-stream-command-toggle-label-close")
                 ui.element("span").classes("cb-stream-command-chevron")
         with ui.element("div").classes("cb-stream-command-body"):
-            ui.label(_tr(t, "ui.web.mobile.command_command", "命令")).classes("cb-stream-command-section-label")
+            section_label = _tr(t, "ui.web.mobile.tool_call", "工具调用") if activity_kind == "tool" else _tr(t, "ui.web.mobile.command_command", "命令")
+            output_label = _tr(t, "ui.web.mobile.tool_result", "结果") if activity_kind == "tool" else _tr(t, "ui.web.mobile.command_output", "输出")
+            ui.label(section_label).classes("cb-stream-command-section-label")
             ui.label(command).classes("cb-stream-command-code")
             if output:
-                ui.label(_tr(t, "ui.web.mobile.command_output", "输出")).classes("cb-stream-command-section-label")
+                ui.label(output_label).classes("cb-stream-command-section-label")
                 ui.label(output).classes("cb-stream-command-output")
             details = []
             cwd = str(item.get("cwd") or "")
@@ -1550,7 +1626,7 @@ def _render_mobile_stream_messages(
                     raw_activity_items = task.get("activity_items")
                     has_codex_activity = _stream_has_codex_activity(raw_activity_items if isinstance(raw_activity_items, list) else [])
                     activity_items = _stream_activity_items(raw_activity_items)
-                    command_items = _stream_command_items(raw_activity_items, task_status=status)
+                    timeline_items = _stream_timeline_items(raw_activity_items, reasoning_text=reasoning_text, task_status=status)
                     assume_utc_naive_time = _stream_task_uses_utc_naive_time(task)
                     task_id = str(task.get("id") or "").strip()
                     should_show_activity = bool(activity_items) and (
@@ -1563,7 +1639,7 @@ def _render_mobile_stream_messages(
                     if not assistant_text and status in {"running", "queued"}:
                         assistant_text = _tr(t, "ui.web.mobile.stream_working", "正在处理")
                         is_working_placeholder = True
-                    assistant_has_content = bool(assistant_text or output_segments or reasoning_text or command_items)
+                    assistant_has_content = bool(assistant_text or output_segments or timeline_items)
                     turn_classes = "cb-stream-turn cb-stream-turn-with-footer" if assistant_has_content or should_show_activity else "cb-stream-turn"
                     with ui.element("div").classes(turn_classes):
                         if prompt_text:
@@ -1596,31 +1672,22 @@ def _render_mobile_stream_messages(
                         if assistant_has_content or should_show_activity:
                             with ui.element("div").classes("cb-stream-message cb-stream-assistant"):
                                 with ui.element("div").classes("cb-stream-assistant-content"):
-                                    if reasoning_text:
-                                        reasoning_preview, reasoning_has_more = _stream_reasoning_preview(reasoning_text)
-                                        if reasoning_has_more:
-                                            reasoning_key = quote(task_id or str(task.get("id") or "reasoning"), safe="")
-                                            with ui.element("details").props(f"data-reasoning-details=1 data-reasoning-key={reasoning_key}").classes("cb-stream-reasoning"):
-                                                with ui.element("summary").classes("cb-stream-reasoning-summary"):
-                                                    with ui.element("div").classes("cb-stream-reasoning-heading"):
-                                                        ui.element("span").classes("cb-stream-reasoning-icon")
-                                                        ui.label(_tr(t, "ui.web.mobile.stream_reasoning", "思考过程")).classes("cb-stream-reasoning-label")
-                                                    with ui.element("span").classes("cb-stream-reasoning-toggle"):
-                                                        ui.label(_tr(t, "ui.web.mobile.stream_reasoning_expand", "展开")).classes("cb-stream-reasoning-toggle-label cb-stream-reasoning-toggle-label-open")
-                                                        ui.label(_tr(t, "ui.web.mobile.stream_reasoning_collapse", "收起")).classes("cb-stream-reasoning-toggle-label cb-stream-reasoning-toggle-label-close")
-                                                        ui.element("span").classes("cb-stream-reasoning-chevron")
-                                                    ui.label(reasoning_preview).classes("cb-stream-reasoning-preview")
-                                                ui.markdown(_stream_markdown(reasoning_text, t)).classes("cb-stream-reasoning-body cb-stream-markdown")
-                                        else:
-                                            with ui.element("div").props("data-reasoning-preview=1").classes("cb-stream-reasoning cb-stream-reasoning-static"):
-                                                with ui.element("div").classes("cb-stream-reasoning-heading"):
-                                                    ui.element("span").classes("cb-stream-reasoning-icon")
-                                                    ui.label(_tr(t, "ui.web.mobile.stream_reasoning", "思考过程")).classes("cb-stream-reasoning-label")
-                                                ui.label(reasoning_preview).classes("cb-stream-reasoning-preview")
-                                    if command_items:
-                                        with ui.element("div").classes("cb-stream-command-log"):
-                                            for command_index, command_item in enumerate(command_items, start=1):
-                                                _render_stream_command_item(ui, t, command_item, task_id=task_id, index=command_index)
+                                    if timeline_items:
+                                        with ui.element("div").classes("cb-stream-timeline"):
+                                            for timeline_index, timeline_item in enumerate(timeline_items, start=1):
+                                                if str(timeline_item.get("kind") or "") == "reasoning":
+                                                    _render_stream_reasoning_item(
+                                                        ui,
+                                                        t,
+                                                        str(timeline_item.get("text") or ""),
+                                                        task_id=task_id,
+                                                        item_id=str(timeline_item.get("id") or ""),
+                                                        index=timeline_index,
+                                                    )
+                                                    continue
+                                                command_item = timeline_item.get("item")
+                                                if isinstance(command_item, dict):
+                                                    _render_stream_command_item(ui, t, command_item, task_id=task_id, index=timeline_index)
                                     if should_show_activity:
                                         with ui.element("div").classes("cb-stream-activity-log"):
                                             for item in activity_items:
