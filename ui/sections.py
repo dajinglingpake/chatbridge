@@ -1786,36 +1786,36 @@ def _render_mobile_stream_messages(
                                             if is_working_placeholder:
                                                 live_props = f"{live_props} data-stream-placeholder=1"
                                             markdown.props(live_props).classes(f"{body_classes} cb-stream-markdown cb-stream-live-text")
-                                        with ui.element("div").classes("cb-stream-turn-footer"):
-                                            if status in {"running", "queued"}:
-                                                task_id = str(task.get("id") or "").strip()
-                                                started_at = str(task.get("started_at") or task.get("created_at") or "").strip()
-                                                with ui.element("span").props("aria-hidden=true").classes("cb-stream-working-loader"):
-                                                    for dot_index in range(6):
-                                                        ui.element("span").classes(f"cb-stream-working-loader-dot cb-stream-working-loader-dot-{dot_index}")
-                                                if started_at:
-                                                    client_started_at = _stream_client_time(started_at, assume_utc_naive=assume_utc_naive_time)
-                                                    ui.label(_stream_live_elapsed_text(task, t)).props(f'data-started-at="{client_started_at}"').classes("cb-stream-live-elapsed")
-                                                if task_id and task.get("cancelable") is not False:
-                                                    stop_label = _tr(t, "ui.web.mobile.cancel_task", "停止任务")
-                                                    ui.button(
-                                                        "",
-                                                        on_click=lambda task_id=task_id: on_cancel_task(task_id),
-                                                        icon="stop",
-                                                    ).props(f'flat dense round title="{stop_label}" aria-label="{stop_label}" data-task-id={task_id}').classes("cb-stream-stop-button")
-                                            else:
-                                                if assistant_text:
-                                                    ui.button(
-                                                        "",
-                                                        on_click=lambda value=assistant_text: on_copy_text(value),
-                                                        icon="content_copy",
-                                                        color=None,
-                                                    ).props("flat dense round").classes("cb-stream-copy-button")
-                                                _render_stream_footer_label(
-                                                    ui,
-                                                    _stream_footer_label(task, status, t),
-                                                    _stream_footer_time_label(task, status, t),
-                                                )
+                                    with ui.element("div").classes("cb-stream-turn-footer"):
+                                        if status in {"running", "queued"}:
+                                            task_id = str(task.get("id") or "").strip()
+                                            started_at = str(task.get("started_at") or task.get("created_at") or "").strip()
+                                            with ui.element("span").props("aria-hidden=true").classes("cb-stream-working-loader"):
+                                                for dot_index in range(6):
+                                                    ui.element("span").classes(f"cb-stream-working-loader-dot cb-stream-working-loader-dot-{dot_index}")
+                                            if started_at:
+                                                client_started_at = _stream_client_time(started_at, assume_utc_naive=assume_utc_naive_time)
+                                                ui.label(_stream_live_elapsed_text(task, t)).props(f'data-started-at="{client_started_at}"').classes("cb-stream-live-elapsed")
+                                            if task_id and task.get("cancelable") is not False:
+                                                stop_label = _tr(t, "ui.web.mobile.cancel_task", "停止任务")
+                                                ui.button(
+                                                    "",
+                                                    on_click=lambda task_id=task_id: on_cancel_task(task_id),
+                                                    icon="stop",
+                                                ).props(f'flat dense round title="{stop_label}" aria-label="{stop_label}" data-task-id={task_id}').classes("cb-stream-stop-button")
+                                        else:
+                                            if assistant_text:
+                                                ui.button(
+                                                    "",
+                                                    on_click=lambda value=assistant_text: on_copy_text(value),
+                                                    icon="content_copy",
+                                                    color=None,
+                                                ).props("flat dense round").classes("cb-stream-copy-button")
+                                            _render_stream_footer_label(
+                                                ui,
+                                                _stream_footer_label(task, status, t),
+                                                _stream_footer_time_label(task, status, t),
+                                            )
 
 def _render_mobile_stream_scroll_button(ui: UIFactoryLike) -> None:
     ui.button("", icon="keyboard_arrow_down", color=None).props("round unelevated").classes("cb-scroll-bottom-button").on(

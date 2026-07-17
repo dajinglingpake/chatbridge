@@ -9,7 +9,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from ui.app import _codex_rollout_runtime_hint, _stream_initial_history_limit, _update_codex_thread_runtime_statuses, group_codex_threads_by_workspace
+from ui.app import _codex_rollout_runtime_hint, _load_persisted_stream_session, _persist_stream_session, _stream_initial_history_limit, _update_codex_thread_runtime_statuses, group_codex_threads_by_workspace
 from ui.sections import _stream_client_time, _stream_display_time, _stream_image_is_previewable, _stream_markdown, _stream_task_sort_key, _stream_task_uses_utc_naive_time, _stream_text, render_mobile_stream_section
 
 
@@ -120,6 +120,20 @@ def _noop(*_args, **_kwargs):
 
 
 class StreamComposerTests(unittest.TestCase):
+    def test_stream_selection_persistence_survives_ui_restart(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ui_stream_selection.json"
+
+            self.assertEqual("", _load_persisted_stream_session(path))
+
+            _persist_stream_session("codex:thread-live", path)
+
+            self.assertEqual("codex:thread-live", _load_persisted_stream_session(path))
+
+            _persist_stream_session("", path)
+
+            self.assertEqual("", _load_persisted_stream_session(path))
+
     def test_stream_text_preserves_leading_indented_code_block(self) -> None:
         self.assertEqual("    first\n    second", _stream_text("    first\n    second"))
         self.assertEqual("plain", _stream_text("\nplain\r\n"))
@@ -1897,6 +1911,58 @@ class StreamComposerTests(unittest.TestCase):
         self.assertEqual(["INITIAL OUTPUT MARKER " + ("old output " * 30) + "latest output: collecting final tests..."], command_outputs)
         self.assertEqual(["正在运行命令"], command_labels)
 
+    def test_running_task_with_output_segments_keeps_execution_footer(self) -> None:
+        ui = FakeUI()
+        mobile_state = {
+            "counts": {"running": 1, "queued": 0},
+            "agents": [{"id": "codex", "name": "Codex", "backend": "codex"}],
+            "tasks": [
+                {
+                    "id": "task-segment-running",
+                    "agent_id": "codex",
+                    "backend": "codex",
+                    "session_name": "focus",
+                    "status": "running",
+                    "created_at": "2026-07-18T01:00:00",
+                    "prompt": "继续执行",
+                    "output_segments": [{"kind": "text", "text": "阶段性输出"}],
+                    "activity_items": [
+                        {
+                            "id": "reasoning-1",
+                            "event": "codex_reasoning",
+                            "type": "reasoning",
+                            "detail": "正在检查",
+                            "metadata": {},
+                        }
+                    ],
+                }
+            ],
+            "session_task_counts": {"focus": 1},
+        }
+
+        render_mobile_stream_section(
+            ui,
+            _translator,
+            mobile_state,
+            "focus",
+            [],
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+        )
+
+        working_loaders = [item for item in ui.elements if "cb-stream-working-loader" in item.class_text.split()]
+        working_loader_dots = [item for item in ui.elements if "cb-stream-working-loader-dot" in item.class_text.split()]
+        turn_footers = [item for item in ui.elements if "cb-stream-turn-footer" in item.class_text.split()]
+
+        self.assertEqual(1, len(turn_footers))
+        self.assertEqual(1, len(working_loaders))
+        self.assertEqual(6, len(working_loader_dots))
+
     def test_reasoning_and_commands_follow_their_original_timeline(self) -> None:
         ui = FakeUI()
         first_reasoning = "第一阶段：检查项目结构。" + ("继续分析结构细节。" * 16)
@@ -2500,9 +2566,19 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn('has_session_query = "session" in request.query_params', source)
         self.assertIn('elif has_session_query and state["active_page"] == "stream":', source)
         self.assertIn('state["selected_session_name"] = ""', source)
-        self.assertIn('preserved_session = str(state.get("selected_session_name") or "").strip()', source)
+        self.assertIn('_persist_stream_session(requested_session)', source)
+        self.assertIn('_persist_stream_session("")', source)
+        self.assertIn('_load_persisted_stream_session() or str(state.get("selected_session_name") or "").strip()', source)
+        self.assertIn('state["selected_session_name"] = preserved_session', source)
         self.assertIn('state["stream_force_bottom_session"] = preserved_session', source)
         self.assertIn('state["stream_force_bottom_session"] = requested_session', source)
+
+    def test_stream_refresh_timer_never_persists_session_selection(self) -> None:
+        source = Path("ui/app.py").read_text(encoding="utf-8")
+        refresh_start = source.index("def refresh_stream() -> None:")
+        refresh_end = source.index("client.on_connect", refresh_start)
+
+        self.assertNotIn("_persist_stream_session", source[refresh_start:refresh_end])
 
     def test_non_stream_navigation_removes_session_from_browser_url(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")

@@ -18,6 +18,7 @@ from core.app_service import cancel_hub_task, delete_agent, reset_weixin_convers
 from core.navigation import PRIMARY_PAGES
 from core.shell_schema import APP_SHELL
 from core.dashboard import refresh_dashboard_cache
+from core.json_store import load_json, save_json
 from core.view_models import build_web_console_view_model
 from localization import Localizer, normalize_language
 from ui.mobile import MOBILE_UPLOAD_ROOT, build_mobile_access_url, build_mobile_qr_data_url, build_stream_sidebar_state_snapshot, build_stream_signature_snapshot, build_stream_state_snapshot, codex_thread_id_from_session_name, install_mobile_routes, is_mobile_access_authorized, load_codex_threads_page, stream_hub_state_file_signature, stream_qq_current_session_name
@@ -43,6 +44,7 @@ CODEX_THREAD_RUNTIME_STALE_SECONDS = 300.0
 CODEX_THREAD_RUNTIME_TAIL_BYTES = 65536
 WEB_THEME_OPTIONS = ("dark", "light", "forest")
 STREAM_UI_LOG_PATH = APP_DIR / ".runtime" / "logs" / "ui_stream_refresh.jsonl"
+STREAM_UI_SELECTION_PATH = APP_DIR / ".runtime" / "state" / "ui_stream_selection.json"
 STREAM_UI_DEBUG_LOG_ENABLED = os.environ.get("CHATBRIDGE_UI_DEBUG_LOG", "").strip().lower() in {"1", "true", "yes", "on"}
 STREAM_UI_ALWAYS_LOG_EVENTS = {"refresh_timer_cancel", "client_disconnect"}
 NICEGUI_RECONNECT_TIMEOUT_SECONDS = 30.0
@@ -91,6 +93,18 @@ class _ClientState(MutableMapping[str, object]):
 
 def _stream_initial_history_limit(session_name: str) -> int:
     return STREAM_MANUAL_HISTORY_LIMIT
+
+
+def _load_persisted_stream_session(path: Path = STREAM_UI_SELECTION_PATH) -> str:
+    payload = load_json(path, {}, expect_type=dict)
+    return str(payload.get("session_name") or "").strip() if isinstance(payload, dict) else ""
+
+
+def _persist_stream_session(session_name: str, path: Path = STREAM_UI_SELECTION_PATH) -> None:
+    try:
+        save_json(path, {"session_name": str(session_name or "").strip()})
+    except OSError:
+        pass
 
 
 def _append_stream_ui_log(event: str, **fields: object) -> None:
@@ -2849,12 +2863,15 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             state["selected_session_name"] = requested_session
             state["stream_force_bottom_session"] = requested_session
             state["stream_force_bottom_next"] = True
+            _persist_stream_session(requested_session)
         elif has_session_query and state["active_page"] == "stream":
             state["selected_session_name"] = ""
             state["stream_force_bottom_next"] = True
+            _persist_stream_session("")
         elif state["active_page"] == "stream":
-            preserved_session = str(state.get("selected_session_name") or "").strip()
+            preserved_session = _load_persisted_stream_session() or str(state.get("selected_session_name") or "").strip()
             if preserved_session:
+                state["selected_session_name"] = preserved_session
                 state["stream_force_bottom_session"] = preserved_session
             state["stream_force_bottom_next"] = True
 
@@ -4060,6 +4077,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         state["load_task_detail"] = False
         state["stream_force_bottom_session"] = cleaned_session_name
         state["stream_force_bottom_next"] = True
+        _persist_stream_session(cleaned_session_name)
         ui.run_javascript(
             f"""
             (() => {{
