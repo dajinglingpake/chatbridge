@@ -2147,6 +2147,7 @@ def _codex_view_image_output_previews(
 
 def _codex_output_image_urls(output: object) -> list[str]:
     urls: list[str] = []
+    seen: set[str] = set()
 
     def append_candidate(value: object) -> None:
         if isinstance(value, dict):
@@ -2154,7 +2155,8 @@ def _codex_output_image_urls(output: object) -> list[str]:
         if not isinstance(value, str):
             return
         cleaned = value.strip()
-        if cleaned.lower().startswith(("data:image/", "http://", "https://")):
+        if cleaned.lower().startswith(("data:image/", "http://", "https://")) and cleaned not in seen:
+            seen.add(cleaned)
             urls.append(cleaned)
 
     def visit(value: object) -> None:
@@ -3542,6 +3544,15 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
                 for preview in output_image_previews
                 if isinstance(preview, dict)
             }
+            if seen_output_sources and output_segments:
+                output_segments = [
+                    segment
+                    for segment in output_segments
+                    if not (
+                        str(segment.get("kind") or "") == "custom_tool_image"
+                        and str(segment.get("source") or "").strip() in seen_output_sources
+                    )
+                ]
             if is_terminal_display:
                 for preview in view_image_previews_by_turn.get(turn_id, []):
                     source = str(preview.get("source") or "").strip() if isinstance(preview, dict) else ""

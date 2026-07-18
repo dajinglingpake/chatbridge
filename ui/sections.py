@@ -19,6 +19,9 @@ from core.view_models import WebConsoleViewModel
 
 Translator = Callable[..., str]
 STREAM_MANUAL_HISTORY_LIMIT = 60
+STREAM_CODEX_INITIAL_HISTORY_LIMIT = 4
+STREAM_HISTORICAL_ACTIVITY_RENDER_LIMIT = 24
+STREAM_ACTIVE_ACTIVITY_RENDER_LIMIT = 64
 
 
 class UIEventLike(Protocol):
@@ -621,6 +624,7 @@ _STREAM_INDENTED_CODE_LINE_RE = re.compile(r"^(?: {4}|\t)")
 _STREAM_LOCAL_MOBILE_URL_RE = re.compile(r"https?://(?:localhost|127(?:\.\d{1,3}){3}|\[::1\])(?::\d+)?(?=/mobile-upload/)")
 _STREAM_MARKDOWN_FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})[ \t]*(?:markdown|md)[^\n]*\n(?P<body>.*)\n[ \t]*(?:`{3,}|~{3,})[ \t]*$", re.DOTALL | re.IGNORECASE)
 _STREAM_MARKDOWN_IMAGE_LINE_RE = re.compile(r"^[ \t]*!\[[^\]\n]*\]\([^)]+\)[ \t]*$")
+_STREAM_IMAGE_LINK_HREF_RE = re.compile(r"\.(?:png|jpe?g|gif|webp|bmp)(?:[?#].*)?$", re.IGNORECASE)
 _STREAM_LINE_SUFFIX_RE = re.compile(r"(#L\d+(?:-L?\d+)?|:\d+(?::\d+)?(?:-\d+(?::\d+)?)?|\(\d+(?:,\d+)?(?:-\d+(?:,\d+)?)?\))$")
 _STREAM_FILE_EXTENSIONS = {
     "astro",
@@ -775,11 +779,19 @@ def _stream_rewrite_markdown_links(value: str, copy_title: str) -> str:
             cursor = end + 1
             continue
         href = _stream_markdown_href_candidate(destination)
-        if href and _stream_is_file_href_candidate(href, allow_spaces=True):
-            parts.append(value[cursor:start])
-            parts.append(_stream_markdown_file_link_replacement(value[start + 1:label_end], href, copy_title))
-            cursor = end + 1
-            continue
+        if href:
+            label = value[start + 1:label_end]
+            image_link = _stream_markdown_image_link_replacement(label, href)
+            if image_link:
+                parts.append(value[cursor:start])
+                parts.append(image_link)
+                cursor = end + 1
+                continue
+            if _stream_is_file_href_candidate(href, allow_spaces=True):
+                parts.append(value[cursor:start])
+                parts.append(_stream_markdown_file_link_replacement(label, href, copy_title))
+                cursor = end + 1
+                continue
         parts.append(value[cursor:end + 1])
         cursor = end + 1
     return "".join(parts)
@@ -795,6 +807,26 @@ def _stream_markdown_image_destination(destination: str) -> str:
     preview = _image_preview_payload(href)
     source = str(preview.get("source") or "").strip()
     return source or destination
+
+
+def _stream_markdown_image_link_replacement(label: str, href: str) -> str:
+    lowered = href.lower()
+    if not (
+        lowered.startswith(("data:image/", "/mobile-upload/", "/mobile-local-image/", "/mobile-codex-image/"))
+        or _STREAM_IMAGE_LINK_HREF_RE.search(href)
+    ):
+        return ""
+    try:
+        from ui.mobile import _image_preview_payload
+    except ImportError:
+        return ""
+    preview = _image_preview_payload(href)
+    source = str(preview.get("source") or "").strip()
+    if not source:
+        return ""
+    encoded_href = quote(source, safe="")
+    encoded_label = quote(label, safe="")
+    return f"[{label}](#chatbridge-image={encoded_href}&label={encoded_label})"
 
 
 def _stream_find_markdown_label_end(value: str, start: int) -> int:
@@ -1083,6 +1115,16 @@ def _stream_activity_items(value: object) -> list[dict[str, object]]:
         if event and at:
             items.append({"event": event, "type": activity_type, "at": at, "detail": detail, "metadata": metadata})
     return items
+
+
+def _stream_activity_render_window(value: object, *, limit: int) -> tuple[list[dict[str, object]], int]:
+    if not isinstance(value, list):
+        return [], 0
+    items = [item for item in value if isinstance(item, dict)]
+    safe_limit = max(1, int(limit))
+    if len(items) <= safe_limit:
+        return items, 0
+    return items[-safe_limit:], len(items) - safe_limit
 
 
 def _stream_command_item(item: dict[str, object], *, index: int, terminal_task: bool) -> dict[str, object] | None:
@@ -1920,7 +1962,12 @@ def _prepare_stream_render_context(mobile_state: dict[str, object], selected_ses
     session_tasks = sorted(sessions.get(active_session, []), key=_stream_task_sort_key)
     displayed_session_count = len(session_tasks)
     session_total_count = _stream_session_task_count(mobile_state, active_session)
-    has_older_session_tasks = session_total_count > max(displayed_session_count, STREAM_MANUAL_HISTORY_LIMIT)
+    initial_history_limit = (
+        STREAM_CODEX_INITIAL_HISTORY_LIMIT
+        if active_session.startswith("codex:")
+        else STREAM_MANUAL_HISTORY_LIMIT
+    )
+    has_older_session_tasks = session_total_count > max(displayed_session_count, initial_history_limit)
     latest_task = session_tasks[-1] if session_tasks else None
     latest_task_id = str(latest_task.get("id") or "").strip() if isinstance(latest_task, dict) else ""
     has_running_session_task = any(str(task.get("status") or "").strip() == "running" for task in session_tasks)
@@ -2139,6 +2186,7 @@ def _render_mobile_stream_messages(
             else:
                 for task in stream_tasks:
                     status = str(task.get("status") or "queued")
+                    task_id = str(task.get("id") or "").strip()
                     prompt_text = _stream_text(task.get("prompt"), limit=6000)
                     image_items = _stream_image_items(task.get("images"))
                     image_previews = _stream_image_previews(task.get("image_previews"))
@@ -2149,20 +2197,28 @@ def _render_mobile_stream_messages(
                     output_text = _stream_text(task.get("output"), limit=20000)
                     if error_text:
                         output_segments = []
-                    raw_activity_items = task.get("activity_items")
-                    has_codex_activity = _stream_has_codex_activity(raw_activity_items if isinstance(raw_activity_items, list) else [])
+                    raw_activity_source = task.get("activity_items")
+                    activity_limit = (
+                        STREAM_ACTIVE_ACTIVITY_RENDER_LIMIT
+                        if status in {"running", "queued"} or task_id == latest_task_id
+                        else STREAM_HISTORICAL_ACTIVITY_RENDER_LIMIT
+                    )
+                    raw_activity_items, omitted_activity_count = _stream_activity_render_window(
+                        raw_activity_source,
+                        limit=activity_limit,
+                    )
+                    has_codex_activity = _stream_has_codex_activity(raw_activity_items)
                     activity_items = _stream_activity_items(raw_activity_items)
                     timeline_fallback_at = str(task.get("progress_at") or task.get("started_at") or task.get("created_at") or "").strip()
                     timeline_start_at = str(task.get("started_at") or task.get("created_at") or "").strip()
                     timeline_items = _stream_timeline_items(
                         raw_activity_items,
-                        reasoning_text=reasoning_text,
+                        reasoning_text=reasoning_text if not omitted_activity_count or status in {"running", "queued"} else "",
                         task_status=status,
                         fallback_at=timeline_fallback_at,
                         start_at=timeline_start_at,
                     )
                     assume_utc_naive_time = _stream_task_uses_utc_naive_time(task)
-                    task_id = str(task.get("id") or "").strip()
                     runtime_indicator = bool(task.get("runtime_indicator"))
                     should_show_activity = bool(activity_items) and (
                         has_codex_activity
@@ -2211,6 +2267,15 @@ def _render_mobile_stream_messages(
                         if assistant_has_content or should_show_activity:
                             with ui.element("div").classes("cb-stream-message cb-stream-assistant"):
                                 with ui.element("div").classes("cb-stream-assistant-content"):
+                                    if omitted_activity_count:
+                                        ui.label(
+                                            _tr(
+                                                t,
+                                                "ui.web.mobile.activity_omitted",
+                                                "较早的 {count} 条执行记录已隐藏以保持界面流畅",
+                                                count=omitted_activity_count,
+                                            )
+                                        ).classes("cb-stream-activity-omitted cb-muted text-xs")
                                     if timeline_items:
                                         with ui.element("div").classes("cb-stream-timeline"):
                                             for timeline_index, timeline_item in enumerate(timeline_items, start=1):
@@ -2309,7 +2374,11 @@ def _render_mobile_stream_messages(
                                                 with ui.element("div").classes("cb-stream-output-tool-image"):
                                                     _render_stream_custom_tool_image(ui, t, segment)
                                     elif assistant_text:
-                                        output_link_previews = [preview for preview in output_image_previews if preview.get("kind") != "markdown_image"]
+                                        output_link_previews = [
+                                            preview
+                                            for preview in output_image_previews
+                                            if preview.get("kind") not in {"markdown_image", "image_link"}
+                                        ]
                                         if output_link_previews:
                                             with ui.element("div").classes("cb-stream-attachments"):
                                                 for preview in output_link_previews:

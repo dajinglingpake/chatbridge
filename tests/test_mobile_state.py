@@ -481,6 +481,78 @@ class MobileStateTests(unittest.TestCase):
 
         mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
 
+    def test_codex_custom_tool_image_output_deduplicates_repeated_url_fields(self) -> None:
+        snapshot = "data:image/png;base64,ZHVwbGljYXRlLXNuYXBzaG90"
+
+        self.assertEqual(
+            [snapshot],
+            mobile._codex_output_image_urls(
+                {
+                    "image_url": snapshot,
+                    "content": [{"type": "input_image", "image_url": snapshot}],
+                }
+            ),
+        )
+
+    def test_codex_final_markdown_image_hides_matching_custom_tool_preview(self) -> None:
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            sessions_root = temp_path / "codex" / "sessions"
+            sessions_root.mkdir(parents=True)
+            image_path = temp_path / "same-preview.png"
+            image_path.write_bytes(b"png-data")
+            jsonl_path = sessions_root / "rollout-thread-matching-final-image.jsonl"
+            events = [
+                {
+                    "payload": {
+                        "type": "custom_tool_call",
+                        "name": "exec",
+                        "call_id": "call-matching-image",
+                        "input": f'const result = await tools.view_image({{"path":"{image_path.as_posix()}"}}); image(result.image_url);',
+                        "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
+                    }
+                },
+                {
+                    "payload": {
+                        "type": "custom_tool_call_output",
+                        "call_id": "call-matching-image",
+                        "output": [{"type": "output_text", "text": "done"}],
+                    }
+                },
+                {
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": f"![同图]({image_path.as_posix()})"}],
+                        "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
+                    }
+                },
+            ]
+            jsonl_path.write_text("\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8")
+            thread = {
+                "id": "thread-matching-final-image",
+                "messages": [
+                    {"turn_id": "turn-1", "role": "user", "text": "验图"},
+                    {"turn_id": "turn-1", "role": "assistant", "text": f"![同图]({image_path.as_posix()})"},
+                ],
+            }
+
+            with patch("ui.mobile._codex_sessions_root", return_value=sessions_root):
+                tasks = _codex_thread_task_payloads(thread)
+
+            self.assertEqual(1, len(tasks[0]["output_image_previews"]))
+            self.assertEqual("markdown_image", tasks[0]["output_image_previews"][0]["kind"])
+            self.assertFalse(
+                [
+                    segment
+                    for segment in tasks[0]["output_segments"]
+                    if segment.get("kind") == "custom_tool_image"
+                ]
+            )
+
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+
     def test_codex_custom_exec_parser_ignores_mcp_javascript_and_extracts_real_commands(self) -> None:
         payload = {
             "name": "exec",

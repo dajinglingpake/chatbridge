@@ -10,7 +10,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from ui.app import _codex_rollout_runtime_hint, _codex_rollout_runtime_snapshot, _codex_rollout_runtime_started_at, _load_persisted_stream_session, _persist_stream_session, _stream_initial_history_limit, _update_codex_thread_runtime_statuses, group_codex_threads_by_workspace
-from ui.sections import _stream_client_time, _stream_display_time, _stream_image_is_previewable, _stream_markdown, _stream_task_sort_key, _stream_task_uses_utc_naive_time, _stream_text, _stream_time_delta_ms, _stream_timeline_items, render_mobile_stream_section
+from ui.sections import _stream_activity_render_window, _stream_client_time, _stream_display_time, _stream_image_is_previewable, _stream_markdown, _stream_task_sort_key, _stream_task_uses_utc_naive_time, _stream_text, _stream_time_delta_ms, _stream_timeline_items, render_mobile_stream_section
 
 
 class FakeElement:
@@ -993,20 +993,63 @@ class StreamComposerTests(unittest.TestCase):
         self.assertEqual([], auto_load_triggers)
         self.assertIn("data-load-older-ready=1", load_older_buttons[0].props_text)
 
+    def test_codex_history_uses_manual_button_after_small_initial_window(self) -> None:
+        ui = FakeUI()
+        tasks = [
+            {
+                "id": f"task-{index}",
+                "agent_id": "codex",
+                "agent_name": "Codex",
+                "backend": "codex",
+                "session_name": "codex:thread-001",
+                "status": "succeeded",
+                "created_at": f"2026-07-04T05:2{index}:00",
+                "prompt": f"prompt {index}",
+                "output": f"answer {index}",
+            }
+            for index in range(4)
+        ]
+        mobile_state = {
+            "counts": {"running": 0, "queued": 0},
+            "agents": [{"id": "codex", "name": "Codex", "backend": "codex"}],
+            "tasks": tasks,
+            "session_task_counts": {"codex:thread-001": 5},
+        }
+
+        render_mobile_stream_section(
+            ui,
+            _translator,
+            mobile_state,
+            "codex:thread-001",
+            [],
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+        )
+
+        load_older_buttons = [item for item in ui.elements if "cb-stream-load-older-button" in item.class_text]
+        self.assertEqual(1, len(load_older_buttons))
+
     def test_stream_initial_history_window_matches_manual_history_limit(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")
 
         self.assertIn("STREAM_HISTORY_PAGE_SIZE = 20", source)
-        self.assertIn("return STREAM_MANUAL_HISTORY_LIMIT", source)
-        self.assertIn("limits[cleaned_session_name] = _stream_session_task_limit(cleaned_session_name) + STREAM_HISTORY_PAGE_SIZE", source)
+        self.assertIn("STREAM_CODEX_HISTORY_PAGE_SIZE = 4", source)
+        self.assertIn("return STREAM_CODEX_INITIAL_HISTORY_LIMIT", source)
+        self.assertIn("history_page_size = STREAM_CODEX_HISTORY_PAGE_SIZE", source)
         sections_source = Path("ui/sections.py").read_text(encoding="utf-8")
         self.assertIn("STREAM_MANUAL_HISTORY_LIMIT = 60", sections_source)
-        self.assertIn("session_total_count > max(displayed_session_count, STREAM_MANUAL_HISTORY_LIMIT)", sections_source)
+        self.assertIn("STREAM_CODEX_INITIAL_HISTORY_LIMIT = 4", sections_source)
+        self.assertIn("session_total_count > max(displayed_session_count, initial_history_limit)", sections_source)
         self.assertNotIn("data-stream-auto-load-older", sections_source)
 
-    def test_stream_uses_manual_history_limit_for_all_sessions(self) -> None:
+    def test_stream_uses_smaller_initial_history_limit_for_codex_sessions(self) -> None:
         self.assertEqual(60, _stream_initial_history_limit("qq-private-10001"))
-        self.assertEqual(60, _stream_initial_history_limit("codex:thread-001"))
+        self.assertEqual(4, _stream_initial_history_limit("codex:thread-001"))
 
     def test_latest_task_activity_log_hides_routine_lifecycle_items(self) -> None:
         ui = FakeUI()
@@ -1550,6 +1593,60 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("[escaped \\] label](#chatbridge-file=ui%2Fsections.py%3A34", markdown_text)
         self.assertIn("[OpenAI](https://openai.com)", markdown_text)
         self.assertEqual(8, markdown_text.count("#chatbridge-file="))
+
+    def test_assistant_local_image_links_open_lightbox_without_duplicate_thumbnail(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "initial_room.png"
+            image_path.write_bytes(b"png-data")
+            output = f"验证截图：\n\n- [初始测试房]({image_path.as_posix()})"
+            markdown = _stream_markdown(output, _translator)
+
+            self.assertIn("[初始测试房](#chatbridge-image=%2Fmobile-local-image%2F", markdown)
+            self.assertIn("&label=%E5%88%9D%E5%A7%8B%E6%B5%8B%E8%AF%95%E6%88%BF", markdown)
+            self.assertNotIn("#chatbridge-file=", markdown)
+
+            ui = FakeUI()
+            mobile_state = {
+                "counts": {"running": 0, "queued": 0},
+                "updated_at": "2026-07-04T05:20:00",
+                "agents": [{"id": "codex", "name": "Codex", "backend": "codex"}],
+                "tasks": [
+                    {
+                        "id": "task-image-link",
+                        "agent_id": "codex",
+                        "agent_name": "Codex",
+                        "backend": "codex",
+                        "session_name": "focus",
+                        "status": "succeeded",
+                        "created_at": "2026-07-04T05:20:00",
+                        "prompt": "验图",
+                        "output": output,
+                        "output_image_previews": [
+                            {"source": "/mobile-local-image/signed/reference", "label": "initial_room.png", "kind": "image_link"}
+                        ],
+                        "summary": "验证截图",
+                    }
+                ],
+                "session_task_counts": {"focus": 1},
+            }
+            render_mobile_stream_section(
+                ui,
+                _translator,
+                mobile_state,
+                "focus",
+                [],
+                _noop,
+                _noop,
+                _noop,
+                _noop,
+                _noop,
+                _noop,
+                _noop,
+            )
+
+        self.assertFalse([item for item in ui.elements if item.kind == "image"])
+        rendered_markdown = next(item.text for item in ui.elements if item.kind == "markdown")
+        self.assertIn("#chatbridge-image=", rendered_markdown)
 
     def test_stream_file_link_copy_normalizes_hash_file_urls(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")
@@ -2152,6 +2249,14 @@ class StreamComposerTests(unittest.TestCase):
         self.assertEqual(1, len(live_elapsed))
         self.assertEqual(["执行时长"], execution_prefixes)
 
+    def test_stream_activity_render_window_keeps_recent_items(self) -> None:
+        items = [{"id": f"activity-{index}"} for index in range(10)]
+
+        visible, omitted = _stream_activity_render_window(items, limit=4)
+
+        self.assertEqual(6, omitted)
+        self.assertEqual(["activity-6", "activity-7", "activity-8", "activity-9"], [item["id"] for item in visible])
+
     def test_reasoning_and_commands_follow_their_original_timeline(self) -> None:
         ui = FakeUI()
         first_reasoning = "第一阶段：检查项目结构。" + ("继续分析结构细节。" * 16)
@@ -2683,6 +2788,8 @@ class StreamComposerTests(unittest.TestCase):
 
         self.assertRegex(source, r"\.cb-stream-timeline-time-row\s*\{[^}]*justify-content:\s*flex-end")
         self.assertNotRegex(source, r"\.cb-stream-timeline-time-row\s*\{[^}]*padding:")
+        self.assertRegex(source, r"\.cb-stream-command-group-copy\s*>\s*\.cb-stream-tool-action\s*\{[^}]*flex:\s*0\s+0\s+auto")
+        self.assertRegex(source, r"\.cb-stream-command-single-preview\s*\{[^}]*flex:\s*1\s+1\s+auto")
         self.assertRegex(source, r"\.cb-stream-turn-footer\s*\{[^}]*justify-content:\s*flex-end")
         self.assertRegex(source, r"\.cb-stream-user-footer\s*\{[^}]*justify-content:\s*flex-end")
         self.assertRegex(source, r"\.cb-stream-turn-footer \.cb-stream-copy-button\s*\{[^}]*margin-right:\s*auto")
@@ -2921,7 +3028,9 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn('ui.run_javascript(f"window.__cbStreamAfterPatch?.({patch_options_json});")', scroll_body)
         self.assertIn('installed_clients.add(client_key)', scroll_body)
         self.assertIn("window.__cbStreamPatchRuntimeReady", scroll_body)
-        self.assertIn("window.__cbStreamPatchRuntimeReady !== '5'", scroll_body)
+        self.assertIn("const runtimeVersion = '10';", scroll_body)
+        self.assertNotIn("window.location.reload();", scroll_body)
+        self.assertIn("window.__cbStreamPatchRuntimeReady !== runtimeVersion", scroll_body)
         self.assertIn("const setupStreamWheelFallback = () => {", scroll_body)
         self.assertIn("document.addEventListener('mousewheel', handleWheel, { capture: true, passive: false });", scroll_body)
         self.assertIn("window.__cbStreamAfterPatch = (options = {}) => {", scroll_body)
@@ -3297,12 +3406,17 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("const scrollToBottom = (scroller) => {", source)
         self.assertIn("scrollWindowToBottom();", source)
         self.assertIn("if (source === 'user' && isProgrammaticScroll(scroller))", source)
+        self.assertIn("keepSavedTop = true;", source)
+        self.assertIn("const wheelDeltaPixels = (event, scroller) => {", source)
+        self.assertIn("const maxDelta = Math.max(80, scroller.clientHeight * 0.9);", source)
         self.assertIn("scroller.addEventListener('wheel', (event) => {", source)
-        self.assertIn("const nextTop = clampScrollTop(scroller, scroller.scrollTop + event.deltaY * unit);", source)
+        self.assertIn("const nextTop = clampScrollTop(scroller, scroller.scrollTop + deltaY);", source)
         self.assertIn("scroller.scrollTop = nextTop;\n                            updateScrollState(scroller, 'user');", source)
         self.assertIn("window.__cbStreamForceBottomUntil = 0;", source)
         self.assertIn("window.__cbStreamUserScrollIntentUntil = Date.now() + 800;", source)
-        self.assertIn("window.__cbStreamUserScrollIntentUntil = 0;", source)
+        self.assertNotIn("window.__cbStreamUserScrollIntentUntil = 0;", source)
+        self.assertIn("if (inScrollbar) acceptUserScroll(scroller);", source)
+        self.assertIn("updateScrollState(scroller, 'user');", source)
         self.assertIn("scroller.addEventListener('touchstart', () => {", source)
         self.assertIn("if (event.pointerType === 'touch') {", source)
         self.assertIn("beginUserScrollIntent(scroller);", source)
@@ -3332,6 +3446,9 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("const restorePreviousTop = () => {", source)
         self.assertIn("state.restoreTopPending = restoredTop !== previousTop;", source)
         self.assertIn("return state.restoreTopPending;", source)
+        self.assertIn("const scrollerChanged = window.__cbStreamAttachedScroller !== scroller;", source)
+        self.assertIn("if ((preserveTop || scrollerChanged) && !shouldStickToBottom) {", source)
+        self.assertIn("updateScrollState(scroller, 'script');", source)
         self.assertIn("updateScrollState(scroller, 'script', topWasClamped);", source)
         self.assertIn("top: Math.max(0, scroller.scrollHeight - scroller.clientHeight),", sections_source)
         self.assertIn("const programmaticScrollers = window.__cbStreamProgrammaticScrollers;", sections_source)
@@ -3352,7 +3469,7 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("if (forceBottom || !hasKnownState) {", source)
         self.assertIn("state.delta = 0;\n                        state.nearBottom = true;\n                        state.userScrolledAway = false;", source)
         self.assertIn("window.__cbStreamForceBottomUntil = Date.now() + 1200;", source)
-        self.assertIn("if (preserveTop && !shouldStickToBottom) {", source)
+        self.assertIn("if ((preserveTop || scrollerChanged) && !shouldStickToBottom) {", source)
 
     def test_sidebar_exposes_explicit_new_session_entry(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")
@@ -3945,6 +4062,11 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("cb-image-lightbox-open", source)
         self.assertIn("role=button tabindex=0", sections_source)
         self.assertIn("prepareLightboxTriggers", source)
+        self.assertIn("prepareMarkdownImageLinks", source)
+        self.assertIn('.cb-stream-markdown a[href^="#chatbridge-image="]', source)
+        self.assertIn("cb-stream-inline-image-icon", source)
+        self.assertIn("const triggerLabel = decodeAttr(trigger?.getAttribute?.('data-lightbox-label') || '');", source)
+        self.assertIn("(document.documentElement || document.body).appendChild(overlay);", source)
         self.assertIn("data-lightbox-nav=\"prev\"", source)
         self.assertIn("gesturestart", source)
 

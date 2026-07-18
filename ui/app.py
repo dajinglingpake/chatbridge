@@ -25,7 +25,7 @@ from localization import Localizer, normalize_language
 from ui.mobile import MOBILE_UPLOAD_ROOT, _codex_custom_tool_exec_commands, _codex_custom_tool_names, build_mobile_access_url, build_mobile_qr_data_url, build_stream_sidebar_state_snapshot, build_stream_signature_snapshot, build_stream_state_snapshot, codex_thread_id_from_session_name, install_mobile_routes, is_mobile_access_authorized, load_codex_threads_page, stream_hub_state_file_signature, stream_qq_current_session_name
 from ui.qr_login import install_qr_login_dialog
 from ui.qq_login import install_qq_login_dialog
-from ui.sections import STREAM_MANUAL_HISTORY_LIMIT, render_diagnostics_section, render_home_section, render_mobile_section, render_mobile_stream_composer_section, render_mobile_stream_messages_section, render_mobile_stream_shell, render_sessions_section
+from ui.sections import STREAM_CODEX_INITIAL_HISTORY_LIMIT, STREAM_MANUAL_HISTORY_LIMIT, render_diagnostics_section, render_home_section, render_mobile_section, render_mobile_stream_composer_section, render_mobile_stream_messages_section, render_mobile_stream_shell, render_sessions_section
 
 
 APP_DIR = Path(__file__).resolve().parent.parent
@@ -38,6 +38,7 @@ ASYNC_SERVICE_ACTIONS = {
     "restart-qq-stack",
 }
 STREAM_HISTORY_PAGE_SIZE = 20
+STREAM_CODEX_HISTORY_PAGE_SIZE = 4
 STREAM_SIDEBAR_PAGE_SIZE = 40
 CODEX_THREAD_RUNTIME_STATUS_LIMIT = 100
 CODEX_THREAD_RUNTIME_RECENT_SECONDS = 5.0
@@ -94,7 +95,7 @@ class _ClientState(MutableMapping[str, object]):
 
 
 def _stream_initial_history_limit(session_name: str) -> int:
-    return STREAM_MANUAL_HISTORY_LIMIT
+    return STREAM_CODEX_INITIAL_HISTORY_LIMIT if str(session_name or "").strip().startswith("codex:") else STREAM_MANUAL_HISTORY_LIMIT
 
 
 def _load_persisted_stream_session(path: Path = STREAM_UI_SELECTION_PATH) -> str:
@@ -1544,6 +1545,38 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             color: var(--cb-accent-bright);
             background: var(--cb-accent-soft);
         }
+        .cb-stream-markdown a[href^="#chatbridge-image="],
+        .cb-stream-markdown a.cb-stream-inline-image-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            color: var(--cb-accent-bright);
+            cursor: pointer;
+            font-weight: 500;
+            vertical-align: baseline;
+        }
+        .cb-stream-inline-image-icon {
+            display: inline-flex;
+            width: 1.05em;
+            height: 1.05em;
+            flex: 0 0 auto;
+        }
+        .cb-stream-inline-image-icon svg {
+            display: block;
+            width: 100%;
+            height: 100%;
+            fill: none;
+            stroke: currentColor;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            stroke-width: 1.8;
+        }
+        .cb-stream-markdown a.cb-stream-inline-image-link:hover,
+        .cb-stream-markdown a.cb-stream-inline-image-link:focus-visible {
+            border-color: transparent;
+            text-decoration: underline;
+            transform: none;
+        }
         .cb-stream-markdown a.cb-stream-file-link-copied,
         .cb-stream-markdown a.cb-stream-file-link-copied code {
             background: var(--cb-ok-soft);
@@ -2153,8 +2186,14 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             align-items: baseline;
             min-width: 0;
             gap: 0.55rem;
+            overflow: hidden;
+        }
+        .cb-stream-command-group-copy > .cb-stream-tool-action {
+            flex: 0 0 auto;
+            white-space: nowrap;
         }
         .cb-stream-command-single-preview {
+            flex: 1 1 auto;
             min-width: 0;
             overflow: hidden;
             color: var(--cb-muted);
@@ -3885,7 +3924,8 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             }})();
             """
         )
-        limits[cleaned_session_name] = _stream_session_task_limit(cleaned_session_name) + STREAM_HISTORY_PAGE_SIZE
+        history_page_size = STREAM_CODEX_HISTORY_PAGE_SIZE if cleaned_session_name.startswith("codex:") else STREAM_HISTORY_PAGE_SIZE
+        limits[cleaned_session_name] = _stream_session_task_limit(cleaned_session_name) + history_page_size
         _refresh_stream_parts(refresh_composer=False, refresh_messages=True)
         scroll_stream_to_bottom(cleaned_session_name, preserve_top=True)
 
@@ -4606,8 +4646,9 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         installed_clients.add(client_key)
         script = """
             (() => {
-                if (window.__cbStreamPatchRuntimeReady !== '5') {
-                window.__cbStreamPatchRuntimeReady = '5';
+                const runtimeVersion = '10';
+                if (window.__cbStreamPatchRuntimeReady !== runtimeVersion) {
+                window.__cbStreamPatchRuntimeReady = runtimeVersion;
                 window.__cbStreamAfterPatch = (options = {}) => {
                 try {
                     if (window.history && 'scrollRestoration' in window.history) {
@@ -4704,6 +4745,16 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                 const readScrollTop = (scroller) => Math.max(0, Number(scroller.scrollTop) || 0);
                 const maxScrollTop = (scroller) => Math.max(0, scroller.scrollHeight - scroller.clientHeight);
                 const clampScrollTop = (scroller, value) => Math.min(maxScrollTop(scroller), Math.max(0, Number(value) || 0));
+                const wheelDeltaPixels = (event, scroller) => {
+                    let delta = Number(event.deltaY) || 0;
+                    if (!delta && Number(event.wheelDelta)) {
+                        delta = -Number(event.wheelDelta) / 3;
+                    }
+                    if (event.deltaMode === 1) delta *= 16;
+                    if (event.deltaMode === 2) delta *= scroller.clientHeight;
+                    const maxDelta = Math.max(80, scroller.clientHeight * 0.9);
+                    return Math.max(-maxDelta, Math.min(maxDelta, delta));
+                };
                 const programmaticScrollers = window.__cbStreamProgrammaticScrollers || new WeakSet();
                 window.__cbStreamProgrammaticScrollers = programmaticScrollers;
                 const markProgrammaticScroll = (scroller) => {
@@ -4758,6 +4809,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     window.__cbStreamWasNearBottom = state.nearBottom;
                     if (source === 'user' && isProgrammaticScroll(scroller)) {
                         source = 'script';
+                        keepSavedTop = true;
                     }
                     if ((!keepSavedTop && !state.restoreTopPending) || source === 'user') {
                         state.top = readScrollTop(scroller);
@@ -4765,7 +4817,6 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     }
                     if (source === 'user') {
                         window.__cbStreamForceBottomUntil = 0;
-                        window.__cbStreamUserScrollIntentUntil = 0;
                         state.userScrolledAway = delta > userScrollAwayLimit;
                         window.__cbStreamUserScrolledAway = state.userScrolledAway;
                     } else {
@@ -4972,6 +5023,29 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                                 image.setAttribute('title', imageLightboxOpenLabel);
                             });
                         };
+                        const prepareMarkdownImageLinks = () => {
+                            document.querySelectorAll('.cb-stream-markdown a[href^="#chatbridge-image="]').forEach((anchor) => {
+                                if (anchor.dataset.cbImageLinkReady === '1') return;
+                                const href = anchor.getAttribute('href') || '';
+                                const payload = href.slice('#chatbridge-image='.length);
+                                const labelSeparator = payload.indexOf('&label=');
+                                const source = labelSeparator >= 0 ? payload.slice(0, labelSeparator) : payload;
+                                const encodedLabel = labelSeparator >= 0 ? payload.slice(labelSeparator + '&label='.length) : '';
+                                if (!source) return;
+                                const icon = document.createElement('span');
+                                icon.className = 'cb-stream-inline-image-icon';
+                                icon.setAttribute('aria-hidden', 'true');
+                                icon.innerHTML = '<svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="3"></rect><circle cx="9" cy="9" r="1.5"></circle><path d="m5.5 17 4.25-4.25 3.2 3.2 2.15-2.15 3.4 3.2"></path></svg>';
+                                anchor.prepend(icon);
+                                anchor.dataset.cbImageLinkReady = '1';
+                                anchor.classList.add('cb-stream-inline-image-link', 'cb-stream-image-lightbox-trigger');
+                                anchor.setAttribute('data-lightbox-src', source);
+                                anchor.setAttribute('data-lightbox-label', encodedLabel || encodeURIComponent(anchor.textContent?.trim() || ''));
+                                anchor.setAttribute('role', 'button');
+                                anchor.setAttribute('tabindex', '0');
+                                anchor.setAttribute('title', imageLightboxOpenLabel);
+                            });
+                        };
                         const prepareLightboxTriggers = () => {
                             document.querySelectorAll('.cb-stream-image-lightbox-trigger[data-lightbox-src]').forEach((trigger) => {
                                 const source = trigger.getAttribute('data-lightbox-src') || '';
@@ -5012,7 +5086,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                                 </div>
                             </div>
                         `;
-                        document.body.appendChild(overlay);
+                        (document.documentElement || document.body).appendChild(overlay);
                         const state = {
                             scale: 1,
                             x: 0,
@@ -5098,6 +5172,11 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                             const items = lightboxItems();
                             const index = items.findIndex((item) => item.key === key);
                             openAt(index >= 0 ? index : 0);
+                            const triggerLabel = decodeAttr(trigger?.getAttribute?.('data-lightbox-label') || '');
+                            if (triggerLabel) {
+                                if (image) image.setAttribute('alt', triggerLabel);
+                                if (caption) caption.textContent = triggerLabel;
+                            }
                         };
                         overlay.__cbLightboxOpenAt = openAt;
                         overlay.__cbLightboxOpenTrigger = openTrigger;
@@ -5245,6 +5324,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                         }, true);
                     }
                     prepareMarkdownImages();
+                    prepareMarkdownImageLinks();
                     prepareLightboxTriggers();
                 };
                 const setupCodeBlockCopy = () => {
@@ -5509,10 +5589,9 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                         if (target?.closest?.('.cb-sidebar-shell, .cb-composer-zone, .q-menu, .q-dialog')) return;
                         const scroller = document.querySelector('.cb-agent-stream');
                         if (!scroller) return;
-                        const deltaY = Number(event.deltaY) || (Number(event.wheelDelta) ? -Number(event.wheelDelta) : 0);
+                        const deltaY = wheelDeltaPixels(event, scroller);
                         if (!deltaY) return;
-                        const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? scroller.clientHeight : 1;
-                        const nextTop = clampScrollTop(scroller, scroller.scrollTop + deltaY * unit);
+                        const nextTop = clampScrollTop(scroller, scroller.scrollTop + deltaY);
                         if (nextTop === scroller.scrollTop) return;
                         acceptUserScroll(scroller);
                         event.preventDefault();
@@ -5570,8 +5649,8 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                         scroller.dataset.cbWheelReady = '1';
                         scroller.addEventListener('wheel', (event) => {
                             if (event.defaultPrevented || event.deltaY === 0) return;
-                            const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? scroller.clientHeight : 1;
-                            const nextTop = clampScrollTop(scroller, scroller.scrollTop + event.deltaY * unit);
+                            const deltaY = wheelDeltaPixels(event, scroller);
+                            const nextTop = clampScrollTop(scroller, scroller.scrollTop + deltaY);
                             if (nextTop === scroller.scrollTop) return;
                             acceptUserScroll(scroller);
                             event.preventDefault();
@@ -5593,7 +5672,9 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     return streamChanged;
                 };
                 const positionScroller = (scroller) => {
-                    const streamChanged = attachScrollListener(scroller);
+                    const scrollerChanged = window.__cbStreamAttachedScroller !== scroller;
+                    window.__cbStreamAttachedScroller = scroller;
+                    attachScrollListener(scroller);
                     const key = window.__cbStreamActiveKey || window.__cbStreamDesiredActiveKey || activeKey || readRenderedActiveKey();
                     const state = scrollStateFor(key);
                     const previousTop = Number(state.top);
@@ -5638,7 +5719,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                         || (!state.userScrolledAway && state.nearBottom === true)
                         || !Number.isFinite(previousTop)
                     );
-                    if (preserveTop && !shouldStickToBottom) {
+                    if ((preserveTop || scrollerChanged) && !shouldStickToBottom) {
                         markProgrammaticScroll(scroller);
                         const topWasClamped = restorePreviousTop();
                         updateScrollState(scroller, 'script', topWasClamped);
@@ -5648,9 +5729,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     if (shouldStickToBottom) {
                         scrollToBottom(scroller);
                     } else {
-                        markProgrammaticScroll(scroller);
-                        const topWasClamped = restorePreviousTop();
-                        updateScrollState(scroller, 'script', topWasClamped);
+                        updateScrollState(scroller, 'script');
                         revealPositionedStream();
                         return;
                     }
