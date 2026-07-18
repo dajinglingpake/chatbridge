@@ -42,6 +42,11 @@ from core.platform_compat import creationflags
 from core.runtime_paths import APP_SERVICE_ERR_LOG, APP_SERVICE_OUT_LOG, LOG_DIR, SERVICE_ACTION_LOG_PATH, SERVICE_ACTION_STATE_PATH, STATE_DIR
 from core.state_models import HubAgentSnapshot, HubTask, JsonObject, WeixinConversationBinding
 from core.bridge_notifier import broadcast_bridge_notice_by_kind
+from core.codex_desktop_control import (
+    CodexDesktopControlError,
+    interrupt_codex_desktop_thread,
+    send_codex_desktop_thread_message,
+)
 
 
 ActionRunner = Callable[[], list[str]]
@@ -373,6 +378,46 @@ def cancel_hub_task(task_id: str) -> ServiceResult:
         suffix = f" | 会话：{session_name}" if session_name else ""
         return ServiceResult(ok=True, message=f"已请求停止任务：{cleaned_task_id}{suffix}")
     return ServiceResult(ok=False, message=f"取消失败：{response.error or 'unknown error'}")
+
+
+def interrupt_codex_thread(thread_id: str, *, timeout_seconds: float = 15.0) -> ServiceResult:
+    cleaned_thread_id = str(thread_id or "").strip()
+    if not cleaned_thread_id:
+        return ServiceResult(ok=False, message="停止失败：thread_id 不能为空")
+    try:
+        turn_id = interrupt_codex_desktop_thread(cleaned_thread_id, timeout_seconds=timeout_seconds)
+    except CodexDesktopControlError as exc:
+        return ServiceResult(ok=False, message=f"停止失败：{exc}")
+    return ServiceResult(ok=True, message=f"已停止 Codex 历史会话：{cleaned_thread_id} | 轮次：{turn_id}")
+
+
+def send_codex_thread_message(
+    thread_id: str,
+    prompt: str,
+    *,
+    images: list[str] | None = None,
+    timeout_seconds: float = 15.0,
+) -> ServiceResult:
+    cleaned_thread_id = str(thread_id or "").strip()
+    cleaned_prompt = str(prompt or "").strip()
+    if not cleaned_thread_id:
+        return ServiceResult(ok=False, message="发送失败：thread_id 不能为空")
+    if not cleaned_prompt:
+        return ServiceResult(ok=False, message="发送失败：消息内容不能为空")
+    try:
+        result = send_codex_desktop_thread_message(
+            cleaned_thread_id,
+            cleaned_prompt,
+            images=images,
+            timeout_seconds=timeout_seconds,
+        )
+    except CodexDesktopControlError as exc:
+        return ServiceResult(ok=False, message=f"发送失败：{exc}")
+    action = "已追加到运行中的轮次" if result.mode == "steer" else "已启动新轮次"
+    return ServiceResult(
+        ok=True,
+        message=f"Codex 历史会话已接收消息：{cleaned_thread_id} | {action}：{result.turn_id}",
+    )
 
 
 def list_codex_threads(

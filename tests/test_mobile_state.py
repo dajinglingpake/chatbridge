@@ -610,6 +610,53 @@ class MobileStateTests(unittest.TestCase):
 
         mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
 
+    def test_codex_rollout_cache_only_parses_newly_appended_lines(self) -> None:
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+        mobile._CODEX_ROLLOUT_PATH_CACHE.clear()
+        with TemporaryDirectory() as temp_dir:
+            sessions_root = Path(temp_dir) / "codex" / "sessions"
+            sessions_root.mkdir(parents=True)
+            jsonl_path = sessions_root / "rollout-thread-incremental.jsonl"
+            first_event = {
+                "type": "response_item",
+                "timestamp": "2026-07-18T10:00:00",
+                "payload": {
+                    "type": "reasoning",
+                    "summary": [{"text": "first"}],
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
+                },
+            }
+            second_event = {
+                "type": "response_item",
+                "timestamp": "2026-07-18T10:00:01",
+                "payload": {
+                    "type": "reasoning",
+                    "summary": [{"text": "second"}],
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
+                },
+            }
+            jsonl_path.write_text(json.dumps(first_event) + "\n", encoding="utf-8")
+
+            with (
+                patch("ui.mobile._codex_sessions_root", return_value=sessions_root),
+                patch("ui.mobile.json.loads", wraps=json.loads) as loads,
+            ):
+                first_payload = mobile._codex_raw_view_image_payload("thread-incremental")
+                first_parse_count = loads.call_count
+                with jsonl_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(second_event) + "\n")
+                second_payload = mobile._codex_raw_view_image_payload("thread-incremental")
+
+            self.assertEqual(first_parse_count + 1, loads.call_count)
+            self.assertEqual(
+                ["first", "second"],
+                [item["text"] for item in second_payload["reasoning_times"]["turn-1"]],
+            )
+            self.assertEqual(1, len(first_payload["reasoning_times"]["turn-1"]))
+
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+        mobile._CODEX_ROLLOUT_PATH_CACHE.clear()
+
     def test_codex_function_tool_image_result_gets_mobile_preview(self) -> None:
         mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
         with TemporaryDirectory() as temp_dir:

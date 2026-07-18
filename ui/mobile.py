@@ -67,6 +67,7 @@ _RAW_STREAM_WINDOW_CACHE: dict[str, object] = {"key": None, "window": None}
 _RAW_STREAM_INDEX_CACHE: dict[str, object] = {"key": None, "index": None}
 _RAW_STREAM_SIDEBAR_CACHE: dict[str, object] = {"key": None, "state": None}
 _CODEX_VIEW_IMAGE_PREVIEW_CACHE: dict[str, dict[str, object]] = {}
+_CODEX_ROLLOUT_PATH_CACHE: dict[str, Path] = {}
 MOBILE_ASYNC_ACTIONS = {
     "restart",
     "restart-bridge",
@@ -1469,6 +1470,9 @@ def _find_codex_rollout_jsonl(thread_id: str) -> Path | None:
     cleaned = re.sub(r"[^A-Za-z0-9_.-]", "", str(thread_id or "").strip())
     if not cleaned:
         return None
+    cached_path = _CODEX_ROLLOUT_PATH_CACHE.get(cleaned)
+    if isinstance(cached_path, Path) and cached_path.is_file():
+        return cached_path
     root = _codex_sessions_root()
     if not root.is_dir():
         return None
@@ -1478,7 +1482,9 @@ def _find_codex_rollout_jsonl(thread_id: str) -> Path | None:
         return None
     if not matches:
         return None
-    return max(matches, key=lambda path: path.stat().st_mtime_ns)
+    latest = max(matches, key=lambda path: path.stat().st_mtime_ns)
+    _CODEX_ROLLOUT_PATH_CACHE[cleaned] = latest
+    return latest
 
 def _codex_raw_view_image_payload(thread_id: str) -> dict[str, object]:
     cleaned = str(thread_id or "").strip()
@@ -1512,23 +1518,62 @@ def _codex_raw_view_image_payload(thread_id: str) -> dict[str, object]:
             "reasoning_times": _copy_codex_reasoning_times(cached.get("reasoning_times")),
             "commands": _copy_codex_commands(cached.get("commands")),
         }
-    previews_by_turn: dict[str, list[dict[str, str]]] = {}
-    events_by_turn: dict[str, list[dict[str, object]]] = {}
-    image_events: list[dict[str, object]] = []
-    pending_image_events: dict[str, dict[str, object]] = {}
-    image_refs: dict[str, dict[str, object]] = {}
-    turn_times_by_turn: dict[str, dict[str, str]] = {}
-    reasoning_times_by_turn: dict[str, list[dict[str, str]]] = {}
-    commands_by_turn: dict[str, list[dict[str, object]]] = {}
-    pending_exec_commands: dict[str, list[dict[str, object]]] = {}
+    parser_state = cached.get("parser_state") if isinstance(cached, dict) else None
+    cached_offset = int(cached.get("offset") or 0) if isinstance(cached, dict) else 0
+    can_resume = (
+        isinstance(parser_state, dict)
+        and path is not None
+        and str(cached.get("path") or "") == str(path)
+        and 0 <= cached_offset <= path_signature[2]
+    )
+    if can_resume:
+        previews_by_turn = parser_state.get("previews_by_turn")
+        events_by_turn = parser_state.get("events_by_turn")
+        image_events = parser_state.get("image_events")
+        pending_image_events = parser_state.get("pending_image_events")
+        image_refs = parser_state.get("image_refs")
+        turn_times_by_turn = parser_state.get("turn_times_by_turn")
+        reasoning_times_by_turn = parser_state.get("reasoning_times_by_turn")
+        commands_by_turn = parser_state.get("commands_by_turn")
+        pending_exec_commands = parser_state.get("pending_exec_commands")
+        can_resume = all(
+            (
+                isinstance(previews_by_turn, dict),
+                isinstance(events_by_turn, dict),
+                isinstance(image_events, list),
+                isinstance(pending_image_events, dict),
+                isinstance(image_refs, dict),
+                isinstance(turn_times_by_turn, dict),
+                isinstance(reasoning_times_by_turn, dict),
+                isinstance(commands_by_turn, dict),
+                isinstance(pending_exec_commands, dict),
+            )
+        )
+    if not can_resume:
+        cached_offset = 0
+        previews_by_turn: dict[str, list[dict[str, str]]] = {}
+        events_by_turn: dict[str, list[dict[str, object]]] = {}
+        image_events: list[dict[str, object]] = []
+        pending_image_events: dict[str, dict[str, object]] = {}
+        image_refs: dict[str, dict[str, object]] = {}
+        turn_times_by_turn: dict[str, dict[str, str]] = {}
+        reasoning_times_by_turn: dict[str, list[dict[str, str]]] = {}
+        commands_by_turn: dict[str, list[dict[str, object]]] = {}
+        pending_exec_commands: dict[str, list[dict[str, object]]] = {}
+    processed_offset = cached_offset
     if path is not None:
         try:
             with path.open("rb") as handle:
+                handle.seek(cached_offset)
                 while True:
                     line_offset = handle.tell()
                     line = handle.readline()
                     if not line:
                         break
+                    if not line.endswith(b"\n"):
+                        handle.seek(line_offset)
+                        break
+                    processed_offset = handle.tell()
                     try:
                         item = json.loads(line)
                     except (json.JSONDecodeError, UnicodeDecodeError):
@@ -1746,8 +1791,30 @@ def _codex_raw_view_image_payload(thread_id: str) -> dict[str, object]:
             outputs_by_turn[turn_id] = output
         if has_custom_tool_image:
             output_segments_by_turn[turn_id] = output_segments
+    try:
+        final_path_signature = (str(path), path.stat().st_mtime_ns, path.stat().st_size) if path else ("", 0, 0)
+    except OSError:
+        final_path_signature = path_signature
+    cached_signature = (
+        final_path_signature
+        if processed_offset >= final_path_signature[2]
+        else (final_path_signature[0], final_path_signature[1], processed_offset)
+    )
     _CODEX_VIEW_IMAGE_PREVIEW_CACHE[cleaned] = {
-        "signature": path_signature,
+        "signature": cached_signature,
+        "path": str(path or ""),
+        "offset": processed_offset,
+        "parser_state": {
+            "previews_by_turn": previews_by_turn,
+            "events_by_turn": events_by_turn,
+            "image_events": image_events,
+            "pending_image_events": pending_image_events,
+            "image_refs": image_refs,
+            "turn_times_by_turn": turn_times_by_turn,
+            "reasoning_times_by_turn": reasoning_times_by_turn,
+            "commands_by_turn": commands_by_turn,
+            "pending_exec_commands": pending_exec_commands,
+        },
         "previews": {
             turn_id: [dict(preview) for preview in previews]
             for turn_id, previews in previews_by_turn.items()
@@ -1760,13 +1827,13 @@ def _codex_raw_view_image_payload(thread_id: str) -> dict[str, object]:
         "commands": _copy_codex_commands(commands_by_turn),
     }
     return {
-        "previews": previews_by_turn,
-        "outputs": outputs_by_turn,
-        "output_segments": output_segments_by_turn,
-        "image_refs": image_refs,
-        "turn_times": turn_times_by_turn,
-        "reasoning_times": reasoning_times_by_turn,
-        "commands": commands_by_turn,
+        "previews": _copy_preview_map(previews_by_turn),
+        "outputs": dict(outputs_by_turn),
+        "output_segments": _copy_codex_output_segments_by_turn(output_segments_by_turn),
+        "image_refs": _copy_codex_image_refs(image_refs),
+        "turn_times": _copy_codex_turn_times(turn_times_by_turn),
+        "reasoning_times": _copy_codex_reasoning_times(reasoning_times_by_turn),
+        "commands": _copy_codex_commands(commands_by_turn),
     }
 
 

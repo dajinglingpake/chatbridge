@@ -24,6 +24,7 @@ VENV_DIR = APP_DIR / ".venv"
 REQUIREMENTS_PATH = APP_DIR / "requirements.txt"
 IMPORT_NAME_OVERRIDES = {
     "Pillow": "PIL",
+    "websocket-client": "websocket",
 }
 
 

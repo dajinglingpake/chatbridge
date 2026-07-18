@@ -170,6 +170,46 @@ class AppServiceConversationTests(unittest.TestCase):
         self.assertIn("task-001", result.message)
         self.assertIn("focus", result.message)
 
+    def test_interrupt_codex_thread_uses_desktop_bridge(self) -> None:
+        with patch.object(app_service, "interrupt_codex_desktop_thread", return_value="turn-001") as interrupt:
+            result = app_service.interrupt_codex_thread(" thread-001 ", timeout_seconds=9)
+
+        self.assertTrue(result.ok)
+        self.assertIn("thread-001", result.message)
+        self.assertIn("turn-001", result.message)
+        interrupt.assert_called_once_with("thread-001", timeout_seconds=9)
+
+    def test_send_codex_thread_message_uses_desktop_bridge(self) -> None:
+        bridge_result = SimpleNamespace(mode="steer", turn_id="turn-002")
+        with patch.object(app_service, "send_codex_desktop_thread_message", return_value=bridge_result) as send:
+            result = app_service.send_codex_thread_message(
+                " thread-001 ",
+                " continue ",
+                images=["C:/tmp/shot.png"],
+                timeout_seconds=9,
+            )
+
+        self.assertTrue(result.ok)
+        self.assertIn("已追加到运行中的轮次", result.message)
+        self.assertIn("turn-002", result.message)
+        send.assert_called_once_with(
+            "thread-001",
+            "continue",
+            images=["C:/tmp/shot.png"],
+            timeout_seconds=9,
+        )
+
+    def test_send_codex_thread_message_reports_desktop_bridge_failure(self) -> None:
+        with patch.object(
+            app_service,
+            "send_codex_desktop_thread_message",
+            side_effect=app_service.CodexDesktopControlError("desktop unavailable"),
+        ):
+            result = app_service.send_codex_thread_message("thread-001", "continue")
+
+        self.assertFalse(result.ok)
+        self.assertIn("desktop unavailable", result.message)
+
     def test_submit_hub_task_includes_images(self) -> None:
         requests: list[tuple[str, dict[str, object]]] = []
 

@@ -1616,8 +1616,9 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("排队发送", send_buttons[0].props_text)
         self.assertEqual("keyboard_return", send_buttons[0].attrs["icon"])
 
-    def test_external_codex_runtime_is_rendered_like_a_passive_running_task(self) -> None:
+    def test_external_codex_runtime_exposes_precise_thread_stop_controls(self) -> None:
         ui = FakeUI()
+        cancel_calls: list[tuple[str, str]] = []
         mobile_state = {
             "counts": {"running": 0, "queued": 0},
             "agents": [{"id": "codex", "name": "Codex", "backend": "codex"}],
@@ -1663,7 +1664,7 @@ class StreamComposerTests(unittest.TestCase):
             _noop,
             _noop,
             _noop,
-            _noop,
+            lambda cancel_kind, target_id: cancel_calls.append((cancel_kind, target_id)),
             _noop,
             _noop,
             _noop,
@@ -1683,12 +1684,20 @@ class StreamComposerTests(unittest.TestCase):
         self.assertEqual(current_activity, live_markdowns)
         self.assertIn("data-stream-text-key=codex-thread-live-turn-2%3Aactivity", current_activity[0].props_text)
         self.assertEqual(1, len(working_loaders))
-        self.assertEqual([], stop_buttons)
-        self.assertEqual([], composer_stop_buttons)
+        self.assertEqual(1, len(stop_buttons))
+        self.assertEqual(1, len(composer_stop_buttons))
+        self.assertIn("data-cancel-kind=codex_thread", stop_buttons[0].props_text)
+        self.assertIn("data-cancel-id=thread-live", stop_buttons[0].props_text)
+        stop_buttons[0].attrs["on_click"]()
+        composer_stop_buttons[0].attrs["on_click"]()
+        self.assertEqual(
+            [("codex_thread", "thread-live"), ("codex_thread", "thread-live")],
+            cancel_calls,
+        )
         self.assertEqual(2, len(turns))
         self.assertEqual(1, len(send_buttons))
-        self.assertIn("排队发送", send_buttons[0].props_text)
-        self.assertEqual("keyboard_return", send_buttons[0].attrs["icon"])
+        self.assertIn("追加消息", send_buttons[0].props_text)
+        self.assertEqual("arrow_upward", send_buttons[0].attrs["icon"])
 
     def test_external_codex_runtime_does_not_duplicate_a_real_running_task(self) -> None:
         ui = FakeUI()
@@ -2684,7 +2693,7 @@ class StreamComposerTests(unittest.TestCase):
         sections_source = Path("ui/sections.py").read_text(encoding="utf-8")
         controls_start = sections_source.index('with ui.element("span").classes("cb-stream-running-controls")')
         metadata_start = sections_source.index('with ui.element("span").classes("cb-stream-running-meta")', controls_start)
-        stop_button_start = sections_source.index('if task_id and task.get("cancelable") is not False:', controls_start)
+        stop_button_start = sections_source.index('if cancel_target_id and task.get("cancelable") is not False:', controls_start)
         self.assertLess(controls_start, metadata_start)
         self.assertLess(metadata_start, stop_button_start)
 
@@ -3796,6 +3805,21 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn('icon="close",', sections_source)
         self.assertNotIn("padding: 0.65rem 0.75rem 0.6rem;", source)
         self.assertNotIn("padding: 0.55rem 0.55rem max(0.75rem, env(safe-area-inset-bottom));", source)
+
+    def test_codex_history_composer_uses_desktop_thread_bridge_without_blocking_ui(self) -> None:
+        app_source = Path("ui/app.py").read_text(encoding="utf-8")
+        sections_source = Path("ui/sections.py").read_text(encoding="utf-8")
+
+        start = app_source.index("async def _submit_stream_message")
+        end = app_source.index("def _open_mobile_url", start)
+        submit_body = app_source[start:end]
+        self.assertIn("if codex_thread_id:", submit_body)
+        self.assertIn("send_codex_thread_message", submit_body)
+        self.assertIn("await asyncio.to_thread", submit_body)
+        self.assertIn("submit_hub_task", submit_body)
+        self.assertIn("images=images", submit_body)
+        self.assertIn("async def submit_composer", sections_source)
+        self.assertIn("inspect.isawaitable(submitted)", sections_source)
 
     def test_stream_message_chrome_tracks_paseo_spacing_contract(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")

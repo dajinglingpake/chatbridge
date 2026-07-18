@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import re
 from datetime import datetime, timezone
@@ -1979,7 +1980,9 @@ def _prepare_stream_render_context(mobile_state: dict[str, object], selected_ses
                 "status": "running",
                 "runtime_indicator": True,
                 "runtime_key": runtime_key,
-                "cancelable": False,
+                "cancelable": True,
+                "cancel_target_kind": "codex_thread",
+                "cancel_target_id": str(selected_codex_thread.get("id") or active_session[6:]).strip(),
                 "runtime_activity": selected_runtime_activity,
             }
         )
@@ -2021,6 +2024,16 @@ def _prepare_stream_render_context(mobile_state: dict[str, object], selected_ses
         None,
     )
     latest_cancelable_task_id = str(latest_cancelable_task.get("id") or "").strip() if isinstance(latest_cancelable_task, dict) else ""
+    latest_cancel_target_kind = (
+        str(latest_cancelable_task.get("cancel_target_kind") or "hub_task").strip()
+        if isinstance(latest_cancelable_task, dict)
+        else ""
+    )
+    latest_cancel_target_id = (
+        str(latest_cancelable_task.get("cancel_target_id") or latest_cancelable_task_id).strip()
+        if isinstance(latest_cancelable_task, dict)
+        else ""
+    )
     status_task = latest_active_task if isinstance(latest_active_task, dict) else latest_task
     default_agent = str(status_task.get("agent_id") or default_agent_item.get("id") or "main") if isinstance(status_task, dict) else str(default_agent_item.get("id") or "main")
     default_backend = str(status_task.get("backend") or default_agent_item.get("backend") or "") if isinstance(status_task, dict) else str(default_agent_item.get("backend") or "")
@@ -2038,6 +2051,8 @@ def _prepare_stream_render_context(mobile_state: dict[str, object], selected_ses
         "latest_task_id": latest_task_id,
         "latest_active_task_id": latest_active_task_id,
         "latest_cancelable_task_id": latest_cancelable_task_id,
+        "latest_cancel_target_kind": latest_cancel_target_kind,
+        "latest_cancel_target_id": latest_cancel_target_id,
         "default_agent": default_agent,
         "default_backend": default_backend,
         "context_left_percent": context_left_percent,
@@ -2319,6 +2334,8 @@ def _render_mobile_stream_messages(
                                     with ui.element("div").classes("cb-stream-turn-footer"):
                                         if status in {"running", "queued"}:
                                             task_id = str(task.get("id") or "").strip()
+                                            cancel_target_kind = str(task.get("cancel_target_kind") or "hub_task").strip() or "hub_task"
+                                            cancel_target_id = str(task.get("cancel_target_id") or task_id).strip()
                                             runtime_indicator = bool(task.get("runtime_indicator"))
                                             execution_started_at = str(
                                                 task.get("started_at")
@@ -2341,13 +2358,17 @@ def _render_mobile_stream_messages(
                                                         ui.label(
                                                             _stream_live_execution_text(task, started_at=execution_started_at)
                                                         ).props(f'data-started-at="{client_started_at}"').classes("cb-stream-live-elapsed")
-                                                if task_id and task.get("cancelable") is not False:
+                                                if cancel_target_id and task.get("cancelable") is not False:
                                                     stop_label = _tr(t, "ui.web.mobile.cancel_task", "停止任务")
                                                     ui.button(
                                                         "",
-                                                        on_click=lambda task_id=task_id: on_cancel_task(task_id),
+                                                        on_click=lambda cancel_kind=cancel_target_kind, cancel_id=cancel_target_id: on_cancel_task(cancel_kind, cancel_id),
                                                         icon="stop",
-                                                    ).props(f'flat dense round title="{stop_label}" aria-label="{stop_label}" data-task-id={task_id}').classes("cb-stream-stop-button")
+                                                    ).props(
+                                                        f'flat dense round title="{stop_label}" aria-label="{stop_label}" '
+                                                        f'data-task-id={task_id} data-cancel-kind={cancel_target_kind} '
+                                                        f'data-cancel-id={quote(cancel_target_id, safe="")}'
+                                                    ).classes("cb-stream-stop-button")
                                         else:
                                             if assistant_text:
                                                 ui.button(
@@ -2438,18 +2459,21 @@ def _render_mobile_stream_composer(
     queued_composer_tasks = [task for task in context.get("queued_composer_tasks", []) if isinstance(task, dict)]
     latest_active_task_id = str(context.get("latest_active_task_id") or "")
     latest_cancelable_task_id = str(context.get("latest_cancelable_task_id") or "")
+    latest_cancel_target_kind = str(context.get("latest_cancel_target_kind") or "hub_task")
+    latest_cancel_target_id = str(context.get("latest_cancel_target_id") or latest_cancelable_task_id)
     default_agent = str(context.get("default_agent") or "main")
     default_backend = str(context.get("default_backend") or "")
     context_left_percent = context.get("context_left_percent")
 
-    def submit_composer(input_box: UIElementLike, session: str, agent: str, backend: str) -> None:
+    async def submit_composer(input_box: UIElementLike, session: str, agent: str, backend: str) -> None:
         prompt = str(input_box.value or "")
         if not session.strip():
             return
-        if not prompt.strip():
-            on_send_message(prompt, session, agent, backend)
-            return
         submitted = on_send_message(prompt, session, agent, backend)
+        if inspect.isawaitable(submitted):
+            submitted = await submitted
+        if not prompt.strip():
+            return
         if submitted is not False:
             input_box.set_value("")
 
@@ -2469,7 +2493,7 @@ def _render_mobile_stream_composer(
                                         stop_label = _tr(t, "ui.web.mobile.cancel_task", "停止任务")
                                         ui.button(
                                             "",
-                                            on_click=lambda task_id=queued_task_id: on_cancel_task(task_id),
+                                            on_click=lambda task_id=queued_task_id: on_cancel_task("hub_task", task_id),
                                             icon="close",
                                             color=None,
                                         ).props(f'flat dense round title="{stop_label}" aria-label="{stop_label}" data-task-id={queued_task_id}').classes("cb-composer-queue-cancel")
@@ -2530,19 +2554,25 @@ def _render_mobile_stream_composer(
                                 with ui.element("span").classes("cb-context-meter-track"):
                                     ui.element("span").classes("cb-context-meter-fill").style(f"width: {context_left_percent}%")
                                 ui.label(meter_label).classes("cb-context-meter-label")
-                        if latest_cancelable_task_id:
+                        if latest_cancelable_task_id and latest_cancel_target_id:
                             stop_label = _tr(t, "ui.web.mobile.cancel_task", "停止任务")
                             ui.button(
                                 "",
-                                on_click=lambda task_id=latest_cancelable_task_id: on_cancel_task(task_id),
+                                on_click=lambda cancel_kind=latest_cancel_target_kind, cancel_id=latest_cancel_target_id: on_cancel_task(cancel_kind, cancel_id),
                                 icon="stop",
-                            ).props(f'unelevated round color=negative title="{stop_label}" aria-label="{stop_label}" data-task-id={latest_cancelable_task_id}').classes("cb-composer-stop-button cb-composer-cancel-button")
-                        send_label = (
-                            _tr(t, "ui.web.mobile.queue_message", "排队发送")
-                            if latest_active_task_id
-                            else _tr(t, "ui.web.mobile.send_message", "发送消息")
-                        )
-                        send_icon = "keyboard_return" if latest_active_task_id else "arrow_upward"
+                            ).props(
+                                f'unelevated round color=negative title="{stop_label}" aria-label="{stop_label}" '
+                                f'data-task-id={latest_cancelable_task_id} data-cancel-kind={latest_cancel_target_kind} '
+                                f'data-cancel-id={quote(latest_cancel_target_id, safe="")}'
+                            ).classes("cb-composer-stop-button cb-composer-cancel-button")
+                        is_codex_steer = bool(latest_active_task_id and latest_cancel_target_kind == "codex_thread")
+                        if is_codex_steer:
+                            send_label = _tr(t, "ui.web.mobile.steer_message", "追加消息")
+                        elif latest_active_task_id:
+                            send_label = _tr(t, "ui.web.mobile.queue_message", "排队发送")
+                        else:
+                            send_label = _tr(t, "ui.web.mobile.send_message", "发送消息")
+                        send_icon = "arrow_upward" if is_codex_steer or not latest_active_task_id else "keyboard_return"
                         ui.button(
                             "",
                             on_click=lambda input_box=message_input, session=active_session, agent=default_agent, backend=default_backend: submit_composer(input_box, session, agent, backend),

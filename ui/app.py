@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 from collections.abc import Callable, MutableMapping
 import json
@@ -14,7 +15,7 @@ import uuid
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from core.app_service import cancel_hub_task, delete_agent, reset_weixin_conversation, run_named_action, run_repair_command, save_agent, schedule_named_action, set_weixin_notice_enabled, submit_hub_task, switch_active_account, switch_bridge_agent, switch_weixin_session_backend, terminate_external_agent
+from core.app_service import cancel_hub_task, delete_agent, interrupt_codex_thread, reset_weixin_conversation, run_named_action, run_repair_command, save_agent, schedule_named_action, send_codex_thread_message, set_weixin_notice_enabled, submit_hub_task, switch_active_account, switch_bridge_agent, switch_weixin_session_backend, terminate_external_agent
 from core.navigation import PRIMARY_PAGES
 from core.shell_schema import APP_SHELL
 from core.dashboard import refresh_dashboard_cache
@@ -3826,14 +3827,36 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         pending[cleaned_session_name] = [item for item in images if str(item) != cleaned_path]
         stream_composer_view.refresh()
 
-    def _cancel_stream_task(task_id: str) -> None:
-        cleaned_task_id = str(task_id or "").strip()
-        if not cleaned_task_id:
+    async def _cancel_stream_task(cancel_kind: str, target_id: str = "") -> None:
+        cleaned_kind = str(cancel_kind or "hub_task").strip() or "hub_task"
+        cleaned_target_id = str(target_id or cancel_kind or "").strip()
+        if not cleaned_target_id:
             ui.notify(t("ui.web.notify.no_task_to_cancel", "当前没有可停止的任务"), position="top")
             return
-        result = cancel_hub_task(cleaned_task_id)
+        if cleaned_kind == "codex_thread":
+            ui.notify(
+                t(
+                    "ui.web.notify.codex_thread_interrupting",
+                    "正在停止 Codex 历史会话：{thread_id}",
+                    thread_id=cleaned_target_id,
+                ),
+                position="top",
+            )
+            result = await asyncio.to_thread(interrupt_codex_thread, cleaned_target_id)
+        else:
+            result = cancel_hub_task(cleaned_target_id)
         if result.ok:
-            ui.notify(t("ui.web.notify.task_cancel_requested", "已请求停止任务：{task_id}", task_id=cleaned_task_id), position="top")
+            if cleaned_kind == "codex_thread":
+                ui.notify(
+                    t(
+                        "ui.web.notify.codex_thread_interrupted",
+                        "已停止 Codex 历史会话：{thread_id}",
+                        thread_id=cleaned_target_id,
+                    ),
+                    position="top",
+                )
+            else:
+                ui.notify(t("ui.web.notify.task_cancel_requested", "已请求停止任务：{task_id}", task_id=cleaned_target_id), position="top")
         else:
             ui.notify(t("ui.web.notify.task_cancel_failed", "停止任务失败：{message}", message=result.message), position="top")
         _refresh_stream_parts()
@@ -3866,7 +3889,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         _refresh_stream_parts(refresh_composer=False, refresh_messages=True)
         scroll_stream_to_bottom(cleaned_session_name, preserve_top=True)
 
-    def _submit_stream_message(prompt: str, session_name: str, agent_id: str, backend: str) -> bool:
+    async def _submit_stream_message(prompt: str, session_name: str, agent_id: str, backend: str) -> bool:
         cleaned_prompt = str(prompt or "").strip()
         if not cleaned_prompt:
             ui.notify(t("ui.web.notify.enter_message", "请输入消息内容"), position="top")
@@ -3879,21 +3902,55 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             stream_state = _stream_state_snapshot()
             selected_codex_thread = stream_state.get("selected_codex_thread")
             codex_thread = selected_codex_thread if isinstance(selected_codex_thread, dict) else {}
-        result = submit_hub_task(
-            agent_id=agent_id.strip() or "main",
-            prompt=cleaned_prompt,
-            session_name=state["selected_session_name"],
-            backend=backend.strip(),
-            source="stream-web",
-            workdir=str(codex_thread.get("cwd") or ""),
-            session_id=codex_thread_id,
-            images=_stream_pending_image_paths(state["selected_session_name"]),
-        )
+        images = _stream_pending_image_paths(state["selected_session_name"])
+        if codex_thread_id:
+            ui.notify(
+                t(
+                    "ui.web.notify.codex_thread_message_sending",
+                    "正在向 Codex 历史会话发送消息：{thread_id}",
+                    thread_id=codex_thread_id,
+                ),
+                position="top",
+            )
+            result = await asyncio.to_thread(
+                send_codex_thread_message,
+                codex_thread_id,
+                cleaned_prompt,
+                images=images,
+            )
+        else:
+            result = await asyncio.to_thread(
+                submit_hub_task,
+                agent_id=agent_id.strip() or "main",
+                prompt=cleaned_prompt,
+                session_name=state["selected_session_name"],
+                backend=backend.strip(),
+                source="stream-web",
+                workdir=str(codex_thread.get("cwd") or ""),
+                session_id=codex_thread_id,
+                images=images,
+            )
         if result.ok:
             pending = state["stream_pending_images"]
             if isinstance(pending, dict):
                 pending[state["selected_session_name"]] = []
-        _notify(result.message)
+        if codex_thread_id:
+            message = (
+                t(
+                    "ui.web.notify.codex_thread_message_sent",
+                    "Codex 历史会话已接收消息：{thread_id}",
+                    thread_id=codex_thread_id,
+                )
+                if result.ok
+                else t(
+                    "ui.web.notify.codex_thread_message_failed",
+                    "向 Codex 历史会话发送失败：{message}",
+                    message=result.message,
+                )
+            )
+            _notify(message)
+        else:
+            _notify(result.message)
         return result.ok
 
     def _open_mobile_url(url: str) -> None:

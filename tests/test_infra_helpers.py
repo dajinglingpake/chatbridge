@@ -97,10 +97,10 @@ class InfraHelperTests(unittest.TestCase):
     def test_ui_dependency_modules_are_loaded_from_requirements(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             requirements_path = Path(temp_dir) / "requirements.txt"
-            requirements_path.write_text("nicegui\ncryptography\nPillow\n", encoding="utf-8")
+            requirements_path.write_text("nicegui\ncryptography\nPillow\nwebsocket-client\n", encoding="utf-8")
 
             with patch.object(ui_main, "REQUIREMENTS_PATH", requirements_path):
-                self.assertEqual(["nicegui", "cryptography", "PIL"], ui_main._required_dependency_modules())
+                self.assertEqual(["nicegui", "cryptography", "PIL", "websocket"], ui_main._required_dependency_modules())
 
     def test_native_ui_startup_closes_previous_ui_processes_only(self) -> None:
         old_root = FakeUiProcess(101, ["pythonw.exe", "I:/AI/chatbridge/main.py", "--native"], 1)
