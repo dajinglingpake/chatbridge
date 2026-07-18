@@ -21,7 +21,7 @@ from core.dashboard import refresh_dashboard_cache
 from core.json_store import load_json, save_json
 from core.view_models import build_web_console_view_model
 from localization import Localizer, normalize_language
-from ui.mobile import MOBILE_UPLOAD_ROOT, build_mobile_access_url, build_mobile_qr_data_url, build_stream_sidebar_state_snapshot, build_stream_signature_snapshot, build_stream_state_snapshot, codex_thread_id_from_session_name, install_mobile_routes, is_mobile_access_authorized, load_codex_threads_page, stream_hub_state_file_signature, stream_qq_current_session_name
+from ui.mobile import MOBILE_UPLOAD_ROOT, _codex_custom_tool_exec_commands, _codex_custom_tool_names, build_mobile_access_url, build_mobile_qr_data_url, build_stream_sidebar_state_snapshot, build_stream_signature_snapshot, build_stream_state_snapshot, codex_thread_id_from_session_name, install_mobile_routes, is_mobile_access_authorized, load_codex_threads_page, stream_hub_state_file_signature, stream_qq_current_session_name
 from ui.qr_login import install_qr_login_dialog
 from ui.qq_login import install_qq_login_dialog
 from ui.sections import STREAM_MANUAL_HISTORY_LIMIT, render_diagnostics_section, render_home_section, render_mobile_section, render_mobile_stream_composer_section, render_mobile_stream_messages_section, render_mobile_stream_shell, render_sessions_section
@@ -213,10 +213,7 @@ def _codex_rollout_tail_lines(path_value: object, *, max_bytes: int) -> list[byt
     return data.splitlines()
 
 
-def _codex_rollout_runtime_hint(path_value: object) -> bool | None:
-    lines = _codex_rollout_tail_lines(path_value, max_bytes=CODEX_THREAD_RUNTIME_TAIL_BYTES)
-    if lines is None:
-        return None
+def _codex_rollout_runtime_hint_from_lines(lines: list[bytes]) -> bool | None:
     for raw_line in reversed(lines):
         try:
             record = json.loads(raw_line.decode("utf-8"))
@@ -250,6 +247,176 @@ def _codex_rollout_runtime_hint(path_value: object) -> bool | None:
             }:
                 return True
     return None
+
+
+def _codex_runtime_activity_copy(value: object) -> dict[str, object]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _codex_runtime_activity_signature(value: object) -> tuple[str, str, str, str, int]:
+    activity = value if isinstance(value, dict) else {}
+    try:
+        count = int(activity.get("count") or 0)
+    except (TypeError, ValueError):
+        count = 0
+    return (
+        str(activity.get("kind") or ""),
+        str(activity.get("text") or ""),
+        str(activity.get("status") or ""),
+        str(activity.get("at") or ""),
+        count,
+    )
+
+
+def _codex_rollout_reasoning_text(payload: dict[str, object]) -> str:
+    summary = payload.get("summary")
+    if isinstance(summary, list):
+        parts = [
+            str(item.get("text") or "").strip() if isinstance(item, dict) else str(item or "").strip()
+            for item in summary
+        ]
+        text = "\n".join(part for part in parts if part).strip()
+        if text:
+            return text
+    return str(payload.get("text") or "").strip()
+
+
+def _codex_rollout_tool_identity(name: object) -> tuple[str, str, str]:
+    cleaned = str(name or "").strip()
+    if cleaned.startswith("mcp__"):
+        parts = cleaned.split("__", 2)
+        if len(parts) == 3:
+            server, tool = parts[1], parts[2]
+            return server, tool, ".".join(part for part in (server, tool) if part)
+    return "", cleaned, cleaned
+
+
+def _codex_rollout_response_activity(payload: dict[str, object], *, at: str) -> dict[str, object]:
+    event_type = str(payload.get("type") or "").strip()
+    if event_type == "reasoning":
+        text = _codex_rollout_reasoning_text(payload)
+        return {"kind": "reasoning", "text": text, "status": "running", "at": at} if text else {}
+    call_id = str(payload.get("call_id") or "").strip()
+    if event_type == "custom_tool_call":
+        commands = _codex_custom_tool_exec_commands(payload)
+        if commands:
+            command = str(commands[-1].get("command") or "").strip().splitlines()[0]
+            return {
+                "kind": "command",
+                "text": command,
+                "status": "running",
+                "at": at,
+                "count": len(commands),
+                "call_id": call_id,
+            }
+        tool_names = _codex_custom_tool_names(payload)
+        if tool_names:
+            server, tool, display = _codex_rollout_tool_identity(tool_names[-1])
+            return {
+                "kind": "tool",
+                "text": display,
+                "status": "running",
+                "at": at,
+                "server": server,
+                "tool": tool,
+                "call_id": call_id,
+            }
+        return {}
+    if event_type not in {"function_call", "mcp_tool_call"}:
+        return {}
+    raw_name = payload.get("name") or payload.get("tool") or payload.get("tool_name")
+    server = str(payload.get("server") or payload.get("server_name") or "").strip()
+    tool = str(raw_name or "").strip()
+    display = ".".join(part for part in (server, tool) if part)
+    if not display:
+        server, tool, display = _codex_rollout_tool_identity(raw_name)
+    return {
+        "kind": "tool",
+        "text": display,
+        "status": "running",
+        "at": at,
+        "server": server,
+        "tool": tool,
+        "call_id": call_id,
+    } if display else {}
+
+
+def _codex_rollout_runtime_activity_from_lines(lines: list[bytes]) -> dict[str, object]:
+    activity: dict[str, object] = {}
+    pending_calls: dict[str, dict[str, object]] = {}
+    terminal_events = {"task_complete", "task_cancelled", "task_canceled", "turn_aborted", "turn_completed"}
+    for raw_line in lines:
+        try:
+            record = json.loads(raw_line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        record_type = str(record.get("type") or "").strip()
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        payload_type = str(payload.get("type") or "").strip()
+        phase = str(payload.get("phase") or "").strip()
+        at = str(record.get("timestamp") or "").strip()
+        if payload_type == "task_started":
+            activity = {}
+            pending_calls.clear()
+            continue
+        if payload_type in terminal_events or (payload_type in {"agent_message", "message"} and phase == "final_answer"):
+            activity = {}
+            pending_calls.clear()
+            continue
+        if record_type == "event_msg":
+            if payload_type == "agent_reasoning":
+                text = _codex_rollout_reasoning_text(payload)
+                if text:
+                    activity = {"kind": "reasoning", "text": text, "status": "running", "at": at}
+            elif payload_type == "exec_command_begin":
+                command = str(payload.get("command") or payload.get("cmd") or "").strip().splitlines()[0]
+                if command:
+                    activity = {"kind": "command", "text": command, "status": "running", "at": at, "count": 1}
+            elif payload_type == "mcp_tool_call_begin":
+                server = str(payload.get("server") or payload.get("server_name") or "").strip()
+                tool = str(payload.get("tool") or payload.get("name") or "").strip()
+                display = ".".join(part for part in (server, tool) if part)
+                if display:
+                    activity = {"kind": "tool", "text": display, "status": "running", "at": at, "server": server, "tool": tool}
+            elif payload_type in {"exec_command_end", "mcp_tool_call_end"} and activity:
+                activity = {**activity, "status": "completed", "at": at or str(activity.get("at") or "")}
+            continue
+        if record_type != "response_item":
+            continue
+        next_activity = _codex_rollout_response_activity(payload, at=at)
+        if next_activity:
+            activity = next_activity
+            call_id = str(next_activity.get("call_id") or "").strip()
+            if call_id:
+                pending_calls[call_id] = next_activity
+            continue
+        if payload_type not in {"custom_tool_call_output", "function_call_output", "mcp_tool_call_output"}:
+            continue
+        call_id = str(payload.get("call_id") or "").strip()
+        pending = pending_calls.pop(call_id, None) if call_id else None
+        if pending is None or str(activity.get("call_id") or "") != call_id:
+            continue
+        output_text = json.dumps(payload.get("output"), ensure_ascii=False, default=str).lower()
+        status = "failed" if "script failed" in output_text or "script error" in output_text else "completed"
+        activity = {**pending, "status": status, "at": at or str(pending.get("at") or "")}
+    activity.pop("call_id", None)
+    return activity
+
+
+def _codex_rollout_runtime_snapshot(path_value: object) -> dict[str, object]:
+    lines = _codex_rollout_tail_lines(path_value, max_bytes=CODEX_THREAD_RUNTIME_TAIL_BYTES)
+    if lines is None:
+        return {"running_hint": None, "activity": {}}
+    running_hint = _codex_rollout_runtime_hint_from_lines(lines)
+    activity = _codex_rollout_runtime_activity_from_lines(lines) if running_hint is True else {}
+    return {"running_hint": running_hint, "activity": activity}
+
+
+def _codex_rollout_runtime_hint(path_value: object) -> bool | None:
+    lines = _codex_rollout_tail_lines(path_value, max_bytes=CODEX_THREAD_RUNTIME_TAIL_BYTES)
+    return _codex_rollout_runtime_hint_from_lines(lines) if lines is not None else None
 
 
 def _codex_rollout_runtime_started_at(path_value: object) -> str:
@@ -297,6 +464,7 @@ def _update_codex_thread_runtime_statuses(
         active_thread_ids.add(thread_id)
         raw_status = str(thread.get("status") or "").strip().lower()
         runtime_status = "running" if raw_status in known_running_statuses else "idle"
+        runtime_activity: dict[str, object] = {}
         if not bool(thread.get("archived")) and checked < CODEX_THREAD_RUNTIME_STATUS_LIMIT:
             checked += 1
             path_text = str(thread.get("path") or "").strip()
@@ -310,8 +478,11 @@ def _update_codex_thread_runtime_statuses(
                 cached = probes.get(thread_id) if isinstance(probes.get(thread_id), dict) else {}
                 running_hint = cached.get("running_hint") if str(cached.get("signature") or "") == signature else None
                 runtime_started_at = str(cached.get("runtime_started_at") or "").strip()
+                runtime_activity = _codex_runtime_activity_copy(cached.get("runtime_activity"))
                 if str(cached.get("signature") or "") != signature and age_seconds <= CODEX_THREAD_RUNTIME_STALE_SECONDS:
-                    running_hint = _codex_rollout_runtime_hint(path_text)
+                    runtime_snapshot = _codex_rollout_runtime_snapshot(path_text)
+                    running_hint = runtime_snapshot.get("running_hint")
+                    runtime_activity = _codex_runtime_activity_copy(runtime_snapshot.get("activity"))
                     if running_hint is True and not runtime_started_at:
                         runtime_started_at = _codex_rollout_runtime_started_at(path_text)
                         if not runtime_started_at:
@@ -320,10 +491,12 @@ def _update_codex_thread_runtime_statuses(
                     running_hint = False
                 if running_hint is not True:
                     runtime_started_at = ""
+                    runtime_activity = {}
                 probes[thread_id] = {
                     "signature": signature,
                     "running_hint": running_hint,
                     "runtime_started_at": runtime_started_at,
+                    "runtime_activity": _codex_runtime_activity_copy(runtime_activity),
                 }
                 if running_hint is True or (running_hint is None and age_seconds <= CODEX_THREAD_RUNTIME_RECENT_SECONDS):
                     runtime_status = "running"
@@ -333,6 +506,10 @@ def _update_codex_thread_runtime_statuses(
                     changed = True
         if runtime_status != "running" and str(thread.get("runtime_started_at") or ""):
             thread["runtime_started_at"] = ""
+            changed = True
+        next_runtime_activity = runtime_activity if runtime_status == "running" else {}
+        if _codex_runtime_activity_signature(thread.get("runtime_activity")) != _codex_runtime_activity_signature(next_runtime_activity):
+            thread["runtime_activity"] = _codex_runtime_activity_copy(next_runtime_activity)
             changed = True
         if str(thread.get("runtime_status") or "") != runtime_status:
             thread["runtime_status"] = runtime_status
@@ -1654,138 +1831,38 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             width: 100%;
             min-width: 0;
         }
-        .cb-stream-reasoning {
-            display: block;
-            margin-bottom: 0.75rem;
-            overflow: hidden;
-            border: 1px solid var(--cb-border);
-            border-radius: 8px;
-            background: color-mix(in srgb, var(--cb-surface-raised) 72%, transparent);
-            color: var(--cb-muted);
-            transition: border-color 160ms ease, background-color 160ms ease;
-        }
-        .cb-stream-reasoning[open] {
-            border-color: var(--cb-border-strong);
-            background: var(--cb-surface-raised);
-        }
-        .cb-stream-reasoning-summary {
-            display: grid;
-            grid-template-columns: minmax(0, 1fr) auto;
-            align-items: start;
-            gap: 0.45rem 0.75rem;
-            box-sizing: border-box;
-            width: 100%;
-            padding: 0.65rem 0.75rem 0.7rem;
-            cursor: pointer;
-            list-style: none;
-            user-select: none;
-        }
-        .cb-stream-reasoning-summary:hover {
-            background: var(--cb-surface-muted);
-        }
-        .cb-stream-reasoning-summary:focus-visible {
-            outline: 2px solid var(--cb-accent-bright);
-            outline-offset: -2px;
-        }
-        .cb-stream-reasoning-summary::-webkit-details-marker {
-            display: none;
-        }
-        .cb-stream-reasoning-heading,
-        .cb-stream-reasoning-toggle {
-            display: inline-flex;
-            align-items: center;
-            gap: 0.4rem;
+        .cb-stream-current-activity {
             min-width: 0;
-        }
-        .cb-stream-reasoning-toggle {
-            justify-content: flex-end;
-            color: var(--cb-muted);
+            margin-top: 0.35rem;
+            overflow: hidden;
+            color: color-mix(in srgb, var(--cb-muted) 86%, var(--cb-accent-bright));
+            font-size: 0.88rem;
+            line-height: 1.45;
+            opacity: 0.88;
+            text-overflow: ellipsis;
             white-space: nowrap;
         }
-        .cb-stream-reasoning-icon,
-        .cb-stream-reasoning-chevron {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            font-family: "Material Icons";
-            font-size: 0.95rem;
-            line-height: 1;
+        .cb-stream-reasoning {
+            margin-bottom: 0.75rem;
+            color: var(--cb-muted);
         }
-        .cb-stream-reasoning-icon::before {
+        .cb-stream-reasoning .cb-stream-command-status-icon::before {
             content: "psychology";
         }
-        .cb-stream-reasoning-chevron::before {
-            content: "chevron_right";
-        }
-        .cb-stream-reasoning-chevron {
-            transition: transform 160ms ease;
-        }
-        .cb-stream-reasoning[open] .cb-stream-reasoning-chevron {
-            transform: rotate(90deg);
-        }
         .cb-stream-reasoning-label {
-            font-size: 0.82rem;
-            font-weight: 700;
-            line-height: 1.35;
-        }
-        .cb-stream-reasoning-toggle-label {
-            font-size: 0.76rem;
-            font-weight: 600;
-            line-height: 1.35;
-        }
-        .cb-stream-reasoning-toggle-label-close {
-            display: none;
-        }
-        .cb-stream-reasoning[open] .cb-stream-reasoning-toggle-label-open {
-            display: none;
-        }
-        .cb-stream-reasoning[open] .cb-stream-reasoning-toggle-label-close {
-            display: inline;
-        }
-        .cb-stream-reasoning-preview {
-            display: flex;
-            flex-direction: column;
-            justify-content: flex-end;
-            grid-column: 1 / -1;
-            min-height: 4.1rem;
-            max-height: 4.1rem;
-            color: var(--cb-muted);
-            font-size: 0.88rem;
-            font-weight: 400;
-            line-height: 1.55;
+            min-width: 0;
             overflow: hidden;
-            overflow-wrap: anywhere;
-            user-select: text;
-        }
-        .cb-stream-reasoning[open] .cb-stream-reasoning-preview {
-            display: none;
-        }
-        .cb-stream-reasoning-static {
-            display: grid;
-            grid-template-columns: minmax(0, 1fr);
-            align-items: start;
-            gap: 0.4rem;
-            padding: 0.65rem 0.75rem 0.7rem;
-        }
-        .cb-stream-reasoning-static .cb-stream-reasoning-preview {
-            display: block;
-            grid-column: 1;
-            min-height: 0;
-            max-height: none;
+            color: color-mix(in srgb, var(--cb-accent-bright) 62%, var(--cb-ink));
+            font-size: 0.9rem;
+            font-weight: 500;
+            line-height: 1.45;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
         .cb-stream-reasoning-body {
-            max-height: min(52vh, 28rem);
-            overflow: auto;
-            border-top: 1px solid var(--cb-border);
-            padding: 0.75rem 0.9rem 0.85rem;
             color: var(--cb-muted);
             font-size: 0.9rem;
             line-height: 1.6;
-            animation: cb-reasoning-reveal 160ms ease-out;
-        }
-        @keyframes cb-reasoning-reveal {
-            from { opacity: 0; transform: translateY(-0.25rem); }
-            to { opacity: 1; transform: translateY(0); }
         }
         .cb-stream-timeline {
             display: grid;
@@ -1819,15 +1896,15 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         }
         .cb-stream-command {
             overflow: hidden;
-            border: 1px solid color-mix(in srgb, var(--cb-border-strong) 72%, transparent);
-            border-radius: 8px;
-            background: color-mix(in srgb, var(--cb-surface-raised) 78%, transparent);
+            border: 1px solid transparent;
+            border-radius: 7px;
+            background: transparent;
             transition: border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
         }
         .cb-stream-command:hover,
         .cb-stream-command[open] {
-            border-color: color-mix(in srgb, var(--cb-accent-bright) 50%, var(--cb-border-strong));
-            background: var(--cb-surface-raised);
+            border-color: color-mix(in srgb, var(--cb-accent-bright) 24%, transparent);
+            background: color-mix(in srgb, var(--cb-surface-raised) 52%, transparent);
         }
         .cb-stream-command[open] {
             box-shadow: inset 3px 0 0 color-mix(in srgb, var(--cb-accent-bright) 72%, transparent);
@@ -1835,9 +1912,9 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         .cb-stream-command-summary {
             display: grid;
             grid-template-columns: auto minmax(0, 1fr) auto;
-            align-items: end;
-            gap: 0.65rem;
-            padding: 0.62rem 0.72rem;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.34rem 0.25rem;
             cursor: pointer;
             list-style: none;
             user-select: none;
@@ -1858,18 +1935,21 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             line-height: 1;
         }
         .cb-stream-command-status-icon {
-            width: 1.75rem;
-            height: 1.75rem;
-            border-radius: 6px;
-            background: color-mix(in srgb, var(--cb-accent-bright) 14%, transparent);
+            width: 1.35rem;
+            height: 1.35rem;
+            border-radius: 5px;
+            background: transparent;
             color: var(--cb-accent-bright);
-            font-size: 1rem;
+            font-size: 0.98rem;
         }
         .cb-stream-command-status-icon::before {
             content: "terminal";
         }
         .cb-stream-command-tool .cb-stream-command-status-icon::before {
             content: "build";
+        }
+        .cb-stream-command-mcp .cb-stream-command-status-icon::before {
+            content: "extension";
         }
         .cb-stream-subagent .cb-stream-command-status-icon::before {
             content: "group";
@@ -1898,14 +1978,14 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             flex-direction: column;
             justify-content: flex-end;
             min-width: 0;
-            min-height: 4.8rem;
-            max-height: 4.8rem;
+            min-height: 2.45rem;
+            max-height: 3.7rem;
             overflow: hidden;
         }
         .cb-stream-command-label {
-            color: var(--cb-ink);
-            font-size: 0.8rem;
-            font-weight: 750;
+            color: color-mix(in srgb, var(--cb-accent-bright) 66%, var(--cb-ink));
+            font-size: 0.82rem;
+            font-weight: 650;
             line-height: 1.35;
         }
         .cb-stream-subagent-label {
@@ -1917,13 +1997,14 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         .cb-stream-command-command-preview,
         .cb-stream-command-preview {
             overflow: hidden;
-            margin-top: 0.1rem;
+            margin-top: 0.04rem;
             color: var(--cb-muted);
-            font-family: "JetBrains Mono", "Cascadia Code", monospace;
+            font-family: inherit;
             font-size: 0.78rem;
-            line-height: 1.45;
+            line-height: 1.35;
         }
         .cb-stream-command-command-preview {
+            min-width: 0;
             text-overflow: ellipsis;
             white-space: nowrap;
         }
@@ -2005,12 +2086,133 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             line-height: 1.45;
             overflow-wrap: anywhere;
         }
+        .cb-stream-command-tool-server,
+        .cb-stream-command-tool-name {
+            width: fit-content;
+            max-width: 100%;
+            padding: 0.28rem 0.5rem;
+        }
+        .cb-stream-tool-activity,
+        .cb-stream-command-group {
+            overflow: visible;
+            border: 0;
+            border-radius: 0;
+            background: transparent;
+        }
+        .cb-stream-tool-activity:hover,
+        .cb-stream-tool-activity[open],
+        .cb-stream-command-group:hover,
+        .cb-stream-command-group[open] {
+            border-color: transparent;
+            background: transparent;
+            box-shadow: none;
+        }
+        .cb-stream-tool-activity .cb-stream-command-summary,
+        .cb-stream-command-group .cb-stream-command-summary {
+            grid-template-columns: auto minmax(0, 1fr) auto auto;
+            min-height: 2.35rem;
+            gap: 0.55rem;
+            padding: 0.34rem 0.1rem;
+        }
+        .cb-stream-tool-activity .cb-stream-command-status-icon,
+        .cb-stream-command-group .cb-stream-command-status-icon {
+            width: 1.25rem;
+            height: 1.25rem;
+            border-radius: 0;
+            background: transparent;
+            color: #4b9bd3;
+            font-size: 1.12rem;
+        }
+        .cb-stream-tool-activity.cb-stream-command-mcp .cb-stream-command-status-icon::before {
+            content: "smart_toy";
+        }
+        .cb-stream-command-group .cb-stream-command-status-icon::before {
+            content: "terminal";
+        }
+        .cb-stream-tool-activity.cb-stream-command-failed .cb-stream-command-status-icon,
+        .cb-stream-command-group.cb-stream-command-failed .cb-stream-command-status-icon {
+            color: var(--cb-danger);
+        }
+        .cb-stream-tool-activity.cb-stream-command-interrupted .cb-stream-command-status-icon,
+        .cb-stream-command-group.cb-stream-command-interrupted .cb-stream-command-status-icon {
+            color: var(--cb-muted);
+        }
+        .cb-stream-tool-action {
+            min-width: 0;
+            overflow: hidden;
+            color: color-mix(in srgb, var(--cb-accent-bright) 62%, var(--cb-ink));
+            font-size: 0.9rem;
+            font-weight: 500;
+            line-height: 1.45;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .cb-stream-command-group-copy {
+            display: flex;
+            align-items: baseline;
+            min-width: 0;
+            gap: 0.55rem;
+        }
+        .cb-stream-command-single-preview {
+            min-width: 0;
+            overflow: hidden;
+            color: var(--cb-muted);
+            font-family: "JetBrains Mono", "Cascadia Code", monospace;
+            font-size: 0.76rem;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .cb-stream-tool-inline-meta {
+            opacity: 0.72;
+        }
+        .cb-stream-tool-activity .cb-stream-command-toggle,
+        .cb-stream-command-group .cb-stream-command-toggle {
+            opacity: 0;
+            transition: opacity 140ms ease;
+        }
+        .cb-stream-tool-activity:hover .cb-stream-command-toggle,
+        .cb-stream-tool-activity[open] .cb-stream-command-toggle,
+        .cb-stream-command-group:hover .cb-stream-command-toggle,
+        .cb-stream-command-group[open] .cb-stream-command-toggle {
+            opacity: 1;
+        }
+        .cb-stream-tool-activity .cb-stream-command-body,
+        .cb-stream-command-group .cb-stream-command-body {
+            margin: 0.15rem 0 0.45rem 1.8rem;
+            border: 1px solid var(--cb-border);
+            border-radius: 8px;
+            background: color-mix(in srgb, var(--cb-surface-raised) 74%, transparent);
+        }
+        .cb-stream-command-group-body {
+            display: flex;
+            flex-direction: column;
+            gap: 0.7rem;
+        }
+        .cb-stream-command-group-entry {
+            display: grid;
+            gap: 0.35rem;
+        }
+        .cb-stream-command-group-entry + .cb-stream-command-group-entry {
+            border-top: 1px solid var(--cb-border);
+            padding-top: 0.7rem;
+        }
         @media (max-width: 640px) {
             .cb-stream-command-summary {
                 grid-template-columns: auto minmax(0, 1fr);
             }
             .cb-stream-command-toggle {
                 display: none;
+            }
+            .cb-stream-tool-activity .cb-stream-command-summary,
+            .cb-stream-command-group .cb-stream-command-summary {
+                grid-template-columns: auto minmax(0, 1fr);
+            }
+            .cb-stream-tool-inline-meta {
+                display: none;
+            }
+            .cb-stream-tool-activity .cb-stream-command-body,
+            .cb-stream-command-group .cb-stream-command-body {
+                margin-left: 1.4rem;
             }
         }
         .cb-stream-progress {
@@ -2366,18 +2568,13 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             display: inline-flex;
             align-items: center;
             gap: 0.3rem;
-            margin-left: auto;
             color: var(--cb-muted);
             font-size: 0.72rem;
             font-variant-numeric: tabular-nums;
             white-space: nowrap;
         }
-        .cb-stream-running-duration-prefix,
-        .cb-stream-meta-separator {
+        .cb-stream-running-duration-prefix {
             color: var(--cb-muted);
-        }
-        .cb-stream-running-time {
-            font-variant-numeric: tabular-nums;
         }
         @keyframes cb-synced-loader {
             0% {
@@ -3043,6 +3240,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         selected_before = (
             str(selected_thread.get("runtime_status") or ""),
             str(selected_thread.get("runtime_started_at") or ""),
+            _codex_runtime_activity_signature(selected_thread.get("runtime_activity")),
         )
 
         probe_threads: list[dict[str, object]] = []
@@ -3071,6 +3269,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         selected_changed = selected_before != (
             str(selected_thread.get("runtime_status") or ""),
             str(selected_thread.get("runtime_started_at") or ""),
+            _codex_runtime_activity_signature(selected_thread.get("runtime_activity")),
         )
         return sidebar_changed, selected_changed
 
@@ -3113,11 +3312,13 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                 "archived": archived,
                 "runtime_status": "idle",
                 "runtime_started_at": "",
+                "runtime_activity": {},
             }
             _refresh_codex_runtime_statuses()
         runtime_thread = _stream_selected_codex_runtime_thread()
         selected_payload["runtime_status"] = str(runtime_thread.get("runtime_status") or "idle")
         selected_payload["runtime_started_at"] = str(runtime_thread.get("runtime_started_at") or "")
+        selected_payload["runtime_activity"] = _codex_runtime_activity_copy(runtime_thread.get("runtime_activity"))
 
     def _stream_state_snapshot() -> dict[str, object]:
         session_name = str(state["selected_session_name"] or "").strip()
@@ -3168,6 +3369,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             str(selected_runtime.get("id") or ""),
             str(selected_runtime.get("runtime_status") or ""),
             str(selected_runtime.get("runtime_started_at") or ""),
+            _codex_runtime_activity_signature(selected_runtime.get("runtime_activity")),
         )
         return (*signature, runtime_signature)
 
@@ -4456,6 +4658,11 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     programmaticScrollers.delete(scroller);
                 };
                 const isProgrammaticScroll = (scroller) => programmaticScrollers.has(scroller);
+                const beginUserScrollIntent = (scroller) => {
+                    acceptUserScroll(scroller);
+                    window.__cbStreamForceBottomUntil = 0;
+                    window.__cbStreamUserScrollIntentUntil = Date.now() + 800;
+                };
                 const scrollWindowToBottom = () => {
                     const height = Math.max(
                         document.body?.scrollHeight || 0,
@@ -4501,6 +4708,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     }
                     if (source === 'user') {
                         window.__cbStreamForceBottomUntil = 0;
+                        window.__cbStreamUserScrollIntentUntil = 0;
                         state.userScrolledAway = delta > userScrollAwayLimit;
                         window.__cbStreamUserScrolledAway = state.userScrolledAway;
                     } else {
@@ -5314,6 +5522,17 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                             updateScrollState(scroller, 'user');
                         }, { passive: false });
                     }
+                    if (scroller.dataset.cbTouchScrollReady !== '1') {
+                        scroller.dataset.cbTouchScrollReady = '1';
+                        scroller.addEventListener('touchstart', () => {
+                            beginUserScrollIntent(scroller);
+                        }, { passive: true });
+                        scroller.addEventListener('pointerdown', (event) => {
+                            if (event.pointerType === 'touch') {
+                                beginUserScrollIntent(scroller);
+                            }
+                        }, { passive: true });
+                    }
                     return streamChanged;
                 };
                 const positionScroller = (scroller) => {
@@ -5349,16 +5568,19 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                         revealPositionedStream();
                         return;
                     }
-                    if (forceBottom) {
+                    const forceBottomActive = Date.now() < Number(window.__cbStreamForceBottomUntil || 0);
+                    const userScrollIntentActive = Date.now() < Number(window.__cbStreamUserScrollIntentUntil || 0);
+                    if (forceBottomActive) {
                         state.delta = 0;
                         state.nearBottom = true;
                         state.userScrolledAway = false;
                         state.restoreTopPending = false;
                     }
-                    const shouldStickToBottom = forceBottom
-                        || Date.now() < Number(window.__cbStreamForceBottomUntil || 0)
+                    const shouldStickToBottom = !userScrollIntentActive && (
+                        forceBottomActive
                         || (!state.userScrolledAway && state.nearBottom === true)
-                        || !Number.isFinite(previousTop);
+                        || !Number.isFinite(previousTop)
+                    );
                     if (preserveTop && !shouldStickToBottom) {
                         markProgrammaticScroll(scroller);
                         const topWasClamped = restorePreviousTop();

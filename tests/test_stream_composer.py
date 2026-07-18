@@ -9,7 +9,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from ui.app import _codex_rollout_runtime_hint, _codex_rollout_runtime_started_at, _load_persisted_stream_session, _persist_stream_session, _stream_initial_history_limit, _update_codex_thread_runtime_statuses, group_codex_threads_by_workspace
+from ui.app import _codex_rollout_runtime_hint, _codex_rollout_runtime_snapshot, _codex_rollout_runtime_started_at, _load_persisted_stream_session, _persist_stream_session, _stream_initial_history_limit, _update_codex_thread_runtime_statuses, group_codex_threads_by_workspace
 from ui.sections import _stream_client_time, _stream_display_time, _stream_image_is_previewable, _stream_markdown, _stream_task_sort_key, _stream_task_uses_utc_naive_time, _stream_text, _stream_time_delta_ms, _stream_timeline_items, render_mobile_stream_section
 
 
@@ -1671,6 +1671,7 @@ class StreamComposerTests(unittest.TestCase):
 
         runtime_turns = [item for item in ui.elements if "data-codex-runtime-running=1" in item.props_text]
         live_markdowns = [item for item in ui.elements if "cb-stream-live-text" in item.class_text.split()]
+        current_activity = [item for item in ui.elements if "cb-stream-current-activity" in item.class_text.split()]
         working_loaders = [item for item in ui.elements if "cb-stream-working-loader" in item.class_text.split()]
         stop_buttons = [item for item in ui.elements if "cb-stream-stop-button" in item.class_text.split()]
         composer_stop_buttons = [item for item in ui.elements if "cb-composer-stop-button" in item.class_text.split()]
@@ -1678,8 +1679,9 @@ class StreamComposerTests(unittest.TestCase):
         send_buttons = [item for item in ui.elements if "cb-composer-send-button" in item.class_text.split()]
 
         self.assertEqual(1, len(runtime_turns))
-        self.assertEqual(["正在处理"], [item.text for item in live_markdowns])
-        self.assertIn("data-stream-text-key=codex-thread-live-turn-2", live_markdowns[0].props_text)
+        self.assertEqual(["正在处理"], [item.text for item in current_activity])
+        self.assertEqual(current_activity, live_markdowns)
+        self.assertIn("data-stream-text-key=codex-thread-live-turn-2%3Aactivity", current_activity[0].props_text)
         self.assertEqual(1, len(working_loaders))
         self.assertEqual([], stop_buttons)
         self.assertEqual([], composer_stop_buttons)
@@ -1731,6 +1733,84 @@ class StreamComposerTests(unittest.TestCase):
         self.assertEqual([], runtime_turns)
         self.assertEqual(1, len(working_loaders))
 
+    def test_external_codex_runtime_shows_the_latest_reasoning_instead_of_generic_working_text(self) -> None:
+        ui = FakeUI()
+        mobile_state = {
+            "counts": {"running": 0, "queued": 0},
+            "agents": [{"id": "codex", "name": "Codex", "backend": "codex"}],
+            "selected_codex_thread": {
+                "id": "thread-live",
+                "runtime_status": "running",
+                "runtime_activity": {
+                    "kind": "reasoning",
+                    "text": "**Planning current activity rendering**",
+                    "status": "running",
+                    "at": "2026-07-17T05:20:00",
+                },
+            },
+            "tasks": [],
+            "session_task_counts": {"codex:thread-live": 0},
+        }
+
+        render_mobile_stream_section(
+            ui,
+            _translator,
+            mobile_state,
+            "codex:thread-live",
+            [],
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+        )
+
+        current_activity = [item for item in ui.elements if "cb-stream-current-activity" in item.class_text.split()]
+
+        self.assertEqual(["Planning current activity rendering"], [item.text for item in current_activity])
+        self.assertIn("data-stream-placeholder=1", current_activity[0].props_text)
+        self.assertNotIn("正在处理", [item.text for item in ui.elements])
+
+    def test_external_codex_runtime_describes_the_current_command(self) -> None:
+        ui = FakeUI()
+        mobile_state = {
+            "counts": {"running": 0, "queued": 0},
+            "agents": [{"id": "codex", "name": "Codex", "backend": "codex"}],
+            "selected_codex_thread": {
+                "id": "thread-live",
+                "runtime_status": "running",
+                "runtime_activity": {
+                    "kind": "command",
+                    "text": "python -m unittest tests.test_stream_composer",
+                    "status": "running",
+                    "count": 1,
+                },
+            },
+            "tasks": [],
+            "session_task_counts": {"codex:thread-live": 0},
+        }
+
+        render_mobile_stream_section(
+            ui,
+            _translator,
+            mobile_state,
+            "codex:thread-live",
+            [],
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+        )
+
+        current_activity = [item.text for item in ui.elements if "cb-stream-current-activity" in item.class_text.split()]
+
+        self.assertEqual(["正在运行命令 · python -m unittest tests.test_stream_composer"], current_activity)
+
     def test_external_codex_runtime_keeps_completed_reply_time_and_adds_separate_running_time(self) -> None:
         ui = FakeUI()
         mobile_state = {
@@ -1778,6 +1858,7 @@ class StreamComposerTests(unittest.TestCase):
         turns = [item for item in ui.elements if "cb-stream-turn" in item.class_text.split()]
         runtime_turns = [item for item in ui.elements if "data-codex-runtime-running=1" in item.props_text]
         markdown_texts = [item.text for item in ui.elements if item.kind == "markdown" and "cb-stream-markdown" in item.class_text.split()]
+        current_activity = [item.text for item in ui.elements if "cb-stream-current-activity" in item.class_text.split()]
         footer_labels = [item.text for item in ui.elements if "cb-stream-footer-label" in item.class_text.split()]
         running_times = [item.text for item in ui.elements if "cb-stream-running-time" in item.class_text.split()]
         live_elapsed = [item.text for item in ui.elements if "cb-stream-live-elapsed" in item.class_text.split()]
@@ -1785,9 +1866,10 @@ class StreamComposerTests(unittest.TestCase):
 
         self.assertEqual(2, len(turns))
         self.assertEqual(1, len(runtime_turns))
-        self.assertEqual(["上一段回答", "正在处理"], markdown_texts)
+        self.assertEqual(["上一段回答"], markdown_texts)
+        self.assertEqual(["正在处理"], current_activity)
         self.assertTrue(any("2026-07-17T05:19:30" in text for text in footer_labels))
-        self.assertEqual(["2026-07-17T05:19:45"], running_times)
+        self.assertEqual([], running_times)
         self.assertEqual(1, len(live_elapsed))
         self.assertEqual(["执行时长"], execution_prefixes)
 
@@ -1824,7 +1906,7 @@ class StreamComposerTests(unittest.TestCase):
         live_elapsed = [item.text for item in ui.elements if "cb-stream-live-elapsed" in item.class_text.split()]
         execution_prefixes = [item.text for item in ui.elements if "cb-stream-running-duration-prefix" in item.class_text.split()]
 
-        self.assertEqual(["2026-07-17T05:20:00"], running_times)
+        self.assertEqual([], running_times)
         self.assertEqual(1, len(live_elapsed))
         self.assertEqual(["执行时长"], execution_prefixes)
 
@@ -1879,7 +1961,7 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("data-stream-text-key=task-running", live_markdowns[0].props_text)
         self.assertNotIn("data-stream-placeholder=1", live_markdowns[0].props_text)
 
-    def test_reasoning_shows_limited_preview_above_separate_live_output(self) -> None:
+    def test_reasoning_uses_compact_disclosure_above_separate_live_output(self) -> None:
         ui = FakeUI()
         reasoning_text = "**开始检查项目结构** " + ("中间分析内容 " * 30) + "最新进度：正在核对流式命令输出。"
         mobile_state = {
@@ -1933,14 +2015,11 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("data-reasoning-details=1", reasoning_details[0].props_text)
         self.assertIn("data-reasoning-key=task-running", reasoning_details[0].props_text)
         self.assertNotIn("open", reasoning_details[0].props_text.split())
-        self.assertEqual(1, len(reasoning_previews))
-        self.assertLessEqual(len(reasoning_previews[0].text), 120)
-        self.assertTrue(reasoning_previews[0].text.startswith("..."))
-        self.assertIn("最新进度：正在核对流式命令输出。", reasoning_previews[0].text)
-        self.assertNotIn("开始检查项目结构", reasoning_previews[0].text)
-        self.assertNotIn("**", reasoning_previews[0].text)
-        self.assertEqual(1, len(expand_labels))
-        self.assertEqual(1, len(collapse_labels))
+        self.assertIn("cb-stream-command", reasoning_details[0].class_text.split())
+        self.assertIn("cb-stream-tool-activity", reasoning_details[0].class_text.split())
+        self.assertEqual([], reasoning_previews)
+        self.assertEqual([], expand_labels)
+        self.assertEqual([], collapse_labels)
         self.assertEqual([reasoning_text], [item.text for item in reasoning_bodies])
         self.assertEqual(["正在输出回答"], [item.text for item in live_markdowns])
 
@@ -1953,7 +2032,7 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("localStorage.setItem(reasoningStorageKey", source)
         self.assertIn("setupReasoningDisclosures();", source)
 
-    def test_running_command_is_rendered_as_collapsed_activity_with_output(self) -> None:
+    def test_running_command_keeps_output_inside_the_compact_disclosure(self) -> None:
         ui = FakeUI()
         mobile_state = {
             "counts": {"running": 1, "queued": 0},
@@ -1992,9 +2071,9 @@ class StreamComposerTests(unittest.TestCase):
 
         command_details = [item for item in ui.elements if "cb-stream-command" in item.class_text.split()]
         command_previews = [item.text for item in ui.elements if "cb-stream-command-preview" in item.class_text.split()]
-        command_command_previews = [item.text for item in ui.elements if "cb-stream-command-command-preview" in item.class_text.split()]
+        command_command_previews = [item.text for item in ui.elements if "cb-stream-command-single-preview" in item.class_text.split()]
         command_outputs = [item.text for item in ui.elements if "cb-stream-command-output" in item.class_text.split()]
-        command_labels = [item.text for item in ui.elements if "cb-stream-command-label" in item.class_text.split()]
+        command_labels = [item.text for item in ui.elements if "cb-stream-tool-action" in item.class_text.split()]
 
         self.assertEqual(1, len(command_details))
         self.assertIn("cb-stream-command-running", command_details[0].class_text.split())
@@ -2002,10 +2081,7 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("data-command-key=task-command%3Acommand-1", command_details[0].props_text)
         self.assertNotIn("open", command_details[0].props_text.split())
         self.assertEqual(["pytest -q"], command_command_previews)
-        self.assertEqual(1, len(command_previews))
-        self.assertTrue(command_previews[0].startswith("..."))
-        self.assertIn("latest output: collecting final tests...", command_previews[0])
-        self.assertNotIn("INITIAL OUTPUT MARKER", command_previews[0])
+        self.assertEqual([], command_previews)
         self.assertEqual(["INITIAL OUTPUT MARKER " + ("old output " * 30) + "latest output: collecting final tests..."], command_outputs)
         self.assertEqual(["正在运行命令"], command_labels)
 
@@ -2063,7 +2139,7 @@ class StreamComposerTests(unittest.TestCase):
         self.assertEqual(1, len(turn_footers))
         self.assertEqual(1, len(working_loaders))
         self.assertEqual(6, len(working_loader_dots))
-        self.assertEqual(["2026-07-18T01:00:00"], running_times)
+        self.assertEqual([], running_times)
         self.assertEqual(1, len(live_elapsed))
         self.assertEqual(["执行时长"], execution_prefixes)
 
@@ -2130,6 +2206,7 @@ class StreamComposerTests(unittest.TestCase):
         ]
         reasoning_bodies = [item.text for item in ui.elements if "cb-stream-reasoning-body" in item.class_text.split()]
         timeline_times = [item.text for item in ui.elements if "cb-stream-timeline-time" in item.class_text.split()]
+        inline_times = [item.text for item in ui.elements if "cb-stream-tool-inline-meta" in item.class_text.split()]
 
         self.assertEqual(
             ["reasoning", "command", "reasoning"],
@@ -2139,13 +2216,14 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("data-reasoning-key=task-timeline%3Areasoning-1", timeline_cards[0].props_text)
         self.assertIn("data-command-key=task-timeline%3Acommand-1", timeline_cards[1].props_text)
         self.assertIn("data-reasoning-key=task-timeline%3Areasoning-2", timeline_cards[2].props_text)
+        self.assertEqual([], timeline_times)
         self.assertEqual(
             [
                 "2026-07-17T05:19:01",
                 "执行时长 3 秒 · 2026-07-17T05:19:02",
                 "2026-07-17T05:19:03",
             ],
-            timeline_times,
+            inline_times,
         )
 
     def test_consecutive_reasoning_items_merge_until_the_next_tool_boundary(self) -> None:
@@ -2265,7 +2343,7 @@ class StreamComposerTests(unittest.TestCase):
 
         timeline = _stream_timeline_items(activity_items, reasoning_text="", task_status="running")
 
-        self.assertEqual(["reasoning", "subagent", "command"], [item["kind"] for item in timeline])
+        self.assertEqual(["reasoning", "subagent", "command_group"], [item["kind"] for item in timeline])
         subagent = timeline[1]["item"]
         self.assertEqual("subagent:thread-child-1", subagent["id"])
         self.assertEqual("interacted", subagent["kind"])
@@ -2393,7 +2471,9 @@ class StreamComposerTests(unittest.TestCase):
                             "detail": "node_repl.js - 读取项目入口文档\ninspect_project()",
                             "metadata": {
                                 "command": "node_repl.js - 读取项目入口文档\ninspect_project()",
+                                "server": "node_repl",
                                 "status": "completed",
+                                "tool": "js",
                                 "output": "project ready",
                                 "durationMs": "34601",
                             },
@@ -2425,9 +2505,11 @@ class StreamComposerTests(unittest.TestCase):
             for item in ui.elements
             if "cb-stream-reasoning" in item.class_text.split() or "cb-stream-command" in item.class_text.split()
         ]
-        command_labels = [item.text for item in ui.elements if "cb-stream-command-label" in item.class_text.split()]
+        tool_actions = [item.text for item in ui.elements if "cb-stream-tool-action" in item.class_text.split()]
         section_labels = [item.text for item in ui.elements if "cb-stream-command-section-label" in item.class_text.split()]
         command_outputs = [item.text for item in ui.elements if "cb-stream-command-output" in item.class_text.split()]
+        mcp_servers = [item.text for item in ui.elements if "cb-stream-command-tool-server" in item.class_text.split()]
+        tool_names = [item.text for item in ui.elements if "cb-stream-command-tool-name" in item.class_text.split()]
 
         self.assertEqual(
             ["reasoning", "tool", "reasoning"],
@@ -2440,15 +2522,151 @@ class StreamComposerTests(unittest.TestCase):
                 for item in timeline_cards
             ],
         )
-        self.assertEqual(["已运行工具"], command_labels)
-        self.assertEqual(["工具调用", "结果"], section_labels)
+        self.assertEqual(["读取项目入口文档"], tool_actions)
+        self.assertEqual(["MCP 服务", "工具", "命令 / 调用内容", "结果"], section_labels)
+        self.assertEqual(["node_repl"], mcp_servers)
+        self.assertEqual(["js"], tool_names)
         self.assertEqual(["project ready"], command_outputs)
         self.assertIn("data-command-key=task-tool-timeline%3Atool-1", timeline_cards[1].props_text)
+        self.assertIn("data-tool-server=node_repl", timeline_cards[1].props_text)
+        self.assertIn("data-tool-name=js", timeline_cards[1].props_text)
+        self.assertIn("cb-stream-command-mcp", timeline_cards[1].class_text.split())
 
-    def test_streaming_previews_are_bottom_aligned(self) -> None:
+    def test_named_tool_call_shows_the_tool_name_without_claiming_it_is_mcp(self) -> None:
+        ui = FakeUI()
+        mobile_state = {
+            "counts": {"running": 0, "queued": 0},
+            "agents": [{"id": "codex", "name": "Codex", "backend": "codex"}],
+            "tasks": [
+                {
+                    "id": "task-named-tool",
+                    "agent_id": "codex",
+                    "backend": "codex",
+                    "session_name": "focus",
+                    "status": "succeeded",
+                    "created_at": "2026-07-17T05:19:00",
+                    "prompt": "查看图片",
+                    "activity_items": [
+                        {
+                            "id": "tool-image",
+                            "event": "codex_tool_call",
+                            "type": "success",
+                            "detail": "view_image {path: preview.png}",
+                            "metadata": {
+                                "command": "view_image {path: preview.png}",
+                                "name": "view_image",
+                                "status": "completed",
+                            },
+                        }
+                    ],
+                }
+            ],
+            "session_task_counts": {"focus": 1},
+        }
+
+        render_mobile_stream_section(ui, _translator, mobile_state, "focus", [], _noop, _noop, _noop, _noop, _noop, _noop, _noop)
+
+        tool_actions = [item.text for item in ui.elements if "cb-stream-tool-action" in item.class_text.split()]
+        tool_names = [item.text for item in ui.elements if "cb-stream-command-tool-name" in item.class_text.split()]
+        cards = [item for item in ui.elements if "cb-stream-command-tool" in item.class_text.split()]
+
+        self.assertEqual(["view_image {path: preview.png}"], tool_actions)
+        self.assertEqual(["view_image"], tool_names)
+        self.assertEqual(1, len(cards))
+        self.assertNotIn("cb-stream-command-mcp", cards[0].class_text.split())
+        self.assertIn("data-tool-name=view_image", cards[0].props_text)
+
+    def test_timeline_keeps_mcp_calls_and_shell_commands_as_separate_entries(self) -> None:
+        timeline = _stream_timeline_items(
+            [
+                {
+                    "id": "mcp-1",
+                    "event": "codex_tool_call",
+                    "detail": "node_repl.js - 运行检查\nrun_checks()",
+                    "metadata": {
+                        "command": "node_repl.js - 运行检查\nrun_checks()",
+                        "server": "node_repl",
+                        "status": "completed",
+                        "tool": "js",
+                    },
+                },
+                {
+                    "id": "command-1",
+                    "event": "codex_command",
+                    "detail": "pytest -q",
+                    "metadata": {"command": "pytest -q", "status": "completed"},
+                },
+            ],
+            reasoning_text="",
+            task_status="succeeded",
+        )
+
+        self.assertEqual(["command", "command_group"], [item["kind"] for item in timeline])
+        self.assertEqual(["tool", "command_group"], [item["item"]["activity_kind"] for item in timeline])
+        self.assertEqual("node_repl", timeline[0]["item"]["tool_server"])
+        self.assertEqual("pytest -q", timeline[1]["item"]["entries"][0]["command"])
+
+    def test_consecutive_shell_commands_render_as_one_compact_command_group(self) -> None:
+        ui = FakeUI()
+        mobile_state = {
+            "counts": {"running": 0, "queued": 0},
+            "agents": [{"id": "codex", "name": "Codex", "backend": "codex"}],
+            "tasks": [
+                {
+                    "id": "task-command-group",
+                    "agent_id": "codex",
+                    "backend": "codex",
+                    "session_name": "focus",
+                    "status": "succeeded",
+                    "created_at": "2026-07-17T05:19:00",
+                    "prompt": "运行检查",
+                    "activity_items": [
+                        {
+                            "id": "command-1",
+                            "event": "codex_command",
+                            "at": "2026-07-17T05:19:01",
+                            "detail": "git status --short",
+                            "metadata": {
+                                "command": "git status --short",
+                                "durationMs": "1000",
+                                "status": "completed",
+                            },
+                        },
+                        {
+                            "id": "command-2",
+                            "event": "codex_command",
+                            "at": "2026-07-17T05:19:03",
+                            "detail": "pytest -q",
+                            "metadata": {
+                                "command": "pytest -q",
+                                "durationMs": "2000",
+                                "output": "657 passed",
+                                "status": "completed",
+                            },
+                        },
+                    ],
+                }
+            ],
+            "session_task_counts": {"focus": 1},
+        }
+
+        render_mobile_stream_section(ui, _translator, mobile_state, "focus", [], _noop, _noop, _noop, _noop, _noop, _noop, _noop)
+
+        groups = [item for item in ui.elements if "cb-stream-command-group" in item.class_text.split()]
+        actions = [item.text for item in ui.elements if "cb-stream-tool-action" in item.class_text.split()]
+        commands = [item.text for item in ui.elements if "cb-stream-command-code" in item.class_text.split()]
+        inline_meta = [item.text for item in ui.elements if "cb-stream-tool-inline-meta" in item.class_text.split()]
+
+        self.assertEqual(1, len(groups))
+        self.assertIn("data-command-count=2", groups[0].props_text)
+        self.assertEqual(["运行了多个命令"], actions)
+        self.assertEqual(["git status --short", "pytest -q"], commands)
+        self.assertEqual(["执行时长 3 秒 · 2026-07-17T05:19:03"], inline_meta)
+
+    def test_compact_stream_items_remove_the_old_reasoning_preview(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")
 
-        self.assertRegex(source, r"\.cb-stream-reasoning-preview\s*\{[^}]*justify-content:\s*flex-end")
+        self.assertNotIn(".cb-stream-reasoning-preview", source)
         self.assertRegex(source, r"\.cb-stream-command-heading\s*\{[^}]*justify-content:\s*flex-end")
 
     def test_stream_metadata_rows_share_the_same_right_alignment(self) -> None:
@@ -2461,7 +2679,14 @@ class StreamComposerTests(unittest.TestCase):
         self.assertRegex(source, r"\.cb-stream-turn-footer \.cb-stream-copy-button\s*\{[^}]*margin-right:\s*auto")
         self.assertRegex(source, r"\.cb-stream-user-footer \.cb-stream-copy-button\s*\{[^}]*margin-right:\s*auto")
         self.assertRegex(source, r"\.cb-stream-running-controls\s*\{[^}]*margin-right:\s*auto")
-        self.assertRegex(source, r"\.cb-stream-running-meta\s*\{[^}]*margin-left:\s*auto")
+        self.assertNotRegex(source, r"\.cb-stream-running-meta\s*\{[^}]*margin-left:\s*auto")
+
+        sections_source = Path("ui/sections.py").read_text(encoding="utf-8")
+        controls_start = sections_source.index('with ui.element("span").classes("cb-stream-running-controls")')
+        metadata_start = sections_source.index('with ui.element("span").classes("cb-stream-running-meta")', controls_start)
+        stop_button_start = sections_source.index('if task_id and task.get("cancelable") is not False:', controls_start)
+        self.assertLess(controls_start, metadata_start)
+        self.assertLess(metadata_start, stop_button_start)
 
     def test_command_disclosure_persists_open_state_across_stream_refreshes(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")
@@ -2471,7 +2696,7 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("localStorage.setItem(commandStorageKey", source)
         self.assertIn("setupCommandDisclosures();", source)
 
-    def test_short_reasoning_is_visible_without_empty_disclosure(self) -> None:
+    def test_short_reasoning_uses_the_same_compact_disclosure(self) -> None:
         ui = FakeUI()
         mobile_state = {
             "counts": {"running": 0, "queued": 0},
@@ -2496,9 +2721,11 @@ class StreamComposerTests(unittest.TestCase):
 
         reasoning_details = [item for item in ui.elements if "data-reasoning-details=1" in item.props_text]
         reasoning_previews = [item.text for item in ui.elements if "cb-stream-reasoning-preview" in item.class_text.split()]
+        reasoning_bodies = [item.text for item in ui.elements if "cb-stream-reasoning-body" in item.class_text.split()]
 
-        self.assertEqual([], reasoning_details)
-        self.assertEqual(["先检查项目结构"], reasoning_previews)
+        self.assertEqual(1, len(reasoning_details))
+        self.assertEqual([], reasoning_previews)
+        self.assertEqual(["先检查项目结构"], reasoning_bodies)
 
     def test_queued_task_is_rendered_in_composer_queue_track_while_running(self) -> None:
         ui = FakeUI()
@@ -2639,7 +2866,10 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("task_limit=_stream_global_task_limit(inferred_session),", source)
         self.assertIn('model = None if state["active_page"] in {"mobile", "stream"} else refresh_model()', source)
         self.assertIn("window.__cbStreamForceBottomUntil = Date.now() + 1200;", source)
-        self.assertIn("forceBottom\n                        || Date.now() < Number(window.__cbStreamForceBottomUntil || 0)", source)
+        self.assertIn("const forceBottomActive = Date.now() < Number(window.__cbStreamForceBottomUntil || 0);", source)
+        self.assertIn("const shouldStickToBottom = !userScrollIntentActive && (", source)
+        self.assertIn("forceBottomActive\n                        || (!state.userScrolledAway && state.nearBottom === true)", source)
+        self.assertNotIn("const shouldStickToBottom = forceBottom\n", source)
         self.assertNotIn("forceBottom || streamChanged || state.userScrolledAway !== true", source)
         self.assertNotIn("ui.timer(0.05, lambda session=active_stream_session: scroll_stream_to_bottom(session), once=True)", source)
         self.assertIn("document.querySelector('.cb-agent-panel')?.dataset?.streamKey", source)
@@ -3062,6 +3292,11 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("const nextTop = clampScrollTop(scroller, scroller.scrollTop + event.deltaY * unit);", source)
         self.assertIn("scroller.scrollTop = nextTop;\n                            updateScrollState(scroller, 'user');", source)
         self.assertIn("window.__cbStreamForceBottomUntil = 0;", source)
+        self.assertIn("window.__cbStreamUserScrollIntentUntil = Date.now() + 800;", source)
+        self.assertIn("window.__cbStreamUserScrollIntentUntil = 0;", source)
+        self.assertIn("scroller.addEventListener('touchstart', () => {", source)
+        self.assertIn("if (event.pointerType === 'touch') {", source)
+        self.assertIn("beginUserScrollIntent(scroller);", source)
         self.assertIn("source = 'script';", source)
         self.assertIn("scrollToBottom(scroller);", source)
         self.assertNotIn("__cbStreamProgrammaticScrollUntil", source)
@@ -3187,7 +3422,16 @@ class StreamComposerTests(unittest.TestCase):
                                 "payload": {"type": "task_started"},
                             }
                         ),
-                        json.dumps({"type": "response_item", "payload": {"type": "function_call"}}),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-07-17T05:19:01Z",
+                                "type": "response_item",
+                                "payload": {
+                                    "type": "reasoning",
+                                    "summary": [{"text": "Planning runtime activity"}],
+                                },
+                            }
+                        ),
                     ]
                 )
                 + "\n",
@@ -3223,11 +3467,12 @@ class StreamComposerTests(unittest.TestCase):
             self.assertTrue(changed)
             self.assertEqual(["running", "idle", "idle"], [thread["runtime_status"] for thread in threads])
             self.assertEqual("2026-07-17T05:19:00Z", threads[0]["runtime_started_at"])
+            self.assertEqual("Planning runtime activity", threads[0]["runtime_activity"]["text"])
             self.assertTrue(_codex_rollout_runtime_hint(active_path))
             self.assertEqual("2026-07-17T05:19:00Z", _codex_rollout_runtime_started_at(active_path))
             self.assertFalse(_codex_rollout_runtime_hint(completed_path))
 
-            with patch("ui.app._codex_rollout_runtime_hint", wraps=_codex_rollout_runtime_hint) as read_tail:
+            with patch("ui.app._codex_rollout_runtime_snapshot", wraps=_codex_rollout_runtime_snapshot) as read_tail:
                 unchanged = _update_codex_thread_runtime_statuses(threads, probes, now=now + 1)
 
             self.assertFalse(unchanged)
@@ -3242,6 +3487,47 @@ class StreamComposerTests(unittest.TestCase):
             self.assertTrue(completed)
             self.assertEqual("idle", threads[0]["runtime_status"])
             self.assertEqual("", threads[0]["runtime_started_at"])
+            self.assertEqual({}, threads[0]["runtime_activity"])
+
+    def test_codex_runtime_snapshot_reports_the_latest_mcp_tool_without_a_full_history_read(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "active-mcp.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"type": "event_msg", "payload": {"type": "task_started"}}),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-07-17T05:19:01Z",
+                                "type": "response_item",
+                                "payload": {
+                                    "type": "custom_tool_call",
+                                    "name": "exec",
+                                    "call_id": "call-mcp",
+                                    "input": 'const result = await tools.mcp__node_repl__js({code: "inspect()"});',
+                                },
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = _codex_rollout_runtime_snapshot(path)
+
+            self.assertTrue(snapshot["running_hint"])
+            self.assertEqual(
+                {
+                    "kind": "tool",
+                    "text": "node_repl.js",
+                    "status": "running",
+                    "at": "2026-07-17T05:19:01Z",
+                    "server": "node_repl",
+                    "tool": "js",
+                },
+                snapshot["activity"],
+            )
 
     def test_codex_runtime_status_uses_stable_detection_time_when_start_is_outside_probe(self) -> None:
         with TemporaryDirectory() as temp_dir:

@@ -1483,7 +1483,15 @@ def _find_codex_rollout_jsonl(thread_id: str) -> Path | None:
 def _codex_raw_view_image_payload(thread_id: str) -> dict[str, object]:
     cleaned = str(thread_id or "").strip()
     if not cleaned:
-        return {"previews": {}, "outputs": {}, "output_segments": {}, "image_refs": {}, "turn_times": {}}
+        return {
+            "previews": {},
+            "outputs": {},
+            "output_segments": {},
+            "image_refs": {},
+            "turn_times": {},
+            "reasoning_times": {},
+            "commands": {},
+        }
     path = _find_codex_rollout_jsonl(cleaned)
     try:
         path_signature = (str(path), path.stat().st_mtime_ns, path.stat().st_size) if path else ("", 0, 0)
@@ -1501,6 +1509,8 @@ def _codex_raw_view_image_payload(thread_id: str) -> dict[str, object]:
             "output_segments": _copy_codex_output_segments_by_turn(cached.get("output_segments")),
             "image_refs": _copy_codex_image_refs(cached.get("image_refs")),
             "turn_times": _copy_codex_turn_times(cached.get("turn_times")),
+            "reasoning_times": _copy_codex_reasoning_times(cached.get("reasoning_times")),
+            "commands": _copy_codex_commands(cached.get("commands")),
         }
     previews_by_turn: dict[str, list[dict[str, str]]] = {}
     events_by_turn: dict[str, list[dict[str, object]]] = {}
@@ -1508,6 +1518,9 @@ def _codex_raw_view_image_payload(thread_id: str) -> dict[str, object]:
     pending_image_events: dict[str, dict[str, object]] = {}
     image_refs: dict[str, dict[str, object]] = {}
     turn_times_by_turn: dict[str, dict[str, str]] = {}
+    reasoning_times_by_turn: dict[str, list[dict[str, str]]] = {}
+    commands_by_turn: dict[str, list[dict[str, object]]] = {}
+    pending_exec_commands: dict[str, list[dict[str, object]]] = {}
     if path is not None:
         try:
             with path.open("rb") as handle:
@@ -1538,6 +1551,18 @@ def _codex_raw_view_image_payload(thread_id: str) -> dict[str, object]:
                         phase = str(payload.get("phase") or "").strip()
                         if phase == "final_answer" and event_type in {"agent_message", "message"}:
                             turn_times["finished_at"] = record_at
+                    if (
+                        isinstance(item, dict)
+                        and str(item.get("type") or "") == "response_item"
+                        and turn_id
+                        and record_at
+                        and event_type == "reasoning"
+                    ):
+                        reasoning_text = _codex_raw_reasoning_text(payload)
+                        if reasoning_text:
+                            reasoning_times_by_turn.setdefault(turn_id, []).append(
+                                {"text": reasoning_text, "at": record_at}
+                            )
                     if event_type == "message" and payload.get("role") == "assistant":
                         if not turn_id:
                             continue
@@ -1581,6 +1606,36 @@ def _codex_raw_view_image_payload(thread_id: str) -> dict[str, object]:
                         call_id = str(payload.get("call_id") or "").strip()
                         if not call_id:
                             continue
+                        exec_commands = _codex_custom_tool_exec_commands(payload)
+                        if exec_commands:
+                            command_events: list[dict[str, object]] = []
+                            for command_index, command_payload in enumerate(exec_commands, start=1):
+                                command = str(command_payload.get("command") or "").strip()
+                                if not command:
+                                    continue
+                                command_id = f"rollout-exec-{call_id}-{command_index}"
+                                metadata = {
+                                    "item_type": "commandExecution",
+                                    "item_id": command_id,
+                                    "call_id": call_id,
+                                    "command": command,
+                                    "status": "inProgress",
+                                }
+                                workdir = str(command_payload.get("workdir") or "").strip()
+                                if workdir:
+                                    metadata["cwd"] = workdir
+                                command_event = {
+                                    "id": command_id,
+                                    "event": "codex_command",
+                                    "type": "info",
+                                    "at": record_at,
+                                    "detail": command,
+                                    "metadata": metadata,
+                                }
+                                commands_by_turn.setdefault(turn_id, []).append(command_event)
+                                command_events.append(command_event)
+                            if command_events:
+                                pending_exec_commands[call_id] = command_events
                         image_path = _codex_custom_tool_view_image_path(payload)
                         event = {
                             "turn_id": turn_id,
@@ -1597,6 +1652,21 @@ def _codex_raw_view_image_payload(thread_id: str) -> dict[str, object]:
                     if event_type not in {"function_call_output", "custom_tool_call_output"}:
                         continue
                     call_id = str(payload.get("call_id") or "").strip()
+                    command_events = pending_exec_commands.pop(call_id, [])
+                    if command_events:
+                        output = _codex_custom_tool_output_text(payload.get("output"))
+                        status = _codex_custom_tool_exec_status(output)
+                        for command_event in command_events:
+                            metadata = command_event.get("metadata") if isinstance(command_event.get("metadata"), dict) else {}
+                            metadata["status"] = status
+                            command_event["type"] = "error" if status == "failed" else "success"
+                        last_metadata = command_events[-1].get("metadata")
+                        if isinstance(last_metadata, dict):
+                            if output:
+                                last_metadata["output"] = output[-12000:]
+                            duration_ms = _codex_time_delta_ms(command_events[0].get("at"), record_at)
+                            if duration_ms > 0:
+                                last_metadata["duration_ms"] = str(duration_ms)
                     event = pending_image_events.get(call_id)
                     if event is None:
                         continue
@@ -1686,6 +1756,8 @@ def _codex_raw_view_image_payload(thread_id: str) -> dict[str, object]:
         "output_segments": _copy_codex_output_segments_by_turn(output_segments_by_turn),
         "image_refs": _copy_codex_image_refs(image_refs),
         "turn_times": _copy_codex_turn_times(turn_times_by_turn),
+        "reasoning_times": _copy_codex_reasoning_times(reasoning_times_by_turn),
+        "commands": _copy_codex_commands(commands_by_turn),
     }
     return {
         "previews": previews_by_turn,
@@ -1693,6 +1765,8 @@ def _codex_raw_view_image_payload(thread_id: str) -> dict[str, object]:
         "output_segments": output_segments_by_turn,
         "image_refs": image_refs,
         "turn_times": turn_times_by_turn,
+        "reasoning_times": reasoning_times_by_turn,
+        "commands": commands_by_turn,
     }
 
 
@@ -1703,6 +1777,275 @@ def _codex_custom_tool_view_image_path(payload: dict[str, object]) -> str:
         source,
     )
     return str(match.group(2) or "").strip() if match else ""
+
+
+def _codex_custom_tool_exec_commands(payload: dict[str, object]) -> list[dict[str, str]]:
+    if str(payload.get("name") or "").strip() != "exec":
+        return []
+    source = str(payload.get("input") or "")
+    commands: list[dict[str, str]] = []
+    for arguments in _codex_javascript_call_arguments(source, "tools.exec_command"):
+        command = _codex_javascript_string_property(arguments, "cmd")
+        if not command:
+            continue
+        commands.append(
+            {
+                "command": command,
+                "workdir": _codex_javascript_string_property(arguments, "workdir"),
+            }
+        )
+    return commands
+
+
+def _codex_custom_tool_names(payload: dict[str, object]) -> list[str]:
+    if str(payload.get("name") or "").strip() != "exec":
+        name = str(payload.get("name") or "").strip()
+        return [name] if name else []
+    source = str(payload.get("input") or "")
+    names: list[str] = []
+    cursor = 0
+    marker = "tools."
+    while cursor < len(source):
+        if source.startswith("//", cursor):
+            newline = source.find("\n", cursor + 2)
+            cursor = len(source) if newline < 0 else newline + 1
+            continue
+        if source.startswith("/*", cursor):
+            comment_end = source.find("*/", cursor + 2)
+            cursor = len(source) if comment_end < 0 else comment_end + 2
+            continue
+        if source[cursor] in {"'", '"', "`"}:
+            cursor = _codex_javascript_string_end(source, cursor)
+            continue
+        if not source.startswith(marker, cursor):
+            cursor += 1
+            continue
+        name_start = cursor + len(marker)
+        name_end = name_start
+        while name_end < len(source) and (source[name_end].isalnum() or source[name_end] in {"_", "$"}):
+            name_end += 1
+        name = source[name_start:name_end]
+        open_index = _codex_javascript_skip_space_and_comments(source, name_end)
+        if name and open_index < len(source) and source[open_index] == "(":
+            names.append(name)
+        cursor = max(name_end, cursor + 1)
+    return names
+
+
+def _codex_javascript_call_arguments(source: str, callee: str) -> list[str]:
+    calls: list[str] = []
+    cursor = 0
+    while cursor < len(source):
+        if source.startswith("//", cursor):
+            newline = source.find("\n", cursor + 2)
+            cursor = len(source) if newline < 0 else newline + 1
+            continue
+        if source.startswith("/*", cursor):
+            comment_end = source.find("*/", cursor + 2)
+            cursor = len(source) if comment_end < 0 else comment_end + 2
+            continue
+        if source[cursor] in {"'", '"', "`"}:
+            string_end = _codex_javascript_string_end(source, cursor)
+            cursor = string_end if string_end > cursor else cursor + 1
+            continue
+        if not source.startswith(callee, cursor):
+            cursor += 1
+            continue
+        before = source[cursor - 1] if cursor > 0 else ""
+        after_index = cursor + len(callee)
+        after = source[after_index] if after_index < len(source) else ""
+        if (before and (before.isalnum() or before in {"_", "$", "."})) or (after and (after.isalnum() or after in {"_", "$"})):
+            cursor += 1
+            continue
+        open_index = after_index
+        while open_index < len(source) and source[open_index].isspace():
+            open_index += 1
+        if open_index >= len(source) or source[open_index] != "(":
+            cursor = after_index
+            continue
+        depth = 1
+        index = open_index + 1
+        while index < len(source):
+            if source.startswith("//", index):
+                newline = source.find("\n", index + 2)
+                index = len(source) if newline < 0 else newline + 1
+                continue
+            if source.startswith("/*", index):
+                comment_end = source.find("*/", index + 2)
+                index = len(source) if comment_end < 0 else comment_end + 2
+                continue
+            char = source[index]
+            if char in {"'", '"', "`"}:
+                string_end = _codex_javascript_string_end(source, index)
+                index = string_end if string_end > index else index + 1
+                continue
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    calls.append(source[open_index + 1:index])
+                    cursor = index + 1
+                    break
+            index += 1
+        else:
+            break
+    return calls
+
+
+def _codex_javascript_string_end(source: str, start: int) -> int:
+    quote_char = source[start]
+    cursor = start + 1
+    escaped = False
+    while cursor < len(source):
+        char = source[cursor]
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == quote_char:
+            return cursor + 1
+        cursor += 1
+    return len(source)
+
+
+def _codex_javascript_string_property(source: str, key: str) -> str:
+    cursor = 0
+    while cursor < len(source):
+        cursor = _codex_javascript_skip_space_and_comments(source, cursor)
+        if cursor >= len(source):
+            break
+        char = source[cursor]
+        if char in {"'", '"', "`"}:
+            parsed = _codex_javascript_string_literal(source, cursor)
+            if parsed is None:
+                return ""
+            token, end = parsed
+        elif char.isalpha() or char in {"_", "$"}:
+            end = cursor + 1
+            while end < len(source) and (source[end].isalnum() or source[end] in {"_", "$"}):
+                end += 1
+            token = source[cursor:end]
+        else:
+            cursor += 1
+            continue
+        separator = _codex_javascript_skip_space_and_comments(source, end)
+        if token != key or separator >= len(source) or source[separator] != ":":
+            cursor = end
+            continue
+        value_start = _codex_javascript_skip_space_and_comments(source, separator + 1)
+        if value_start >= len(source) or source[value_start] not in {"'", '"', "`"}:
+            return ""
+        parsed_value = _codex_javascript_string_literal(source, value_start)
+        return parsed_value[0].strip() if parsed_value is not None else ""
+    return ""
+
+
+def _codex_javascript_skip_space_and_comments(source: str, cursor: int) -> int:
+    while cursor < len(source):
+        if source[cursor].isspace():
+            cursor += 1
+            continue
+        if source.startswith("//", cursor):
+            newline = source.find("\n", cursor + 2)
+            return len(source) if newline < 0 else _codex_javascript_skip_space_and_comments(source, newline + 1)
+        if source.startswith("/*", cursor):
+            end = source.find("*/", cursor + 2)
+            return len(source) if end < 0 else _codex_javascript_skip_space_and_comments(source, end + 2)
+        break
+    return cursor
+
+
+def _codex_javascript_string_literal(source: str, start: int) -> tuple[str, int] | None:
+    if start >= len(source) or source[start] not in {"'", '"', "`"}:
+        return None
+    quote_char = source[start]
+    cursor = start + 1
+    result: list[str] = []
+    escapes = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f", "v": "\v", "0": "\0"}
+    while cursor < len(source):
+        char = source[cursor]
+        if char == quote_char:
+            return "".join(result), cursor + 1
+        if quote_char == "`" and source.startswith("${", cursor):
+            return None
+        if char != "\\":
+            result.append(char)
+            cursor += 1
+            continue
+        cursor += 1
+        if cursor >= len(source):
+            return None
+        escaped = source[cursor]
+        if escaped in {"\n", "\r"}:
+            cursor += 1
+            if escaped == "\r" and cursor < len(source) and source[cursor] == "\n":
+                cursor += 1
+            continue
+        if escaped == "x" and cursor + 2 < len(source):
+            try:
+                result.append(chr(int(source[cursor + 1:cursor + 3], 16)))
+                cursor += 3
+                continue
+            except ValueError:
+                pass
+        if escaped == "u" and cursor + 4 < len(source):
+            try:
+                result.append(chr(int(source[cursor + 1:cursor + 5], 16)))
+                cursor += 5
+                continue
+            except ValueError:
+                pass
+        result.append(escapes.get(escaped, escaped))
+        cursor += 1
+    return None
+
+
+def _codex_custom_tool_output_text(output: object) -> str:
+    fragments: list[str] = []
+
+    def visit(value: object) -> None:
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if cleaned:
+                fragments.append(cleaned)
+            return
+        if isinstance(value, list):
+            for item in value:
+                visit(item)
+            return
+        if not isinstance(value, dict):
+            return
+        for key in ("text", "output", "message", "error"):
+            candidate = value.get(key)
+            if isinstance(candidate, (str, list, dict)):
+                visit(candidate)
+        for key in ("content", "items"):
+            candidate = value.get(key)
+            if isinstance(candidate, (list, dict)):
+                visit(candidate)
+
+    visit(output)
+    return "\n".join(fragments).strip()
+
+
+def _codex_custom_tool_exec_status(output: str) -> str:
+    lowered = str(output or "").lower()
+    if "script failed" in lowered or "script error" in lowered:
+        return "failed"
+    return "completed"
+
+
+def _codex_time_delta_ms(start: object, end: object) -> int:
+    start_at = _parse_mobile_time(start)
+    end_at = _parse_mobile_time(end)
+    if start_at is None or end_at is None:
+        return 0
+    if start_at.tzinfo is None and end_at.tzinfo is not None:
+        start_at = start_at.replace(tzinfo=end_at.tzinfo)
+    elif end_at.tzinfo is None and start_at.tzinfo is not None:
+        end_at = end_at.replace(tzinfo=start_at.tzinfo)
+    return max(0, int((end_at - start_at).total_seconds() * 1000))
 
 
 def _codex_view_image_output_previews(
@@ -1872,6 +2215,46 @@ def _copy_codex_turn_times(value: object) -> dict[str, dict[str, str]]:
     }
 
 
+def _copy_codex_reasoning_times(value: object) -> dict[str, list[dict[str, str]]]:
+    if not isinstance(value, dict):
+        return {}
+    copied: dict[str, list[dict[str, str]]] = {}
+    for turn_id, entries in value.items():
+        if not isinstance(entries, list):
+            continue
+        cleaned_entries = [
+            {
+                "text": str(entry.get("text") or "").strip(),
+                "at": str(entry.get("at") or "").strip(),
+            }
+            for entry in entries
+            if isinstance(entry, dict) and str(entry.get("text") or "").strip()
+        ]
+        if cleaned_entries:
+            copied[str(turn_id)] = cleaned_entries
+    return copied
+
+
+def _copy_codex_commands(value: object) -> dict[str, list[dict[str, object]]]:
+    if not isinstance(value, dict):
+        return {}
+    copied: dict[str, list[dict[str, object]]] = {}
+    for turn_id, entries in value.items():
+        if not isinstance(entries, list):
+            continue
+        copied_entries: list[dict[str, object]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            copied_entry = dict(entry)
+            metadata = copied_entry.get("metadata")
+            copied_entry["metadata"] = dict(metadata) if isinstance(metadata, dict) else {}
+            copied_entries.append(copied_entry)
+        if copied_entries:
+            copied[str(turn_id)] = copied_entries
+    return copied
+
+
 def _codex_raw_message_text(payload: dict[str, object]) -> str:
     content = payload.get("content")
     if isinstance(content, list):
@@ -1882,6 +2265,17 @@ def _codex_raw_message_text(payload: dict[str, object]) -> str:
         ]
         return "\n\n".join(parts).strip()
     return str(payload.get("text") or "").strip()
+
+
+def _codex_raw_reasoning_text(payload: dict[str, object]) -> str:
+    summary = payload.get("summary")
+    if not isinstance(summary, list):
+        return ""
+    parts = [
+        str(item.get("text") or "").strip() if isinstance(item, dict) else str(item or "").strip()
+        for item in summary
+    ]
+    return "\n".join(part for part in parts if part).strip()
 
 def _markdown_image_for_preview(preview: dict[str, str]) -> str:
     if str(preview.get("kind") or "") == "custom_tool_image":
@@ -2683,6 +3077,139 @@ def _codex_message_sort_key(index: int, message: dict[str, object], turn_order_l
     )
 
 
+def _codex_reasoning_message_times(
+    sorted_messages: list[tuple[int, dict[str, object]]],
+    raw_reasoning_times_by_turn: dict[str, list[dict[str, str]]],
+) -> dict[int, str]:
+    matched_times: dict[int, str] = {}
+    cursor_by_turn: dict[str, int] = {}
+    for message_index, message in sorted_messages:
+        if str(message.get("role") or "").strip() != "reasoning":
+            continue
+        target = str(message.get("text") or "").strip()
+        turn_id = str(message.get("turn_id") or message.get("id") or "").strip()
+        entries = raw_reasoning_times_by_turn.get(turn_id, [])
+        if not target or not entries:
+            continue
+        cursor = cursor_by_turn.get(turn_id, 0)
+        matched = False
+        for start in range(cursor, len(entries)):
+            combined = ""
+            for end in range(start, len(entries)):
+                raw_text = str(entries[end].get("text") or "").strip()
+                if not raw_text:
+                    continue
+                combined = raw_text if not combined else f"{combined}\n{raw_text}"
+                if combined == target:
+                    matched_times[message_index] = str(entries[end].get("at") or "").strip()
+                    cursor_by_turn[turn_id] = end + 1
+                    matched = True
+                    break
+                if len(combined) >= len(target) or not target.startswith(combined):
+                    break
+            if matched:
+                break
+    return matched_times
+
+
+def _codex_command_activity_signature(item: dict[str, object]) -> tuple[str, str]:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    return (
+        str(metadata.get("command") or item.get("detail") or "").strip(),
+        str(metadata.get("cwd") or metadata.get("workdir") or "").strip(),
+    )
+
+
+def _codex_activity_times_match(left: object, right: object) -> bool:
+    left_key = _stream_time_sort_key(left)
+    right_key = _stream_time_sort_key(right)
+    if left_key[0] != 0 or right_key[0] != 0:
+        return not str(left or "").strip() or not str(right or "").strip()
+    return abs(left_key[1] - right_key[1]) <= 1.0
+
+
+def _codex_merge_rollout_commands_into_display_turns(
+    display_turns_by_turn: dict[str, list[dict[str, object]]],
+    preambles_by_turn: dict[str, dict[str, object]],
+    commands_by_turn: dict[str, list[dict[str, object]]],
+) -> None:
+    for turn_id, raw_commands in commands_by_turn.items():
+        if turn_id not in display_turns_by_turn:
+            continue
+        display_turns = display_turns_by_turn[turn_id]
+        all_parts = display_turns if display_turns else [preambles_by_turn[turn_id]]
+        existing_commands = [
+            activity
+            for parts in all_parts
+            for activity in parts.get("activity", [])
+            if isinstance(activity, dict) and str(activity.get("event") or "") == "codex_command"
+        ]
+        claimed_existing: set[int] = set()
+        existing_ids = {
+            str(activity.get("id") or "")
+            for activity in existing_commands
+            if str(activity.get("id") or "")
+        }
+        for raw_command in raw_commands:
+            command = dict(raw_command)
+            metadata = command.get("metadata")
+            command["metadata"] = dict(metadata) if isinstance(metadata, dict) else {}
+            command_id = str(command.get("id") or "")
+            if command_id and command_id in existing_ids:
+                continue
+            signature = _codex_command_activity_signature(command)
+            duplicate_index = next(
+                (
+                    index
+                    for index, existing in enumerate(existing_commands)
+                    if index not in claimed_existing
+                    and _codex_command_activity_signature(existing) == signature
+                    and _codex_activity_times_match(existing.get("at"), command.get("at"))
+                ),
+                None,
+            )
+            if duplicate_index is not None:
+                claimed_existing.add(duplicate_index)
+                continue
+
+            target = all_parts[0]
+            command_time = _stream_time_sort_key(command.get("at"))
+            if display_turns:
+                target = display_turns[-1]
+                if command_time[0] == 0:
+                    earlier_turns = [
+                        parts
+                        for parts in display_turns
+                        if (created_key := _stream_time_sort_key(parts.get("created_at")))[0] == 0
+                        and created_key[1] <= command_time[1]
+                    ]
+                    target = earlier_turns[-1] if earlier_turns else display_turns[0]
+            target["activity"].append(command)
+
+        for parts in all_parts:
+            activity = parts.get("activity")
+            if not isinstance(activity, list) or len(activity) < 2:
+                continue
+            indexed_activity = list(enumerate(activity))
+            indexed_activity.sort(
+                key=lambda entry: (
+                    _stream_time_sort_key(entry[1].get("at") if isinstance(entry[1], dict) else ""),
+                    entry[0],
+                )
+            )
+            parts["activity"] = [entry for _index, entry in indexed_activity]
+            latest_at = next(
+                (
+                    str(entry.get("at") or "").strip()
+                    for entry in reversed(parts["activity"])
+                    if isinstance(entry, dict) and str(entry.get("at") or "").strip()
+                ),
+                "",
+            )
+            if latest_at:
+                parts["activity_at"] = latest_at
+
+
 def _codex_thread_turn_count(thread: dict[str, object]) -> int:
     messages = thread.get("messages") if isinstance(thread.get("messages"), list) else []
     turns: dict[str, int] = {}
@@ -2775,6 +3302,21 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
         }
         for turn_id, times in _copy_codex_turn_times(raw_rollout_payload.get("turn_times")).items()
     }
+    raw_reasoning_times_by_turn = {
+        turn_id: [
+            {
+                "text": str(entry.get("text") or "").strip(),
+                "at": _mobile_display_time(entry.get("at")),
+            }
+            for entry in entries
+        ]
+        for turn_id, entries in _copy_codex_reasoning_times(raw_rollout_payload.get("reasoning_times")).items()
+    }
+    raw_commands_by_turn = _copy_codex_commands(raw_rollout_payload.get("commands"))
+    for commands in raw_commands_by_turn.values():
+        for command in commands:
+            if command.get("at"):
+                command["at"] = _mobile_display_time(command.get("at"))
     def new_display_turn(*, created_at: str = "", item_order: int = 0, message_id: str = "") -> dict[str, object]:
         return {
             "created_at": created_at,
@@ -2816,12 +3358,20 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
         if fallback_at:
             turn_fallback_at[turn_id] = fallback_at
     sorted_messages = sorted(selected_messages, key=lambda item: _codex_message_sort_key(item[0], item[1], turn_order_lookup))
+    reasoning_message_times = _codex_reasoning_message_times(sorted_messages, raw_reasoning_times_by_turn)
     for _index, message in sorted_messages:
         turn_id = str(message.get("turn_id") or message.get("id") or "").strip()
         role = str(message.get("role") or "").strip()
         text = str(message.get("text") or "").strip()
         raw_started_at = str(raw_turn_times_by_turn.get(turn_id, {}).get("started_at") or "").strip()
-        fallback_at = _codex_message_at(message) or turn_created_at.get(turn_id, "") or raw_started_at or turn_fallback_at.get(turn_id, "") or created_base
+        fallback_at = (
+            reasoning_message_times.get(_index, "")
+            or _codex_message_at(message)
+            or turn_created_at.get(turn_id, "")
+            or raw_started_at
+            or turn_fallback_at.get(turn_id, "")
+            or created_base
+        )
         display_turns = display_turns_by_turn[turn_id]
         if role == "user" and text:
             display_turn = new_display_turn(
@@ -2873,6 +3423,12 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
                 display_turn["activity"].append(activity)
                 if str(activity.get("at") or "").strip():
                     display_turn["activity_at"] = str(activity["at"])
+
+    _codex_merge_rollout_commands_into_display_turns(
+        display_turns_by_turn,
+        preambles_by_turn,
+        raw_commands_by_turn,
+    )
 
     tasks: list[dict[str, object]] = []
     cwd = str(thread.get("cwd") or "").strip()

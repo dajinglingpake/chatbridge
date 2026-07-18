@@ -481,6 +481,135 @@ class MobileStateTests(unittest.TestCase):
 
         mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
 
+    def test_codex_custom_exec_parser_ignores_mcp_javascript_and_extracts_real_commands(self) -> None:
+        payload = {
+            "name": "exec",
+            "input": """
+                const mcp = await tools.mcp__node_repl__js({
+                    code: "await tools.exec_command({cmd: 'not-a-shell-event'})"
+                });
+                // tools.exec_command({cmd: "also-not-a-shell-event"});
+                const results = await Promise.all([
+                    tools.exec_command({cmd: "git status --short", workdir: "I:/repo"}),
+                    tools.exec_command({cmd: 'pytest -q', workdir: 'I:/repo'})
+                ]);
+            """,
+        }
+
+        commands = mobile._codex_custom_tool_exec_commands(payload)
+
+        self.assertEqual(
+            [
+                {"command": "git status --short", "workdir": "I:/repo"},
+                {"command": "pytest -q", "workdir": "I:/repo"},
+            ],
+            commands,
+        )
+        self.assertEqual(
+            ["mcp__node_repl__js", "exec_command", "exec_command"],
+            mobile._codex_custom_tool_names(payload),
+        )
+
+    def test_codex_rollout_keeps_mcp_and_shell_commands_as_separate_cached_activities(self) -> None:
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+        with TemporaryDirectory() as temp_dir:
+            sessions_root = Path(temp_dir) / "codex" / "sessions"
+            sessions_root.mkdir(parents=True)
+            jsonl_path = sessions_root / "rollout-thread-tools-and-commands.jsonl"
+            events = [
+                {
+                    "timestamp": "2026-07-18T10:00:03",
+                    "payload": {
+                        "type": "custom_tool_call",
+                        "name": "exec",
+                        "call_id": "call-shell-group",
+                        "input": """
+                            const results = await Promise.all([
+                                tools.exec_command({cmd: "git status --short", workdir: "I:/repo"}),
+                                tools.exec_command({cmd: "pytest -q", workdir: "I:/repo"})
+                            ]);
+                        """,
+                        "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
+                    },
+                },
+                {
+                    "timestamp": "2026-07-18T10:00:03.250",
+                    "payload": {
+                        "type": "custom_tool_call_output",
+                        "call_id": "call-shell-group",
+                        "output": [{"type": "input_text", "text": "Script completed\nOutput:\n2 passed"}],
+                    },
+                },
+                {
+                    "timestamp": "2026-07-18T10:00:04",
+                    "payload": {
+                        "type": "custom_tool_call",
+                        "name": "exec",
+                        "call_id": "call-mcp-wrapper",
+                        "input": """
+                            await tools.mcp__node_repl__js({
+                                code: "await tools.exec_command({cmd: 'must-not-appear'})"
+                            });
+                        """,
+                        "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
+                    },
+                },
+            ]
+            jsonl_path.write_text("\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8")
+            thread = {
+                "id": "thread-tools-and-commands",
+                "messages": [
+                    {"turn_id": "turn-1", "role": "user", "text": "检查工具", "at": "2026-07-18T10:00:00"},
+                    {"turn_id": "turn-1", "role": "reasoning", "text": "先运行工具", "at": "2026-07-18T10:00:01"},
+                    {
+                        "id": "mcp-1",
+                        "turn_id": "turn-1",
+                        "role": "activity",
+                        "activity": {
+                            "event": "codex_tool_call",
+                            "type": "success",
+                            "at": "2026-07-18T10:00:02",
+                            "detail": "ronin.project_run - 启动项目",
+                            "metadata": {
+                                "item_type": "mcpToolCall",
+                                "server": "ronin",
+                                "tool": "project_run",
+                                "command": "ronin.project_run - 启动项目",
+                                "status": "completed",
+                            },
+                        },
+                    },
+                    {"turn_id": "turn-1", "role": "assistant", "text": "检查完成", "at": "2026-07-18T10:00:05"},
+                ],
+            }
+
+            with (
+                patch("ui.mobile._codex_sessions_root", return_value=sessions_root),
+                patch("ui.mobile.json.loads", wraps=json.loads) as loads,
+            ):
+                first_payload = mobile._codex_raw_view_image_payload(thread["id"])
+                first_parse_count = loads.call_count
+                second_payload = mobile._codex_raw_view_image_payload(thread["id"])
+                tasks = _codex_thread_task_payloads(thread)
+
+            self.assertEqual(first_parse_count, loads.call_count)
+            self.assertEqual(first_payload["commands"], second_payload["commands"])
+            activities = tasks[0]["activity_items"]
+            self.assertEqual(
+                ["codex_reasoning", "codex_tool_call", "codex_command", "codex_command"],
+                [activity["event"] for activity in activities],
+            )
+            self.assertEqual("ronin", activities[1]["metadata"]["server"])
+            self.assertNotIn("server", activities[2]["metadata"])
+            self.assertEqual(
+                ["git status --short", "pytest -q"],
+                [activity["metadata"]["command"] for activity in activities[2:]],
+            )
+            self.assertNotIn("must-not-appear", json.dumps(activities, ensure_ascii=False))
+            self.assertEqual("250", activities[3]["metadata"]["duration_ms"])
+
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+
     def test_codex_function_tool_image_result_gets_mobile_preview(self) -> None:
         mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
         with TemporaryDirectory() as temp_dir:
@@ -671,6 +800,54 @@ class MobileStateTests(unittest.TestCase):
         self.assertEqual("2026-07-17T05:19:00", tasks[0]["created_at"])
         self.assertEqual("2026-07-17T05:19:00", tasks[0]["started_at"])
         self.assertEqual("2026-07-17T05:20:00", tasks[0]["finished_at"])
+
+    def test_codex_thread_history_matches_merged_reasoning_to_rollout_times(self) -> None:
+        thread = {
+            "id": "thread-reasoning-times",
+            "updated_at": "2026-07-17T05:20:30",
+            "messages": [
+                {
+                    "id": "item-1",
+                    "turn_id": "turn-timed",
+                    "role": "reasoning",
+                    "text": "first\nsecond",
+                    "at": "2026-07-17T05:19:00",
+                },
+                {
+                    "id": "item-2",
+                    "turn_id": "turn-timed",
+                    "role": "reasoning",
+                    "text": "third",
+                    "at": "2026-07-17T05:19:00",
+                },
+                {"id": "item-3", "turn_id": "turn-timed", "role": "assistant", "text": "最终回答"},
+            ],
+        }
+        raw_payload = {
+            "turn_times": {
+                "turn-timed": {
+                    "started_at": "2026-07-17T05:19:00",
+                    "finished_at": "2026-07-17T05:20:00",
+                }
+            },
+            "reasoning_times": {
+                "turn-timed": [
+                    {"text": "first", "at": "2026-07-17T05:19:01"},
+                    {"text": "second", "at": "2026-07-17T05:19:02"},
+                    {"text": "third", "at": "2026-07-17T05:19:04"},
+                ]
+            },
+        }
+
+        with patch("ui.mobile._codex_raw_view_image_payload", return_value=raw_payload):
+            tasks = _codex_thread_task_payloads(thread)
+
+        reasoning_items = [item for item in tasks[0]["activity_items"] if item["event"] == "codex_reasoning"]
+        self.assertEqual(
+            ["2026-07-17T05:19:02", "2026-07-17T05:19:04"],
+            [item["at"] for item in reasoning_items],
+        )
+        self.assertEqual("2026-07-17T05:19:04", tasks[0]["progress_at"])
 
     def test_codex_thread_history_normalizes_subagent_activity(self) -> None:
         thread = {

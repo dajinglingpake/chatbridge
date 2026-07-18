@@ -311,6 +311,8 @@ class McpServerInjectionTests(unittest.TestCase):
         self.assertEqual("success", message["activity"]["type"])
         self.assertEqual("node_repl.js - 运行测试\nrun_tests()", message["activity"]["detail"])
         self.assertEqual("node_repl.js - 运行测试\nrun_tests()", message["activity"]["metadata"]["command"])
+        self.assertEqual("node_repl", message["activity"]["metadata"]["server"])
+        self.assertEqual("js", message["activity"]["metadata"]["tool"])
         self.assertEqual("633 tests passed", message["activity"]["metadata"]["output"])
         self.assertEqual("1200", message["activity"]["metadata"]["durationMs"])
 
