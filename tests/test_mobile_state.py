@@ -481,6 +481,79 @@ class MobileStateTests(unittest.TestCase):
 
         mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
 
+    def test_codex_custom_tool_image_hides_preview_matching_user_attachment(self) -> None:
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            sessions_root = temp_path / "codex" / "sessions"
+            sessions_root.mkdir(parents=True)
+            image_path = temp_path / "same-user-attachment.png"
+            image_path.write_bytes(b"current-file-content")
+            snapshot = "data:image/png;base64,dG9vbC1zbmFwc2hvdA=="
+            jsonl_path = sessions_root / "rollout-thread-user-attachment-image.jsonl"
+            events = [
+                {
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "检查附件"}],
+                        "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
+                    }
+                },
+                {
+                    "payload": {
+                        "type": "custom_tool_call",
+                        "name": "exec",
+                        "call_id": "call-user-attachment-image",
+                        "input": f'const result = await tools.view_image({{"path":"{image_path.as_posix()}"}}); image(result.image_url);',
+                        "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
+                    }
+                },
+                {
+                    "payload": {
+                        "type": "custom_tool_call_output",
+                        "call_id": "call-user-attachment-image",
+                        "output": [{"type": "input_image", "image_url": snapshot}],
+                    }
+                },
+                {
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "检查完成"}],
+                        "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
+                    }
+                },
+            ]
+            jsonl_path.write_text("\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8")
+            thread = {
+                "id": "thread-user-attachment-image",
+                "messages": [
+                    {
+                        "turn_id": "turn-1",
+                        "role": "user",
+                        "text": f"# Files mentioned by the user:\n\n## same-user-attachment.png: {image_path.as_posix()}\n\n检查图片",
+                    },
+                    {"turn_id": "turn-1", "role": "assistant", "text": "检查完成"},
+                ],
+            }
+
+            with patch("ui.mobile._codex_sessions_root", return_value=sessions_root):
+                tasks = _codex_thread_task_payloads(thread)
+
+            self.assertEqual([image_path.as_posix()], tasks[0]["images"])
+            self.assertEqual(1, len(tasks[0]["image_previews"]))
+            self.assertEqual([], tasks[0]["output_image_previews"])
+            self.assertEqual(
+                [
+                    {"kind": "text", "text": "检查附件"},
+                    {"kind": "text", "text": "检查完成"},
+                ],
+                tasks[0]["output_segments"],
+            )
+
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+
     def test_codex_custom_tool_image_output_deduplicates_repeated_url_fields(self) -> None:
         snapshot = "data:image/png;base64,ZHVwbGljYXRlLXNuYXBzaG90"
 

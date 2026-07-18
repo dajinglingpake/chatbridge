@@ -1746,6 +1746,7 @@ def _codex_raw_view_image_payload(thread_id: str) -> dict[str, object]:
             fallback = _image_preview_payload(image_path) if image_path else {}
             if str(fallback.get("source") or "").strip():
                 fallback["kind"] = str(event.get("kind") or "view_image")
+                fallback["image_path"] = image_path
                 previews = [fallback]
                 event["previews"] = previews
         turn_id = str(event.get("turn_id") or "").strip()
@@ -1778,6 +1779,7 @@ def _codex_raw_view_image_payload(thread_id: str) -> dict[str, object]:
                             "kind": "custom_tool_image",
                             "source": source,
                             "label": str(preview.get("label") or "image").strip() or "image",
+                            "image_path": str(preview.get("image_path") or "").strip(),
                         }
                     )
                     has_custom_tool_image = True
@@ -2141,7 +2143,14 @@ def _codex_view_image_output_previews(
             source = str(_image_preview_payload(image_url).get("source") or "").strip()
         if not source:
             continue
-        previews.append({"source": source, "label": label, "kind": "view_image"})
+        previews.append(
+            {
+                "source": source,
+                "label": label,
+                "kind": "view_image",
+                "image_path": image_path,
+            }
+        )
     return previews
 
 
@@ -2259,13 +2268,15 @@ def _copy_codex_output_segments_by_turn(value: object) -> dict[str, list[dict[st
             elif kind == "custom_tool_image":
                 source = str(segment.get("source") or "").strip()
                 if source:
-                    result.append(
-                        {
-                            "kind": kind,
-                            "source": source,
-                            "label": str(segment.get("label") or "image").strip() or "image",
-                        }
-                    )
+                    copied_segment = {
+                        "kind": kind,
+                        "source": source,
+                        "label": str(segment.get("label") or "image").strip() or "image",
+                    }
+                    image_path = str(segment.get("image_path") or "").strip()
+                    if image_path:
+                        copied_segment["image_path"] = image_path
+                    result.append(copied_segment)
         if result:
             copied[str(turn_id)] = result
     return copied
@@ -2366,6 +2377,18 @@ def _text_local_image_paths(value: str) -> list[str]:
         seen.add(cleaned)
         paths.append(cleaned)
     return paths
+
+def _local_image_path_key(value: object) -> str:
+    cleaned = str(value or "").strip()
+    if not cleaned:
+        return ""
+    try:
+        path = Path(cleaned).expanduser()
+        if not path.is_absolute():
+            return ""
+        return os.path.normcase(str(path.resolve()))
+    except (OSError, RuntimeError):
+        return ""
 
 def _session_name_for_task(task: HubTask) -> str:
     return task.session_name or "default"
@@ -3526,6 +3549,11 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
                     seen_prompt_images.add(image_path)
                     prompt_images.append(image_path)
             prompt_image_previews = [_image_preview_payload(item) for item in prompt_images]
+            prompt_image_path_keys = {
+                key
+                for image_path in prompt_images
+                if (key := _local_image_path_key(image_path))
+            }
             raw_output_with_images = raw_output_with_images_by_turn.get(turn_id, "") if not uses_split_display else ""
             output = raw_output_with_images or "\n\n".join(str(part) for part in parts["assistant"]).strip()
             output_segments = [
@@ -3533,6 +3561,15 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
                 for segment in raw_output_segments_by_turn.get(turn_id, [])
                 if isinstance(segment, dict) and not uses_split_display
             ]
+            if prompt_image_path_keys and output_segments:
+                output_segments = [
+                    segment
+                    for segment in output_segments
+                    if not (
+                        str(segment.get("kind") or "") == "custom_tool_image"
+                        and _local_image_path_key(segment.get("image_path")) in prompt_image_path_keys
+                    )
+                ]
             finished_at = (
                 raw_finished_at
                 if raw_started_at
@@ -3553,13 +3590,22 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
                         and str(segment.get("source") or "").strip() in seen_output_sources
                     )
                 ]
+            for segment in output_segments:
+                segment.pop("image_path", None)
             if is_terminal_display:
                 for preview in view_image_previews_by_turn.get(turn_id, []):
                     source = str(preview.get("source") or "").strip() if isinstance(preview, dict) else ""
                     if not source or source in seen_output_sources:
                         continue
+                    if (
+                        str(preview.get("kind") or "") == "custom_tool_image"
+                        and _local_image_path_key(preview.get("image_path")) in prompt_image_path_keys
+                    ):
+                        continue
                     seen_output_sources.add(source)
-                    output_image_previews.append(dict(preview))
+                    preview_payload = dict(preview)
+                    preview_payload.pop("image_path", None)
+                    output_image_previews.append(preview_payload)
             reasoning = "\n\n".join(str(part) for part in parts["reasoning"]).strip()
             activity_items = [item for item in parts["activity"] if isinstance(item, dict)]
             if not prompt and not output and not output_segments and not reasoning and not activity_items and not output_image_previews:
