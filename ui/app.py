@@ -3084,7 +3084,6 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         "stream_sidebar_codex_error": "",
         "stream_sidebar_codex_runtime_probes": {},
         "stream_selected_codex_runtime_thread": {},
-        "sidebar_content_loaded": False,
     }
     state = _ClientState(state_defaults, lambda: context.client.storage)
 
@@ -4146,10 +4145,6 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         state["stream_sidebar_task_limit"] = _stream_sidebar_task_limit() + STREAM_SIDEBAR_PAGE_SIZE
         sidebar_sessions_view.refresh()
 
-    def _load_sidebar_sessions() -> None:
-        state["sidebar_content_loaded"] = True
-        right_sidebar_view.refresh()
-
     def _sidebar_codex_threads() -> list[dict[str, object]]:
         threads = state.get("stream_sidebar_codex_threads")
         return [thread for thread in threads if isinstance(thread, dict)] if isinstance(threads, list) else []
@@ -4452,14 +4447,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     on_click=lambda input_box=new_session_input: _open_stream_session_from_input(input_box),
                     icon="add",
                 ).props("outline").classes("w-full cb-sidebar-new-session-button")
-            if not state.get("sidebar_content_loaded"):
-                ui.button(
-                    t("ui.web.mobile.load_sidebar_sessions", "加载会话列表"),
-                    on_click=_load_sidebar_sessions,
-                    icon="forum",
-                ).props("outline").classes("w-full")
-            else:
-                sidebar_sessions_view()
+            sidebar_sessions_view()
 
     def _stream_status_badge_class(status: str) -> str:
         if status == "succeeded":

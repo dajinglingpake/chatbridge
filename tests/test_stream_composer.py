@@ -3690,7 +3690,7 @@ class StreamComposerTests(unittest.TestCase):
         self.assertNotIn("load_codex_threads_page", refresh_body)
         self.assertNotIn("read_codex_thread", refresh_body)
 
-    def test_hidden_sidebar_does_not_mount_session_lists_until_opened(self) -> None:
+    def test_sidebar_mounts_fast_local_sessions_without_manual_load(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")
         open_start = source.index("def open_sidebar")
         open_end = source.index("def close_sidebar", open_start)
@@ -3699,13 +3699,12 @@ class StreamComposerTests(unittest.TestCase):
         sidebar_end = source.index("def _stream_status_badge_class", sidebar_start)
         sidebar_body = source[sidebar_start:sidebar_end]
 
-        self.assertIn('"sidebar_content_loaded": False', source)
-        self.assertNotIn('state["sidebar_content_loaded"] = True', open_body)
+        self.assertNotIn('"sidebar_content_loaded": False', source)
         self.assertNotIn("right_sidebar_view.refresh()", open_body)
-        self.assertIn("ui.web.mobile.load_sidebar_sessions", sidebar_body)
-        self.assertIn("def _load_sidebar_sessions() -> None:", source)
-        self.assertIn('if not state.get("sidebar_content_loaded"):', sidebar_body)
-        self.assertLess(sidebar_body.index('if not state.get("sidebar_content_loaded"):'), sidebar_body.index("sidebar_sessions_view()"))
+        self.assertNotIn("ui.web.mobile.load_sidebar_sessions", sidebar_body)
+        self.assertNotIn("def _load_sidebar_sessions() -> None:", source)
+        self.assertIn("sidebar_sessions_view()", sidebar_body)
+        self.assertIn("ui.web.mobile.load_codex_threads", source)
         self.assertIn("js_handler=\"() => document.body.classList.toggle('cb-sidebar-open')\"", source)
         self.assertNotIn('ui.button("", on_click=open_sidebar, icon="menu")', source)
         self.assertNotIn('ui.button("", on_click=close_sidebar, icon="close")', source)
