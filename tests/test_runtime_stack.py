@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import runtime_stack
 from runtime_stack import (
     _filter_child_process_matches,
     _latest_qq_login_audit,
@@ -63,6 +64,25 @@ class RuntimeStackTests(unittest.TestCase):
         self._tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self._tempdir.cleanup)
         self.root = Path(self._tempdir.name)
+
+    def test_system_resource_usage_is_non_blocking_and_cached(self) -> None:
+        fake_psutil = SimpleNamespace(
+            cpu_percent=lambda interval=None: 37.4,
+            virtual_memory=lambda: SimpleNamespace(percent=61.8, used=16_000, total=32_000),
+        )
+        with (
+            patch.object(runtime_stack, "psutil", fake_psutil),
+            patch.object(runtime_stack, "_SYSTEM_RESOURCE_CACHE", None),
+            patch.object(runtime_stack.time, "monotonic", side_effect=[100.0, 100.5]),
+        ):
+            first = runtime_stack.get_system_resource_usage()
+            second = runtime_stack.get_system_resource_usage()
+
+        self.assertEqual(37.4, first["cpu_percent"])
+        self.assertEqual(61.8, first["memory_percent"])
+        self.assertEqual(16_000, first["memory_used_bytes"])
+        self.assertEqual(32_000, first["memory_total_bytes"])
+        self.assertEqual(first, second)
 
     def test_start_managed_restarts_cleanly_when_duplicate_processes_exist(self) -> None:
         primary = SimpleNamespace(pid=101)

@@ -105,6 +105,13 @@ def _append_action_log(event: str, **payload: object) -> None:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def _append_codex_message_audit(**payload: object) -> None:
+    try:
+        _append_action_log("codex_thread_message", **payload)
+    except OSError:
+        pass
+
+
 def _write_action_state(**payload: object) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     save_json(SERVICE_ACTION_STATE_PATH, {"updated_at": _state_now(), **payload})
@@ -407,6 +414,8 @@ def send_codex_thread_message(
         return ServiceResult(ok=False, message="发送失败：thread_id 不能为空")
     if not cleaned_prompt:
         return ServiceResult(ok=False, message="发送失败：消息内容不能为空")
+    prompt_preview = " ".join(cleaned_prompt.split())[:240]
+    image_count = len([item for item in (images or []) if str(item or "").strip()])
     try:
         result = send_codex_desktop_thread_message(
             cleaned_thread_id,
@@ -415,11 +424,40 @@ def send_codex_thread_message(
             timeout_seconds=timeout_seconds,
         )
     except CodexDesktopControlError as exc:
-        return ServiceResult(ok=False, message=f"发送失败：{exc}")
+        error = str(exc)
+        _append_codex_message_audit(
+            status="failed",
+            thread_id=cleaned_thread_id,
+            prompt_preview=prompt_preview,
+            prompt_chars=len(cleaned_prompt),
+            image_count=image_count,
+            error=error,
+        )
+        return ServiceResult(ok=False, message=f"发送失败：{error}", payload={"error": error})
     action = "已追加到运行中的轮次" if result.mode == "steer" else "已启动新轮次"
+    client_user_message_id = str(getattr(result, "client_user_message_id", "") or "").strip()
+    reconciled = bool(getattr(result, "reconciled", False))
+    _append_codex_message_audit(
+        status="succeeded",
+        thread_id=cleaned_thread_id,
+        turn_id=result.turn_id,
+        mode=result.mode,
+        client_user_message_id=client_user_message_id,
+        reconciled=reconciled,
+        prompt_preview=prompt_preview,
+        prompt_chars=len(cleaned_prompt),
+        image_count=image_count,
+    )
     return ServiceResult(
         ok=True,
         message=f"Codex 历史会话已接收消息：{cleaned_thread_id} | {action}：{result.turn_id}",
+        payload={
+            "thread_id": cleaned_thread_id,
+            "turn_id": result.turn_id,
+            "mode": result.mode,
+            "client_user_message_id": client_user_message_id,
+            "reconciled": reconciled,
+        },
     )
 
 

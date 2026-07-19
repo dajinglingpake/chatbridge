@@ -61,6 +61,8 @@ AGENT_PROCESS_KEYWORDS = ("codex", "claude", "opencode")
 QQ_LOGIN_STATUS_LOG = LOG_DIR / "qq_login_status.jsonl"
 _QQ_LOGIN_STATUS_AUDIT_LAST_SIGNATURE: tuple[object, ...] | None = None
 _QQ_LOGIN_STATUS_LAST_CHECKED: tuple[str, str] | None = None
+_SYSTEM_RESOURCE_CACHE_SECONDS = 1.0
+_SYSTEM_RESOURCE_CACHE: tuple[float, dict[str, float | int | None]] | None = None
 AGENT_PROCESS_HOST_NAMES = {
     "bash",
     "bash.exe",
@@ -85,6 +87,35 @@ AGENT_PROCESS_HOST_NAMES = {
     "wsl",
     "wsl.exe",
 }
+
+
+def get_system_resource_usage(*, force: bool = False) -> dict[str, float | int | None]:
+    global _SYSTEM_RESOURCE_CACHE
+    now = time.monotonic()
+    if not force and _SYSTEM_RESOURCE_CACHE is not None:
+        cached_at, cached_usage = _SYSTEM_RESOURCE_CACHE
+        if now - cached_at <= _SYSTEM_RESOURCE_CACHE_SECONDS:
+            return dict(cached_usage)
+
+    usage: dict[str, float | int | None] = {
+        "cpu_percent": None,
+        "memory_percent": None,
+        "memory_used_bytes": None,
+        "memory_total_bytes": None,
+    }
+    if psutil is not None:
+        try:
+            memory = psutil.virtual_memory()
+            usage = {
+                "cpu_percent": round(max(0.0, min(100.0, float(psutil.cpu_percent(interval=None)))), 1),
+                "memory_percent": round(max(0.0, min(100.0, float(memory.percent))), 1),
+                "memory_used_bytes": max(0, int(memory.used)),
+                "memory_total_bytes": max(0, int(memory.total)),
+            }
+        except Exception:
+            pass
+    _SYSTEM_RESOURCE_CACHE = (now, usage)
+    return dict(usage)
 
 @dataclass
 class ManagedStatus:

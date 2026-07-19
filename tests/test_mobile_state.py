@@ -1237,6 +1237,46 @@ class MobileStateTests(unittest.TestCase):
         self.assertEqual("2026-07-17T05:19:00", tasks[0]["started_at"])
         self.assertEqual("2026-07-17T05:20:00", tasks[0]["finished_at"])
 
+    def test_codex_final_answer_is_terminal_before_task_complete_arrives(self) -> None:
+        thread = {
+            "id": "thread-final-phase",
+            "updated_at": "2026-07-17T05:20:30",
+            "messages": [
+                {
+                    "id": "item-user",
+                    "turn_id": "turn-final-phase",
+                    "role": "user",
+                    "text": "检查状态",
+                    "at": "2026-07-17T05:19:00",
+                },
+                {
+                    "id": "item-final",
+                    "turn_id": "turn-final-phase",
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "text": "最终回答",
+                    "at": "2026-07-17T05:20:00",
+                },
+            ],
+        }
+
+        with patch(
+            "ui.mobile._codex_cached_rollout_payload",
+            return_value={
+                "turn_times": {
+                    "turn-final-phase": {
+                        "started_at": "2026-07-17T05:19:00",
+                        "finished_at": "",
+                    }
+                },
+            },
+        ):
+            tasks = _codex_thread_task_payloads(thread)
+
+        self.assertTrue(tasks[0]["final_answer"])
+        self.assertEqual("2026-07-17T05:20:00", tasks[0]["final_answer_at"])
+        self.assertEqual("2026-07-17T05:20:00", tasks[0]["finished_at"])
+
     def test_codex_thread_history_matches_merged_reasoning_to_rollout_times(self) -> None:
         thread = {
             "id": "thread-reasoning-times",

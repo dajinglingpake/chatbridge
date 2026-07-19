@@ -22,6 +22,7 @@ from core.dashboard import refresh_dashboard_cache
 from core.json_store import load_json, save_json
 from core.view_models import build_web_console_view_model
 from localization import Localizer, normalize_language
+from runtime_stack import get_system_resource_usage
 from ui.mobile import MOBILE_UPLOAD_ROOT, _codex_custom_tool_exec_commands, _codex_custom_tool_names, build_mobile_access_url, build_mobile_qr_data_url, build_stream_sidebar_state_snapshot, build_stream_signature_snapshot, build_stream_state_snapshot, codex_thread_id_from_session_name, install_mobile_routes, is_mobile_access_authorized, load_codex_threads_page, stream_hub_state_file_signature, stream_qq_current_session_name, update_codex_goal_cache
 from ui.qr_login import install_qr_login_dialog
 from ui.qq_login import install_qq_login_dialog
@@ -98,14 +99,33 @@ def _stream_initial_history_limit(session_name: str) -> int:
     return STREAM_CODEX_INITIAL_HISTORY_LIMIT if str(session_name or "").strip().startswith("codex:") else STREAM_MANUAL_HISTORY_LIMIT
 
 
+def _normalize_stream_session_name(session_name: object) -> str:
+    cleaned_session_name = str(session_name or "").strip()
+    if not cleaned_session_name.startswith("codex:"):
+        return cleaned_session_name
+    thread_id = codex_thread_id_from_session_name(cleaned_session_name)
+    try:
+        uuid.UUID(thread_id)
+    except (AttributeError, TypeError, ValueError):
+        return ""
+    return cleaned_session_name
+
+
 def _load_persisted_stream_session(path: Path = STREAM_UI_SELECTION_PATH) -> str:
     payload = load_json(path, {}, expect_type=dict)
-    return str(payload.get("session_name") or "").strip() if isinstance(payload, dict) else ""
+    persisted_session = str(payload.get("session_name") or "").strip() if isinstance(payload, dict) else ""
+    normalized_session = _normalize_stream_session_name(persisted_session)
+    if persisted_session and not normalized_session:
+        try:
+            save_json(path, {"session_name": ""})
+        except OSError:
+            pass
+    return normalized_session
 
 
 def _persist_stream_session(session_name: str, path: Path = STREAM_UI_SELECTION_PATH) -> None:
     try:
-        save_json(path, {"session_name": str(session_name or "").strip()})
+        save_json(path, {"session_name": _normalize_stream_session_name(session_name)})
     except OSError:
         pass
 
@@ -132,6 +152,14 @@ def _append_stream_ui_log(event: str, **fields: object) -> None:
 def normalize_web_theme(value: str) -> str:
     cleaned = str(value or "").strip().lower()
     return cleaned if cleaned in WEB_THEME_OPTIONS else "dark"
+
+
+def _system_resource_percent_text(value: object) -> str:
+    try:
+        percent = float(value)
+    except (TypeError, ValueError):
+        return "--"
+    return f"{max(0.0, min(100.0, percent)):.0f}%"
 
 def _stream_time_sort_key(value: object) -> tuple[int, float, str]:
     text = str(value or "").strip()
@@ -500,7 +528,9 @@ def _update_codex_thread_runtime_statuses(
                     "runtime_started_at": runtime_started_at,
                     "runtime_activity": _codex_runtime_activity_copy(runtime_activity),
                 }
-                if running_hint is True or (running_hint is None and age_seconds <= CODEX_THREAD_RUNTIME_RECENT_SECONDS):
+                if running_hint is False:
+                    runtime_status = "idle"
+                elif running_hint is True or (running_hint is None and age_seconds <= CODEX_THREAD_RUNTIME_RECENT_SECONDS):
                     runtime_status = "running"
                 thread_runtime_started_at = runtime_started_at if runtime_status == "running" else ""
                 if str(thread.get("runtime_started_at") or "") != thread_runtime_started_at:
@@ -536,7 +566,7 @@ def _load_nicegui():
 
 def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
     ui = _load_nicegui()
-    from nicegui import context
+    from nicegui import background_tasks, context
     default_language = Localizer().language
 
     def translate(key: str, **kwargs: object) -> str:
@@ -932,6 +962,55 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         }
         .q-page-sticky:has(.cb-sidebar-toggle) {
             z-index: 2102 !important;
+        }
+        .cb-system-resource-strip {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.7rem;
+            min-height: 2.5rem;
+            padding: 0.38rem 0.7rem;
+            border: 1px solid var(--cb-border);
+            border-radius: 999px;
+            background: color-mix(in srgb, var(--cb-surface) 92%, transparent);
+            box-shadow: var(--cb-shadow);
+            backdrop-filter: blur(12px);
+            pointer-events: none;
+        }
+        .cb-system-resource-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.32rem;
+            color: var(--cb-muted);
+            font-size: 0.75rem;
+            font-weight: 700;
+            white-space: nowrap;
+        }
+        .cb-system-resource-dot {
+            width: 0.42rem;
+            height: 0.42rem;
+            border-radius: 999px;
+            background: var(--cb-info);
+        }
+        .cb-system-resource-item[data-system-resource="memory"] .cb-system-resource-dot {
+            background: var(--cb-accent-bright);
+        }
+        .cb-system-resource-value {
+            min-width: 2.2rem;
+            color: var(--cb-ink);
+            font-variant-numeric: tabular-nums;
+            text-align: right;
+        }
+        @media (max-width: 480px) {
+            .cb-system-resource-strip {
+                gap: 0.45rem;
+                padding-inline: 0.55rem;
+            }
+            .cb-system-resource-label {
+                display: none;
+            }
+            .cb-system-resource-value {
+                min-width: 2rem;
+            }
         }
         @media (min-width: 768px) {
             body.cb-sidebar-open .cb-shell-content-stream {
@@ -3368,6 +3447,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         "stream_sidebar_codex_runtime_probes": {},
         "stream_sidebar_codex_workspace_open": {},
         "stream_selected_codex_runtime_thread": {},
+        "system_resource_updated_at": 0.0,
     }
     state = _ClientState(state_defaults, lambda: context.client.storage)
 
@@ -3490,7 +3570,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
 
     def apply_request_session(request) -> None:
         has_session_query = "session" in request.query_params
-        requested_session = str(request.query_params.get("session") or "").strip()
+        requested_session = _normalize_stream_session_name(request.query_params.get("session"))
         if requested_session:
             state["active_page"] = "stream"
             state["selected_session_name"] = requested_session
@@ -3502,9 +3582,9 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             state["stream_force_bottom_next"] = True
             _persist_stream_session("")
         elif state["active_page"] == "stream":
-            preserved_session = _load_persisted_stream_session() or str(state.get("selected_session_name") or "").strip()
+            preserved_session = _load_persisted_stream_session() or _normalize_stream_session_name(state.get("selected_session_name"))
+            state["selected_session_name"] = preserved_session
             if preserved_session:
-                state["selected_session_name"] = preserved_session
                 state["stream_force_bottom_session"] = preserved_session
             state["stream_force_bottom_next"] = True
 
@@ -3644,7 +3724,9 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         selected_payload["runtime_activity"] = _codex_runtime_activity_copy(runtime_thread.get("runtime_activity"))
 
     def _stream_state_snapshot() -> dict[str, object]:
-        session_name = str(state["selected_session_name"] or "").strip()
+        session_name = _normalize_stream_session_name(state["selected_session_name"])
+        if session_name != str(state["selected_session_name"] or "").strip():
+            state["selected_session_name"] = session_name
         stream_state = build_stream_state_snapshot(
             selected_session_name=session_name,
             task_limit=_stream_global_task_limit(session_name),
@@ -3765,6 +3847,9 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     str(task.get("id") or ""),
                     str(task.get("status") or ""),
                     str(task.get("prompt") or ""),
+                    bool(task.get("final_answer")),
+                    str(task.get("final_answer_at") or ""),
+                    str(task.get("finished_at") or ""),
                 )
                 for task in active_tasks
             ),
@@ -3774,7 +3859,10 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             str(latest_task.get("reasoning_effort") or ""),
             str(latest_task.get("context_left_percent") or ""),
             tuple(str(active_goal.get(key) or "") for key in ("objective", "status", "started_at", "updated_at", "time_used_seconds")),
-            tuple(str(selected_codex_thread.get(key) or "") for key in ("model", "reasoning_effort", "service_tier")),
+            tuple(
+                str(selected_codex_thread.get(key) or "")
+                for key in ("model", "reasoning_effort", "service_tier", "runtime_status", "runtime_started_at")
+            ),
             pending_images,
         )
 
@@ -4263,7 +4351,79 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         _refresh_stream_parts(refresh_composer=False, refresh_messages=True)
         scroll_stream_to_bottom(cleaned_session_name, preserve_top=True)
 
-    async def _submit_stream_message(prompt: str, session_name: str, agent_id: str, backend: str) -> bool:
+    async def _finish_stream_message_send(
+        *,
+        client,
+        prompt: str,
+        session_name: str,
+        agent_id: str,
+        backend: str,
+        codex_thread_id: str,
+        codex_thread: dict[str, object],
+        images: list[str],
+    ) -> None:
+        try:
+            if codex_thread_id:
+                result = await asyncio.to_thread(
+                    send_codex_thread_message,
+                    codex_thread_id,
+                    prompt,
+                    images=images,
+                )
+            else:
+                result = await asyncio.to_thread(
+                    submit_hub_task,
+                    agent_id=agent_id,
+                    prompt=prompt,
+                    session_name=session_name,
+                    backend=backend,
+                    source="stream-web",
+                    workdir=str(codex_thread.get("cwd") or ""),
+                    session_id=codex_thread_id,
+                    images=images,
+                )
+        except Exception as exc:
+            if getattr(client, "_deleted", False):
+                return
+            with client:
+                message = (
+                    t(
+                        "ui.web.notify.codex_thread_message_failed",
+                        "向 Codex 历史会话发送失败：{message}",
+                        message=str(exc),
+                    )
+                    if codex_thread_id
+                    else f"提交失败：{exc}"
+                )
+                _notify(message)
+            return
+
+        if getattr(client, "_deleted", False):
+            return
+        with client:
+            if result.ok:
+                pending = state["stream_pending_images"]
+                if isinstance(pending, dict):
+                    pending[session_name] = []
+            if codex_thread_id:
+                message = (
+                    t(
+                        "ui.web.notify.codex_thread_message_sent",
+                        "Codex 历史会话已接收消息：{thread_id}",
+                        thread_id=codex_thread_id,
+                    )
+                    if result.ok
+                    else t(
+                        "ui.web.notify.codex_thread_message_failed",
+                        "向 Codex 历史会话发送失败：{message}",
+                        message=result.message,
+                    )
+                )
+                _notify(message)
+            else:
+                _notify(result.message)
+
+    def _submit_stream_message(prompt: str, session_name: str, agent_id: str, backend: str) -> bool:
         cleaned_prompt = str(prompt or "").strip()
         if not cleaned_prompt:
             ui.notify(t("ui.web.notify.enter_message", "请输入消息内容"), position="top")
@@ -4276,7 +4436,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             stream_state = _stream_state_snapshot()
             selected_codex_thread = stream_state.get("selected_codex_thread")
             codex_thread = selected_codex_thread if isinstance(selected_codex_thread, dict) else {}
-        images = _stream_pending_image_paths(state["selected_session_name"])
+        images = _stream_pending_image_paths(cleaned_session_name)
         if codex_thread_id:
             ui.notify(
                 t(
@@ -4286,46 +4446,20 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                 ),
                 position="top",
             )
-            result = await asyncio.to_thread(
-                send_codex_thread_message,
-                codex_thread_id,
-                cleaned_prompt,
-                images=images,
-            )
-        else:
-            result = await asyncio.to_thread(
-                submit_hub_task,
-                agent_id=agent_id.strip() or "main",
+        background_tasks.create(
+            _finish_stream_message_send(
+                client=context.client,
                 prompt=cleaned_prompt,
-                session_name=state["selected_session_name"],
+                session_name=cleaned_session_name,
+                agent_id=agent_id.strip() or "main",
                 backend=backend.strip(),
-                source="stream-web",
-                workdir=str(codex_thread.get("cwd") or ""),
-                session_id=codex_thread_id,
+                codex_thread_id=codex_thread_id,
+                codex_thread=codex_thread,
                 images=images,
-            )
-        if result.ok:
-            pending = state["stream_pending_images"]
-            if isinstance(pending, dict):
-                pending[state["selected_session_name"]] = []
-        if codex_thread_id:
-            message = (
-                t(
-                    "ui.web.notify.codex_thread_message_sent",
-                    "Codex 历史会话已接收消息：{thread_id}",
-                    thread_id=codex_thread_id,
-                )
-                if result.ok
-                else t(
-                    "ui.web.notify.codex_thread_message_failed",
-                    "向 Codex 历史会话发送失败：{message}",
-                    message=result.message,
-                )
-            )
-            _notify(message)
-        else:
-            _notify(result.message)
-        return result.ok
+            ),
+            name=f"send stream message {cleaned_session_name}",
+        )
+        return True
 
     def _open_mobile_url(url: str) -> None:
         cleaned_url = url.strip()
@@ -4968,15 +5102,47 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                 state["stream_switch_refresh_pending"] = False
 
     def shell_view() -> None:
+        resource_usage = get_system_resource_usage()
         with ui.element("div").classes("cb-sidebar-backdrop").on("click", lambda _event: close_sidebar()):
             pass
         with ui.element("aside").classes("cb-sidebar cb-sidebar-shell"):
             right_sidebar_view()
         with ui.page_sticky(position="top-right", x_offset=16, y_offset=16):
-            ui.button("", icon="menu").props("round color=primary").classes("cb-sidebar-toggle").on(
-                "click",
-                js_handler="() => document.body.classList.toggle('cb-sidebar-open')",
-            )
+            with ui.row().classes("items-center gap-2 no-wrap"):
+                with ui.element("div").props("data-system-resource-strip=1").classes("cb-system-resource-strip"):
+                    for key, label in (
+                        ("cpu", t("ui.web.system.cpu", "CPU")),
+                        ("memory", t("ui.web.system.memory", "内存")),
+                    ):
+                        with ui.element("div").props(f"data-system-resource={key}").classes("cb-system-resource-item"):
+                            ui.element("span").classes("cb-system-resource-dot")
+                            ui.label(label).classes("cb-system-resource-label")
+                            ui.label(
+                                _system_resource_percent_text(resource_usage.get(f"{key}_percent"))
+                            ).props(f"data-system-resource-value={key}").classes("cb-system-resource-value")
+                ui.button("", icon="menu").props("round color=primary").classes("cb-sidebar-toggle").on(
+                    "click",
+                    js_handler="() => document.body.classList.toggle('cb-sidebar-open')",
+                )
+
+    def _patch_system_resource_usage() -> None:
+        usage = get_system_resource_usage()
+        values = {
+            "cpu": _system_resource_percent_text(usage.get("cpu_percent")),
+            "memory": _system_resource_percent_text(usage.get("memory_percent")),
+        }
+        ui.run_javascript(
+            f"""
+            (() => {{
+                const values = {json.dumps(values, ensure_ascii=False)};
+                for (const [key, value] of Object.entries(values)) {{
+                    document.querySelectorAll(`[data-system-resource-value="${{key}}"]`).forEach((element) => {{
+                        if (element.textContent !== value) element.textContent = value;
+                    }});
+                }}
+            }})();
+            """
+        )
 
     def install_ui_error_logger() -> None:
         ui.run_javascript(
@@ -6323,21 +6489,32 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                 if timer is not None:
                     timer.cancel(with_current_invocation=True)
                 return
+            resource_now = time.monotonic()
+            try:
+                resource_updated_at = float(state.get("system_resource_updated_at") or 0.0)
+            except (TypeError, ValueError):
+                resource_updated_at = 0.0
+            if resource_now - resource_updated_at >= 2.0:
+                state["system_resource_updated_at"] = resource_now
+                _patch_system_resource_usage()
             if state["active_page"] == "stream":
                 try:
                     if state.get("stream_switch_refresh_pending"):
                         return
-                    sidebar_runtime_changed, selected_runtime_status_changed, selected_runtime_activity_changed = _refresh_codex_runtime_statuses()
-                    if state.get("stream_sidebar_codex_loaded") and sidebar_runtime_changed:
-                        _patch_sidebar_codex_runtime_status()
                     selected_stream_session = str(state["selected_session_name"] or "").strip()
                     if not codex_thread_id_from_session_name(selected_stream_session):
                         next_hub_file_signature = stream_hub_state_file_signature()
-                        if next_hub_file_signature == state.get("stream_hub_state_file_signature"):
-                            return
                     else:
                         next_hub_file_signature = None
                     next_signature = _stream_signature_snapshot()
+                    sidebar_runtime_changed, selected_runtime_status_changed, selected_runtime_activity_changed = _refresh_codex_runtime_statuses()
+                    if state.get("stream_sidebar_codex_loaded") and sidebar_runtime_changed:
+                        _patch_sidebar_codex_runtime_status()
+                    if (
+                        next_hub_file_signature is not None
+                        and next_hub_file_signature == state.get("stream_hub_state_file_signature")
+                    ):
+                        return
                     if next_hub_file_signature is not None:
                         state["stream_hub_state_file_signature"] = next_hub_file_signature
                     stream_content_changed = next_signature != state.get("stream_refresh_signature")

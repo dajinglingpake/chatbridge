@@ -23,6 +23,8 @@ class CodexDesktopControlError(RuntimeError):
 class CodexDesktopMessageResult:
     mode: str
     turn_id: str
+    client_user_message_id: str = ""
+    reconciled: bool = False
 
 
 @dataclass(frozen=True)
@@ -109,7 +111,7 @@ def _desktop_bridge_expression(operation: str, *, timeout_seconds: float) -> str
     if (!bridge || typeof bridge.sendMessageFromView !== 'function') {{
         return JSON.stringify({{ok: false, error: 'Codex 桌面桥接不可用'}});
     }}
-    const request = (method, params) => new Promise((resolve) => {{
+    const request = (method, params, requestTimeoutMs = {timeout_ms}) => new Promise((resolve) => {{
         const id = `chatbridge:${{method}}:${{crypto.randomUUID()}}`;
         let settled = false;
         const finish = (message) => {{
@@ -127,7 +129,7 @@ def _desktop_bridge_expression(operation: str, *, timeout_seconds: float) -> str
         }};
         const timer = setTimeout(
             () => finish({{error: {{message: `Codex 桌面请求超时：${{method}}`}}}}),
-            {timeout_ms},
+            requestTimeoutMs,
         );
         window.addEventListener('message', onMessage);
         bridge.sendMessageFromView({{
@@ -188,6 +190,25 @@ def _message_expression(
     const threadId = {encoded_thread_id};
     const input = {encoded_input};
     const clientUserMessageId = {encoded_message_id};
+    const reconcileAcceptedMessage = async () => {{
+        const recentResponse = await request('thread/turns/list', {{
+            threadId,
+            limit: 2,
+            sortDirection: 'desc',
+            itemsView: 'summary',
+        }}, Math.min({max(2000, int(timeout_seconds * 1000))}, 4000));
+        if (recentResponse?.error) return null;
+        const recentTurns = Array.isArray(recentResponse?.result?.data) ? recentResponse.result.data : [];
+        for (const turn of recentTurns) {{
+            const items = Array.isArray(turn?.items) ? turn.items : [];
+            const accepted = items.some(
+                (item) => item?.type === 'userMessage' && String(item?.clientId || '') === clientUserMessageId,
+            );
+            const turnId = String(turn?.id || '');
+            if (accepted && turnId) return turnId;
+        }}
+        return null;
+    }};
     const turnsResponse = await request('thread/turns/list', {{
         threadId,
         limit: 1,
@@ -244,13 +265,28 @@ def _message_expression(
         }}
     }}
     if (response?.error) {{
+        const reconciledTurnId = await reconcileAcceptedMessage();
+        if (reconciledTurnId) {{
+            return JSON.stringify({{
+                ok: true,
+                threadId,
+                turnId: reconciledTurnId,
+                mode,
+                reconciled: true,
+                originalError: response.error.message || String(response.error),
+            }});
+        }}
         return JSON.stringify({{ok: false, error: response.error.message || String(response.error), mode}});
     }}
-    const turnId = String(mode === 'steer' ? response?.result?.turnId || '' : response?.result?.turn?.id || '');
+    let turnId = String(mode === 'steer' ? response?.result?.turnId || '' : response?.result?.turn?.id || '');
     if (!turnId) {{
-        return JSON.stringify({{ok: false, error: 'Codex 桌面桥接未返回 turn_id', mode}});
+        turnId = await reconcileAcceptedMessage() || '';
+        if (!turnId) {{
+            return JSON.stringify({{ok: false, error: 'Codex 桌面桥接未返回 turn_id', mode}});
+        }}
+        return JSON.stringify({{ok: true, threadId, turnId, mode, reconciled: true}});
     }}
-    return JSON.stringify({{ok: true, threadId, turnId, mode}});
+    return JSON.stringify({{ok: true, threadId, turnId, mode, reconciled: false}});
 """.strip()
     return _desktop_bridge_expression(operation, timeout_seconds=timeout_seconds)
 
@@ -410,7 +446,8 @@ def _run_desktop_action(
             return payload
         except Exception as exc:
             errors.append(str(exc))
-    detail = errors[-1] if errors else "未知错误"
+    unique_errors = list(dict.fromkeys(error for error in errors if error))
+    detail = " | ".join(unique_errors[:3]) if unique_errors else "未知错误"
     raise CodexDesktopControlError(f"{failure_message}：{detail}")
 
 
@@ -465,7 +502,12 @@ def send_codex_desktop_thread_message(
         raise CodexDesktopControlError("Codex 桌面桥接未返回有效发送模式")
     if not turn_id:
         raise CodexDesktopControlError("Codex 桌面桥接未返回 turn_id")
-    return CodexDesktopMessageResult(mode=mode, turn_id=turn_id)
+    return CodexDesktopMessageResult(
+        mode=mode,
+        turn_id=turn_id,
+        client_user_message_id=client_user_message_id,
+        reconciled=bool(payload.get("reconciled")),
+    )
 
 
 def control_codex_desktop_thread_goal(

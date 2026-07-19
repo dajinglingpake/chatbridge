@@ -9,8 +9,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from ui.app import _codex_rollout_runtime_hint, _codex_rollout_runtime_snapshot, _codex_rollout_runtime_started_at, _load_persisted_stream_session, _persist_stream_session, _stream_initial_history_limit, _update_codex_thread_runtime_statuses, group_codex_threads_by_workspace
-from ui.sections import _stream_activity_render_window, _stream_client_time, _stream_display_time, _stream_image_is_previewable, _stream_markdown, _stream_model_display_name, _stream_reasoning_effort_label, _stream_task_sort_key, _stream_task_uses_utc_naive_time, _stream_text, _stream_time_delta_ms, _stream_timeline_items, render_mobile_stream_section
+from ui.app import _codex_rollout_runtime_hint, _codex_rollout_runtime_snapshot, _codex_rollout_runtime_started_at, _load_persisted_stream_session, _normalize_stream_session_name, _persist_stream_session, _stream_initial_history_limit, _update_codex_thread_runtime_statuses, group_codex_threads_by_workspace
+from ui.sections import _prepare_stream_render_context, _stream_activity_render_window, _stream_client_time, _stream_display_time, _stream_image_is_previewable, _stream_markdown, _stream_model_display_name, _stream_reasoning_effort_label, _stream_task_sort_key, _stream_task_uses_utc_naive_time, _stream_text, _stream_time_delta_ms, _stream_timeline_items, render_mobile_stream_section
 
 
 class FakeElement:
@@ -129,16 +129,26 @@ class StreamComposerTests(unittest.TestCase):
     def test_stream_selection_persistence_survives_ui_restart(self) -> None:
         with TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "ui_stream_selection.json"
+            session_name = "codex:019f6b52-f3a5-7d40-9660-0bd9dcbc37db"
 
             self.assertEqual("", _load_persisted_stream_session(path))
 
-            _persist_stream_session("codex:thread-live", path)
+            _persist_stream_session(session_name, path)
 
-            self.assertEqual("codex:thread-live", _load_persisted_stream_session(path))
+            self.assertEqual(session_name, _load_persisted_stream_session(path))
 
             _persist_stream_session("", path)
 
             self.assertEqual("", _load_persisted_stream_session(path))
+
+    def test_invalid_codex_stream_selection_is_rejected_and_self_healed(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ui_stream_selection.json"
+            path.write_text('{"session_name": "codex:transition"}', encoding="utf-8")
+
+            self.assertEqual("", _normalize_stream_session_name("codex:transition"))
+            self.assertEqual("", _load_persisted_stream_session(path))
+            self.assertIn('"session_name": ""', path.read_text(encoding="utf-8"))
 
     def test_stream_text_preserves_leading_indented_code_block(self) -> None:
         self.assertEqual("    first\n    second", _stream_text("    first\n    second"))
@@ -3355,7 +3365,7 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn('state["selected_session_name"] = ""', source)
         self.assertIn('_persist_stream_session(requested_session)', source)
         self.assertIn('_persist_stream_session("")', source)
-        self.assertIn('_load_persisted_stream_session() or str(state.get("selected_session_name") or "").strip()', source)
+        self.assertIn('_load_persisted_stream_session() or _normalize_stream_session_name(state.get("selected_session_name"))', source)
         self.assertIn('state["selected_session_name"] = preserved_session', source)
         self.assertIn('state["stream_force_bottom_session"] = preserved_session', source)
         self.assertIn('state["stream_force_bottom_session"] = requested_session', source)
@@ -3779,6 +3789,156 @@ class StreamComposerTests(unittest.TestCase):
             self.assertEqual("", threads[0]["runtime_started_at"])
             self.assertEqual({}, threads[0]["runtime_activity"])
 
+    def test_codex_terminal_rollout_overrides_stale_running_thread_status(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "completed.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "timestamp": "2026-07-19T12:00:00Z",
+                                "type": "event_msg",
+                                "payload": {"type": "task_started"},
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-07-19T12:01:26Z",
+                                "type": "event_msg",
+                                "payload": {
+                                    "type": "agent_message",
+                                    "phase": "final_answer",
+                                    "message": "done",
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-07-19T12:01:27Z",
+                                "type": "event_msg",
+                                "payload": {"type": "task_complete"},
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            now = time.time()
+            os.utime(path, (now, now))
+            thread = {
+                "id": "thread-finished",
+                "path": str(path),
+                "status": "running",
+                "runtime_status": "running",
+                "runtime_started_at": "2026-07-19T12:00:00Z",
+            }
+            probes: dict[str, object] = {}
+
+            changed = _update_codex_thread_runtime_statuses([thread], probes, now=now)
+
+            self.assertTrue(changed)
+            self.assertEqual("idle", thread["runtime_status"])
+            self.assertEqual("", thread["runtime_started_at"])
+            self.assertEqual({}, thread.get("runtime_activity", {}))
+
+            unchanged = _update_codex_thread_runtime_statuses([thread], probes, now=now + 1)
+
+            self.assertFalse(unchanged)
+            self.assertEqual("idle", thread["runtime_status"])
+
+    def test_stream_composer_signature_tracks_codex_terminal_state(self) -> None:
+        source = Path("ui/app.py").read_text(encoding="utf-8")
+        signature_start = source.index("def _stream_composer_signature")
+        signature_end = source.index("def _stream_pending_image_paths", signature_start)
+        signature_body = source[signature_start:signature_end]
+
+        self.assertIn('bool(task.get("final_answer"))', signature_body)
+        self.assertIn('str(task.get("final_answer_at") or "")', signature_body)
+        self.assertIn('str(task.get("finished_at") or "")', signature_body)
+        self.assertIn('"runtime_status", "runtime_started_at"', signature_body)
+
+    def test_shell_displays_lightweight_system_resource_usage(self) -> None:
+        source = Path("ui/app.py").read_text(encoding="utf-8")
+        shell_start = source.index("def shell_view() -> None:")
+        shell_end = source.index("def install_ui_error_logger() -> None:", shell_start)
+        shell_body = source[shell_start:shell_end]
+        refresh_start = source.index("def refresh_stream() -> None:")
+        refresh_end = source.index("client.on_connect", refresh_start)
+        refresh_body = source[refresh_start:refresh_end]
+
+        self.assertIn("data-system-resource-strip=1", shell_body)
+        self.assertIn("data-system-resource-value={key}", shell_body)
+        self.assertIn("get_system_resource_usage()", shell_body)
+        self.assertIn("_patch_system_resource_usage()", refresh_body)
+        self.assertIn("resource_now - resource_updated_at >= 2.0", refresh_body)
+
+    def test_codex_terminal_task_suppresses_stale_runtime_controls(self) -> None:
+        session_name = "codex:thread-finished"
+        mobile_state = {
+            "tasks": [
+                {
+                    "id": "task-finished",
+                    "session_name": session_name,
+                    "status": "running",
+                    "created_at": "2026-07-19T17:59:29",
+                    "started_at": "2026-07-19T17:59:29",
+                    "finished_at": "",
+                    "final_answer": True,
+                    "final_answer_at": "2026-07-19T18:18:25",
+                    "output": "done",
+                }
+            ],
+            "selected_codex_thread": {
+                "id": "thread-finished",
+                "runtime_status": "running",
+                "runtime_started_at": "2026-07-19T09:59:29Z",
+            },
+        }
+
+        context = _prepare_stream_render_context(mobile_state, session_name)
+
+        self.assertFalse(context["codex_runtime_running"])
+        self.assertEqual("", context["latest_active_task_id"])
+        self.assertEqual("", context["latest_cancelable_task_id"])
+
+        mobile_state["selected_codex_thread"]["runtime_started_at"] = "2026-07-19T10:20:00Z"
+
+        active_context = _prepare_stream_render_context(mobile_state, session_name)
+
+        self.assertTrue(active_context["codex_runtime_running"])
+        self.assertEqual("codex-runtime-thread-finished", active_context["latest_active_task_id"])
+        self.assertEqual("codex_thread", active_context["latest_cancel_target_kind"])
+
+    def test_codex_runtime_context_handles_empty_task_list(self) -> None:
+        session_name = "codex:thread-loading"
+        mobile_state = {
+            "tasks": [],
+            "selected_codex_thread": {
+                "id": "thread-loading",
+                "runtime_status": "running",
+                "runtime_started_at": "2026-07-19T10:20:00Z",
+            },
+        }
+
+        context = _prepare_stream_render_context(mobile_state, session_name)
+
+        self.assertTrue(context["codex_runtime_running"])
+        self.assertEqual("codex-runtime-thread-loading", context["latest_active_task_id"])
+        self.assertEqual("codex_thread", context["latest_cancel_target_kind"])
+
+    def test_stream_refresh_reads_content_signature_before_runtime_status(self) -> None:
+        source = Path("ui/app.py").read_text(encoding="utf-8")
+        refresh_start = source.index("def refresh_stream() -> None:")
+        refresh_end = source.index("client.on_connect", refresh_start)
+        refresh_body = source[refresh_start:refresh_end]
+
+        signature_index = refresh_body.index("next_signature = _stream_signature_snapshot()")
+        runtime_index = refresh_body.index("_refresh_codex_runtime_statuses()")
+
+        self.assertLess(signature_index, runtime_index)
+
     def test_codex_runtime_snapshot_reports_the_latest_mcp_tool_without_a_full_history_read(self) -> None:
         with TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "active-mcp.jsonl"
@@ -4142,14 +4302,22 @@ class StreamComposerTests(unittest.TestCase):
         app_source = Path("ui/app.py").read_text(encoding="utf-8")
         sections_source = Path("ui/sections.py").read_text(encoding="utf-8")
 
-        start = app_source.index("async def _submit_stream_message")
-        end = app_source.index("def _open_mobile_url", start)
-        submit_body = app_source[start:end]
-        self.assertIn("if codex_thread_id:", submit_body)
-        self.assertIn("send_codex_thread_message", submit_body)
-        self.assertIn("await asyncio.to_thread", submit_body)
-        self.assertIn("submit_hub_task", submit_body)
+        finish_start = app_source.index("async def _finish_stream_message_send")
+        submit_start = app_source.index("def _submit_stream_message", finish_start)
+        submit_end = app_source.index("def _open_mobile_url", submit_start)
+        finish_body = app_source[finish_start:submit_start]
+        submit_body = app_source[submit_start:submit_end]
+        self.assertIn("send_codex_thread_message", finish_body)
+        self.assertIn("submit_hub_task", finish_body)
+        self.assertIn("await asyncio.to_thread", finish_body)
+        self.assertIn('pending[session_name] = []', finish_body)
+        self.assertIn("with client:", finish_body)
+        self.assertIn("background_tasks.create(", submit_body)
+        self.assertIn("_finish_stream_message_send(", submit_body)
+        self.assertIn("client=context.client", submit_body)
         self.assertIn("images=images", submit_body)
+        self.assertIn("return True", submit_body)
+        self.assertNotIn("await asyncio.to_thread", submit_body)
         self.assertIn("async def submit_composer", sections_source)
         self.assertIn("inspect.isawaitable(submitted)", sections_source)
 

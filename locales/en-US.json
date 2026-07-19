@@ -521,6 +521,8 @@
   "ui.web.theme.forest": "Forest",
   "ui.web.shell.navigation": "Navigation",
   "ui.web.shell.panel_title": "Control Panel",
+  "ui.web.system.cpu": "CPU",
+  "ui.web.system.memory": "Memory",
   "ui.web.field.lookup_task": "Locate by task_id",
   "ui.web.field.model": "Model",
   "ui.web.field.prompt": "Prompt",

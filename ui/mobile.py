@@ -3945,6 +3945,7 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
         return {
             "created_at": created_at,
             "assistant_at": "",
+            "final_answer_at": "",
             "activity_at": "",
             "item_order": item_order,
             "message_id": message_id,
@@ -4010,6 +4011,7 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
                 if preamble["created_at"] and not display_turn["created_at"]:
                     display_turn["created_at"] = preamble["created_at"]
                 display_turn["assistant_at"] = preamble["assistant_at"]
+                display_turn["final_answer_at"] = preamble["final_answer_at"]
                 display_turn["activity_at"] = preamble["activity_at"]
                 if preamble["message_id"] and not display_turn["message_id"]:
                     display_turn["message_id"] = preamble["message_id"]
@@ -4026,6 +4028,8 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
             display_turn["assistant"].append(text)
             if fallback_at:
                 display_turn["assistant_at"] = fallback_at
+            if str(message.get("phase") or "").strip() == "final_answer":
+                display_turn["final_answer_at"] = fallback_at or str(display_turn["assistant_at"] or "")
         elif role == "reasoning" and text:
             display_turn["reasoning"].append(text)
             if fallback_at:
@@ -4088,6 +4092,7 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
             }
             raw_output_with_images = raw_output_with_images_by_turn.get(turn_id, "") if not uses_split_display else ""
             output = raw_output_with_images or "\n\n".join(str(part) for part in parts["assistant"]).strip()
+            final_answer_at = str(parts["final_answer_at"] or "").strip()
             output_segments = [
                 dict(segment)
                 for segment in raw_output_segments_by_turn.get(turn_id, [])
@@ -4102,11 +4107,9 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
                         and _local_image_path_key(segment.get("image_path")) in prompt_image_path_keys
                     )
                 ]
-            finished_at = (
-                raw_finished_at
-                if raw_started_at
-                else (str(parts["assistant_at"] or "") if output or output_segments else "")
-            )
+            finished_at = raw_finished_at or final_answer_at
+            if not finished_at and not raw_started_at and (output or output_segments):
+                finished_at = str(parts["assistant_at"] or "")
             output_image_previews = _output_image_previews(output)
             seen_output_sources = {
                 str(preview.get("source") or "").strip()
@@ -4161,6 +4164,8 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
                     "workdir": cwd,
                     "model": "",
                     "status": "succeeded",
+                    "final_answer": bool(final_answer_at),
+                    "final_answer_at": final_answer_at,
                     "stream_order": turn_order_lookup.get(turn_id, 0) * 1000 + display_index,
                     "created_at": created_at,
                     "started_at": started_at,

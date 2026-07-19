@@ -35,6 +35,9 @@ class CodexDesktopControlTests(unittest.TestCase):
         self.assertIn("expectedTurnId: activeTurnId", expression)
         self.assertIn("refreshedActiveTurnId", expression)
         self.assertIn("turn/start", expression)
+        self.assertIn("itemsView: 'summary'", expression)
+        self.assertIn("item?.clientId", expression)
+        self.assertIn("reconciled: true", expression)
         self.assertIn('"type": "localImage"', expression)
         self.assertIn("chatbridge:message-001", expression)
         self.assertNotIn("process.kill", expression)
@@ -114,6 +117,7 @@ class CodexDesktopControlTests(unittest.TestCase):
                         "threadId": "thread-001",
                         "turnId": "turn-001",
                         "mode": "steer",
+                        "reconciled": True,
                     }
                 ),
             ) as evaluate,
@@ -127,6 +131,8 @@ class CodexDesktopControlTests(unittest.TestCase):
 
         self.assertEqual("steer", result.mode)
         self.assertEqual("turn-001", result.turn_id)
+        self.assertTrue(result.reconciled)
+        self.assertTrue(result.client_user_message_id.startswith("chatbridge:"))
         expression = evaluate.call_args.args[1]
         self.assertEqual(1, expression.count('"path": "C:/tmp/a.png"'))
         self.assertIn('"text": "continue"', expression)
@@ -155,6 +161,28 @@ class CodexDesktopControlTests(unittest.TestCase):
     def test_send_codex_desktop_thread_message_refuses_empty_text(self) -> None:
         with self.assertRaisesRegex(control.CodexDesktopControlError, "消息内容不能为空"):
             control.send_codex_desktop_thread_message("thread-001", "   ")
+
+    def test_run_desktop_action_preserves_distinct_window_errors(self) -> None:
+        with (
+            patch.object(
+                control,
+                "_codex_desktop_websocket_urls",
+                return_value=["ws://127.0.0.1/devtools/page/1", "ws://127.0.0.1/devtools/page/2"],
+            ),
+            patch.object(
+                control,
+                "_evaluate_cdp",
+                side_effect=[
+                    json.dumps({"ok": False, "error": "active turn cannot be steered"}),
+                    RuntimeError("connection closed"),
+                ],
+            ),
+        ):
+            with self.assertRaises(control.CodexDesktopControlError) as raised:
+                control._run_desktop_action("expression", timeout_seconds=5, failure_message="send failed")
+
+        self.assertIn("active turn cannot be steered", str(raised.exception))
+        self.assertIn("connection closed", str(raised.exception))
 
     def test_control_codex_desktop_thread_goal_returns_goal_state(self) -> None:
         with patch.object(

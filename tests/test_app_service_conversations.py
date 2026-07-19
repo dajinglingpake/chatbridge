@@ -180,8 +180,16 @@ class AppServiceConversationTests(unittest.TestCase):
         interrupt.assert_called_once_with("thread-001", timeout_seconds=9)
 
     def test_send_codex_thread_message_uses_desktop_bridge(self) -> None:
-        bridge_result = SimpleNamespace(mode="steer", turn_id="turn-002")
-        with patch.object(app_service, "send_codex_desktop_thread_message", return_value=bridge_result) as send:
+        bridge_result = SimpleNamespace(
+            mode="steer",
+            turn_id="turn-002",
+            client_user_message_id="chatbridge:message-002",
+            reconciled=True,
+        )
+        with (
+            patch.object(app_service, "send_codex_desktop_thread_message", return_value=bridge_result) as send,
+            patch.object(app_service, "_append_action_log") as append_log,
+        ):
             result = app_service.send_codex_thread_message(
                 " thread-001 ",
                 " continue ",
@@ -192,23 +200,35 @@ class AppServiceConversationTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertIn("已追加到运行中的轮次", result.message)
         self.assertIn("turn-002", result.message)
+        self.assertTrue(result.payload["reconciled"])
+        self.assertEqual("chatbridge:message-002", result.payload["client_user_message_id"])
         send.assert_called_once_with(
             "thread-001",
             "continue",
             images=["C:/tmp/shot.png"],
             timeout_seconds=9,
         )
+        append_log.assert_called_once()
+        self.assertEqual("codex_thread_message", append_log.call_args.args[0])
+        self.assertEqual("succeeded", append_log.call_args.kwargs["status"])
+        self.assertTrue(append_log.call_args.kwargs["reconciled"])
 
     def test_send_codex_thread_message_reports_desktop_bridge_failure(self) -> None:
-        with patch.object(
-            app_service,
-            "send_codex_desktop_thread_message",
-            side_effect=app_service.CodexDesktopControlError("desktop unavailable"),
+        with (
+            patch.object(
+                app_service,
+                "send_codex_desktop_thread_message",
+                side_effect=app_service.CodexDesktopControlError("desktop unavailable"),
+            ),
+            patch.object(app_service, "_append_action_log") as append_log,
         ):
             result = app_service.send_codex_thread_message("thread-001", "continue")
 
         self.assertFalse(result.ok)
         self.assertIn("desktop unavailable", result.message)
+        self.assertEqual("desktop unavailable", result.payload["error"])
+        self.assertEqual("failed", append_log.call_args.kwargs["status"])
+        self.assertEqual("desktop unavailable", append_log.call_args.kwargs["error"])
 
     def test_control_codex_thread_goal_uses_desktop_bridge(self) -> None:
         bridge_result = SimpleNamespace(

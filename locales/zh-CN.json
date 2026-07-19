@@ -521,6 +521,8 @@
   "ui.web.theme.forest": "护眼",
   "ui.web.shell.navigation": "导航",
   "ui.web.shell.panel_title": "控制面板",
+  "ui.web.system.cpu": "CPU",
+  "ui.web.system.memory": "内存",
   "ui.web.field.lookup_task": "按 task_id 快速定位",
   "ui.web.field.model": "模型",
   "ui.web.field.prompt": "提示词",

@@ -1992,26 +1992,52 @@ def _prepare_stream_render_context(mobile_state: dict[str, object], selected_ses
         else STREAM_MANUAL_HISTORY_LIMIT
     )
     has_older_session_tasks = session_total_count > max(displayed_session_count, initial_history_limit)
-    latest_task = session_tasks[-1] if session_tasks else None
+    render_session_tasks = [dict(task) for task in session_tasks]
+    if active_session.startswith("codex:"):
+        for task in render_session_tasks:
+            if task.get("final_answer"):
+                task["status"] = "succeeded"
+                task["cancelable"] = False
+    latest_task = render_session_tasks[-1] if render_session_tasks else None
     latest_task_id = str(latest_task.get("id") or "").strip() if isinstance(latest_task, dict) else ""
-    has_running_session_task = any(str(task.get("status") or "").strip() == "running" for task in session_tasks)
+    has_running_session_task = any(str(task.get("status") or "").strip() == "running" for task in render_session_tasks)
+    runtime_started_at = str(selected_codex_thread.get("runtime_started_at") or "").strip()
+    latest_task_status = str(latest_task.get("status") or "").strip() if isinstance(latest_task, dict) else ""
+    latest_task_finished_at = (
+        str(latest_task.get("finished_at") or latest_task.get("final_answer_at") or "").strip()
+        if isinstance(latest_task, dict)
+        else ""
+    )
+    latest_task_has_final_answer = (
+        bool(latest_task.get("final_answer"))
+        if isinstance(latest_task, dict)
+        else False
+    )
+    runtime_covered_by_terminal_task = bool(
+        runtime_started_at
+        and (
+            latest_task_has_final_answer
+            or latest_task_status in {"succeeded", "failed", "canceled", "cancelled", "unknown_after_restart"}
+        )
+        and latest_task_finished_at
+        and _stream_time_delta_ms(
+            _stream_display_time(runtime_started_at),
+            _stream_display_time(latest_task_finished_at),
+        ) > 0
+    )
     codex_runtime_running = (
         active_session.startswith("codex:")
         and str(selected_codex_thread.get("runtime_status") or "").strip() == "running"
+        and not runtime_covered_by_terminal_task
     )
     selected_runtime_activity = (
         dict(selected_codex_thread.get("runtime_activity"))
         if isinstance(selected_codex_thread.get("runtime_activity"), dict)
         else {}
     )
-    render_session_tasks = list(session_tasks)
     if codex_runtime_running and not has_running_session_task:
         runtime_key = f"codex-runtime-{str(selected_codex_thread.get('id') or active_session[6:]).strip()}"
-        runtime_started_at = str(
-            selected_codex_thread.get("runtime_started_at")
-            or selected_codex_thread.get("updated_at")
-            or ""
-        ).strip()
+        runtime_started_at = str(runtime_started_at or selected_codex_thread.get("updated_at") or "").strip()
         runtime_at = str(
             runtime_started_at
             or selected_codex_thread.get("updated_at")
