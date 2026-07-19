@@ -331,6 +331,19 @@ def _goal_expression(
     return _desktop_bridge_expression(operation, timeout_seconds=timeout_seconds)
 
 
+def _goal_get_expression(thread_id: str, *, timeout_seconds: float) -> str:
+    encoded_thread_id = json.dumps(thread_id, ensure_ascii=True)
+    operation = f"""
+    const threadId = {encoded_thread_id};
+    const response = await request('thread/goal/get', {{threadId}});
+    if (response?.error) {{
+        return JSON.stringify({{ok: false, error: response.error.message || String(response.error)}});
+    }}
+    return JSON.stringify({{ok: true, threadId, goal: response?.result?.goal || null}});
+""".strip()
+    return _desktop_bridge_expression(operation, timeout_seconds=timeout_seconds)
+
+
 def _evaluate_cdp(websocket_url: str, expression: str, *, timeout_seconds: float) -> object:
     try:
         import websocket
@@ -488,3 +501,21 @@ def control_codex_desktop_thread_goal(
         goal=dict(goal),
         interrupted_turn_id=str(payload.get("interruptedTurnId") or "").strip(),
     )
+
+
+def get_codex_desktop_thread_goal(
+    thread_id: str,
+    *,
+    timeout_seconds: float = 5.0,
+) -> dict[str, object] | None:
+    cleaned_thread_id = str(thread_id or "").strip()
+    if not cleaned_thread_id:
+        raise CodexDesktopControlError("thread_id 不能为空")
+    expression = _goal_get_expression(cleaned_thread_id, timeout_seconds=timeout_seconds)
+    payload = _run_desktop_action(
+        expression,
+        timeout_seconds=timeout_seconds,
+        failure_message="无法读取 Codex 历史会话目标",
+    )
+    goal = payload.get("goal")
+    return dict(goal) if isinstance(goal, dict) else None

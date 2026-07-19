@@ -245,6 +245,17 @@ class AppServiceConversationTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("desktop unavailable", result.message)
 
+    def test_read_codex_thread_goal_uses_desktop_bridge(self) -> None:
+        with patch.object(
+            app_service,
+            "get_codex_desktop_thread_goal",
+            return_value={"objective": "继续目标", "status": "active"},
+        ) as read_goal:
+            goal = app_service.read_codex_thread_goal(" thread-001 ", timeout_seconds=9)
+
+        self.assertEqual("active", goal["status"])
+        read_goal.assert_called_once_with("thread-001", timeout_seconds=9)
+
     def test_submit_hub_task_includes_images(self) -> None:
         requests: list[tuple[str, dict[str, object]]] = []
 

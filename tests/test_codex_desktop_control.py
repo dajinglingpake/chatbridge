@@ -60,6 +60,13 @@ class CodexDesktopControlTests(unittest.TestCase):
         self.assertIn("thread/goal/clear", expression)
         self.assertIn("status: 'cleared'", expression)
 
+    def test_goal_get_expression_reads_current_desktop_goal(self) -> None:
+        expression = control._goal_get_expression("thread-001", timeout_seconds=5)
+
+        self.assertIn("thread/goal/get", expression)
+        self.assertIn("thread-001", expression)
+        self.assertIn("goal: response?.result?.goal || null", expression)
+
     def test_interrupt_codex_desktop_thread_returns_the_interrupted_turn_id(self) -> None:
         with (
             patch.object(control, "_codex_desktop_websocket_urls", return_value=["ws://127.0.0.1/devtools/page/1"]),
@@ -175,6 +182,22 @@ class CodexDesktopControlTests(unittest.TestCase):
     def test_control_codex_desktop_thread_goal_rejects_empty_edit(self) -> None:
         with self.assertRaisesRegex(control.CodexDesktopControlError, "目标内容不能为空"):
             control.control_codex_desktop_thread_goal("thread-001", "edit", objective="   ")
+
+    def test_get_codex_desktop_thread_goal_returns_goal_or_none(self) -> None:
+        with patch.object(
+            control,
+            "_run_desktop_action",
+            side_effect=[
+                {"ok": True, "goal": {"objective": "继续目标", "status": "active"}},
+                {"ok": True, "goal": None},
+            ],
+        ) as run_action:
+            active = control.get_codex_desktop_thread_goal(" thread-001 ", timeout_seconds=7)
+            cleared = control.get_codex_desktop_thread_goal("thread-001", timeout_seconds=7)
+
+        self.assertEqual("active", active["status"])
+        self.assertIsNone(cleared)
+        self.assertIn("thread/goal/get", run_action.call_args_list[0].args[0])
 
 
 if __name__ == "__main__":

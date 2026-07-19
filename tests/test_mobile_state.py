@@ -973,6 +973,78 @@ class MobileStateTests(unittest.TestCase):
         self.assertEqual("paused", payload["goal"]["status"])
         self.assertEqual("刚刚暂停的目标", payload["goal"]["objective"])
 
+    def test_effective_codex_goal_prefers_live_clear_over_stale_rollout(self) -> None:
+        thread_id = "thread-live-cleared-goal"
+        mobile._CODEX_LIVE_GOAL_CACHE.clear()
+        mobile._CODEX_LIVE_GOAL_INFLIGHT.clear()
+        mobile._CODEX_LIVE_GOAL_CACHE[thread_id] = {
+            "checked_at": 100.0,
+            "checked_at_epoch": 1767225726.0,
+            "resolved": True,
+            "goal": {"status": "cleared", "updated_at": "2026-01-01T00:02:06Z", "native": "1"},
+            "error": "",
+        }
+        rollout_goal = {
+            "objective": "日志中的旧目标",
+            "status": "active",
+            "updated_at": "2026-01-01T00:02:05Z",
+            "native": "1",
+        }
+
+        with (
+            patch("ui.mobile.time.monotonic", return_value=101.0),
+            patch("ui.mobile._start_codex_live_goal_refresh") as start_refresh,
+        ):
+            goal = mobile._effective_codex_goal_state(thread_id, rollout_goal)
+
+        self.assertEqual("cleared", goal["status"])
+        start_refresh.assert_not_called()
+        mobile._CODEX_LIVE_GOAL_CACHE.clear()
+
+    def test_effective_codex_goal_refreshes_when_rollout_is_newer_than_live_cache(self) -> None:
+        thread_id = "thread-newer-rollout-goal"
+        mobile._CODEX_LIVE_GOAL_CACHE.clear()
+        mobile._CODEX_LIVE_GOAL_INFLIGHT.clear()
+        mobile._CODEX_LIVE_GOAL_CACHE[thread_id] = {
+            "checked_at": 100.0,
+            "checked_at_epoch": 1767225600.0,
+            "resolved": True,
+            "goal": {"status": "cleared", "updated_at": "2026-01-01T00:00:00Z", "native": "1"},
+            "error": "",
+        }
+        rollout_goal = {
+            "objective": "刚创建的新目标",
+            "status": "active",
+            "updated_at": "2026-01-01T00:05:00Z",
+            "native": "1",
+        }
+
+        with (
+            patch("ui.mobile.time.monotonic", return_value=101.0),
+            patch("ui.mobile._start_codex_live_goal_refresh") as start_refresh,
+        ):
+            goal = mobile._effective_codex_goal_state(thread_id, rollout_goal)
+
+        self.assertEqual("active", goal["status"])
+        start_refresh.assert_called_once_with(thread_id)
+        mobile._CODEX_LIVE_GOAL_CACHE.clear()
+
+    def test_live_goal_refresh_records_missing_desktop_goal_as_cleared(self) -> None:
+        thread_id = "thread-missing-live-goal"
+        mobile._CODEX_LIVE_GOAL_CACHE.clear()
+        mobile._CODEX_LIVE_GOAL_INFLIGHT.clear()
+        with (
+            patch("ui.mobile.read_codex_thread_goal", return_value=None),
+            patch("ui.mobile._invalidate_codex_thread_rollout_cache") as invalidate,
+        ):
+            mobile._refresh_codex_live_goal_cache_now(thread_id)
+
+        cached = mobile._CODEX_LIVE_GOAL_CACHE[thread_id]
+        self.assertTrue(cached["resolved"])
+        self.assertEqual("cleared", cached["goal"]["status"])
+        invalidate.assert_called_once_with(thread_id)
+        mobile._CODEX_LIVE_GOAL_CACHE.clear()
+
     def test_codex_function_tool_image_result_gets_mobile_preview(self) -> None:
         mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
         with TemporaryDirectory() as temp_dir:

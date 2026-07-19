@@ -30,6 +30,7 @@ from bridge_config import APP_DIR
 from core.app_service import (
     list_codex_threads,
     read_codex_thread,
+    read_codex_thread_goal,
     run_named_action,
     schedule_named_action,
     submit_hub_task,
@@ -51,6 +52,7 @@ MOBILE_TASK_LIMIT = 200
 MOBILE_SESSION_TASK_LIMIT = 200
 CODEX_THREAD_SESSION_PREFIX = "codex:"
 CODEX_THREAD_CACHE_SECONDS = 5.0
+CODEX_LIVE_GOAL_CACHE_SECONDS = 15.0
 CODEX_THREAD_PAGE_LIMIT = 50
 CODEX_THREAD_MAX_PAGES = 100
 MOBILE_NO_STORE_PATH_PREFIXES = ("/api/mobile/",)
@@ -76,6 +78,8 @@ _CODEX_VIEW_IMAGE_PREVIEW_CACHE: dict[str, dict[str, object]] = {}
 _CODEX_ROLLOUT_PATH_CACHE: dict[str, Path] = {}
 _CODEX_ROLLOUT_REFRESH_INFLIGHT: set[str] = set()
 _CODEX_ROLLOUT_PARSE_LOCKS: dict[str, threading.Lock] = {}
+_CODEX_LIVE_GOAL_CACHE: dict[str, dict[str, object]] = {}
+_CODEX_LIVE_GOAL_INFLIGHT: set[str] = set()
 MOBILE_ASYNC_ACTIONS = {
     "restart",
     "restart-bridge",
@@ -345,7 +349,7 @@ def build_stream_signature_snapshot(
         ]
         task_parts = list(codex_task_parts) + related_task_parts + task_parts
         rollout_state = _codex_cached_rollout_payload(selected_codex_thread_id)
-        goal_state = _copy_codex_goal_state(rollout_state.get("goal"))
+        goal_state = _effective_codex_goal_state(selected_codex_thread_id, rollout_state.get("goal"))
         if goal_state.get("status") in {"active", "paused"}:
             goal_signature = tuple(
                 goal_state.get(key, "")
@@ -2064,6 +2068,100 @@ def _codex_cached_rollout_payload(thread_id: str, *, refresh: bool = True) -> di
     return payload
 
 
+def _claim_codex_live_goal_refresh(thread_id: str) -> bool:
+    with _CODEX_THREAD_DETAIL_LOCK:
+        if thread_id in _CODEX_LIVE_GOAL_INFLIGHT:
+            return False
+        _CODEX_LIVE_GOAL_INFLIGHT.add(thread_id)
+        return True
+
+
+def _refresh_codex_live_goal_cache_now(thread_id: str, *, claimed: bool = False) -> None:
+    cleaned_thread_id = str(thread_id or "").strip()
+    if not cleaned_thread_id:
+        return
+    if not claimed and not _claim_codex_live_goal_refresh(cleaned_thread_id):
+        return
+    checked_at = time.monotonic()
+    checked_at_epoch = time.time()
+    previous_goal: dict[str, str] = {}
+    next_goal: dict[str, str] = {}
+    changed = False
+    try:
+        raw_goal = read_codex_thread_goal(cleaned_thread_id, timeout_seconds=5.0)
+        next_goal = _codex_native_goal_state(
+            raw_goal or {},
+            record_at=_state_now(),
+            status=str(raw_goal.get("status") or "cleared") if isinstance(raw_goal, dict) else "cleared",
+        )
+        with _CODEX_THREAD_DETAIL_LOCK:
+            previous = _CODEX_LIVE_GOAL_CACHE.get(cleaned_thread_id)
+            previous_goal = _copy_codex_goal_state(previous.get("goal")) if isinstance(previous, dict) else {}
+            _CODEX_LIVE_GOAL_CACHE[cleaned_thread_id] = {
+                "checked_at": checked_at,
+                "checked_at_epoch": checked_at_epoch,
+                "resolved": True,
+                "goal": next_goal,
+                "error": "",
+            }
+        changed = previous_goal != next_goal
+    except Exception as exc:  # noqa: BLE001
+        with _CODEX_THREAD_DETAIL_LOCK:
+            previous = _CODEX_LIVE_GOAL_CACHE.get(cleaned_thread_id)
+            previous_payload = dict(previous) if isinstance(previous, dict) else {}
+            _CODEX_LIVE_GOAL_CACHE[cleaned_thread_id] = {
+                **previous_payload,
+                "checked_at": checked_at,
+                "checked_at_epoch": checked_at_epoch,
+                "error": str(exc),
+            }
+    finally:
+        with _CODEX_THREAD_DETAIL_LOCK:
+            _CODEX_LIVE_GOAL_INFLIGHT.discard(cleaned_thread_id)
+    if changed:
+        _invalidate_codex_thread_rollout_cache(cleaned_thread_id)
+
+
+def _start_codex_live_goal_refresh(thread_id: str) -> None:
+    cleaned_thread_id = str(thread_id or "").strip()
+    if not cleaned_thread_id or not _claim_codex_live_goal_refresh(cleaned_thread_id):
+        return
+    thread = threading.Thread(
+        target=_refresh_codex_live_goal_cache_now,
+        kwargs={"thread_id": cleaned_thread_id, "claimed": True},
+        daemon=True,
+        name=f"codex-live-goal-{cleaned_thread_id[:12]}",
+    )
+    thread.start()
+
+
+def _effective_codex_goal_state(thread_id: str, rollout_goal: object) -> dict[str, str]:
+    cleaned_thread_id = str(thread_id or "").strip()
+    goal_state = _copy_codex_goal_state(rollout_goal)
+    if (
+        not cleaned_thread_id
+        or goal_state.get("status") not in {"active", "paused"}
+        or goal_state.get("native") != "1"
+    ):
+        return goal_state
+    rollout_updated_key = _stream_time_sort_key(goal_state.get("updated_at"))
+    rollout_updated_epoch = rollout_updated_key[1] if rollout_updated_key[0] == 0 else 0.0
+    now = time.monotonic()
+    with _CODEX_THREAD_DETAIL_LOCK:
+        cached = _CODEX_LIVE_GOAL_CACHE.get(cleaned_thread_id)
+        cached_payload = dict(cached) if isinstance(cached, dict) else {}
+    checked_at = float(cached_payload.get("checked_at") or 0.0)
+    checked_at_epoch = float(cached_payload.get("checked_at_epoch") or 0.0)
+    resolved = bool(cached_payload.get("resolved"))
+    cache_matches_rollout = checked_at_epoch >= rollout_updated_epoch
+    cache_fresh = checked_at > 0 and now - checked_at <= CODEX_LIVE_GOAL_CACHE_SECONDS
+    if not cache_fresh or not cache_matches_rollout:
+        _start_codex_live_goal_refresh(cleaned_thread_id)
+    if resolved and cache_matches_rollout:
+        return _copy_codex_goal_state(cached_payload.get("goal"))
+    return goal_state
+
+
 def _codex_custom_tool_view_image_path(payload: dict[str, object]) -> str:
     source = str(payload.get("input") or "")
     match = re.search(
@@ -2574,6 +2672,14 @@ def update_codex_goal_cache(thread_id: str, goal: object) -> None:
         record_at=_state_now(),
         status=str(raw_goal.get("status") or "cleared"),
     )
+    with _CODEX_THREAD_DETAIL_LOCK:
+        _CODEX_LIVE_GOAL_CACHE[cleaned_thread_id] = {
+            "checked_at": time.monotonic(),
+            "checked_at_epoch": time.time(),
+            "resolved": True,
+            "goal": goal_state,
+            "error": "",
+        }
     cached["goal"] = goal_state
     parser_state = cached.get("parser_state")
     if isinstance(parser_state, dict):
@@ -2958,7 +3064,7 @@ def _merge_codex_thread_local_timeline(
 
 def _apply_codex_rollout_state(thread_id: str, thread: dict[str, object]) -> None:
     rollout_state = _codex_cached_rollout_payload(thread_id)
-    goal_state = _copy_codex_goal_state(rollout_state.get("goal"))
+    goal_state = _effective_codex_goal_state(thread_id, rollout_state.get("goal"))
     if goal_state.get("status") in {"active", "paused"} and goal_state.get("objective"):
         thread["active_goal"] = goal_state
     else:

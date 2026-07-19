@@ -45,6 +45,7 @@ from core.bridge_notifier import broadcast_bridge_notice_by_kind
 from core.codex_desktop_control import (
     CodexDesktopControlError,
     control_codex_desktop_thread_goal,
+    get_codex_desktop_thread_goal,
     interrupt_codex_desktop_thread,
     send_codex_desktop_thread_message,
 )
@@ -460,6 +461,17 @@ def control_codex_thread_goal(
             "interrupted_turn_id": result.interrupted_turn_id,
         },
     )
+
+
+def read_codex_thread_goal(
+    thread_id: str,
+    *,
+    timeout_seconds: float = 5.0,
+) -> dict[str, object] | None:
+    cleaned_thread_id = str(thread_id or "").strip()
+    if not cleaned_thread_id:
+        raise CodexDesktopControlError("thread_id 不能为空")
+    return get_codex_desktop_thread_goal(cleaned_thread_id, timeout_seconds=timeout_seconds)
 
 
 def list_codex_threads(
