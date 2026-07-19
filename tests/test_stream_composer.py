@@ -10,7 +10,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from ui.app import _codex_rollout_runtime_hint, _codex_rollout_runtime_snapshot, _codex_rollout_runtime_started_at, _load_persisted_stream_session, _persist_stream_session, _stream_initial_history_limit, _update_codex_thread_runtime_statuses, group_codex_threads_by_workspace
-from ui.sections import _stream_activity_render_window, _stream_client_time, _stream_display_time, _stream_image_is_previewable, _stream_markdown, _stream_task_sort_key, _stream_task_uses_utc_naive_time, _stream_text, _stream_time_delta_ms, _stream_timeline_items, render_mobile_stream_section
+from ui.sections import _stream_activity_render_window, _stream_client_time, _stream_display_time, _stream_image_is_previewable, _stream_markdown, _stream_model_display_name, _stream_reasoning_effort_label, _stream_task_sort_key, _stream_task_uses_utc_naive_time, _stream_text, _stream_time_delta_ms, _stream_timeline_items, render_mobile_stream_section
 
 
 class FakeElement:
@@ -85,6 +85,12 @@ class FakeUI:
 
     def row(self) -> FakeElement:
         return self._element("row")
+
+    def card(self) -> FakeElement:
+        return self._element("card")
+
+    def dialog(self) -> FakeElement:
+        return self._element("dialog")
 
     def element(self, tag: str) -> FakeElement:
         return self._element(f"element:{tag}")
@@ -2935,6 +2941,140 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIsNone(queue_cancel_buttons[0].attrs["color"])
         self.assertEqual([], queue_badges)
 
+    def test_active_codex_goal_is_rendered_above_composer(self) -> None:
+        ui = FakeUI()
+        mobile_state = {
+            "counts": {"running": 0, "queued": 0},
+            "agents": [{"id": "codex", "name": "Codex", "backend": "codex"}],
+            "selected_codex_thread": {
+                "id": "thread-goal",
+                "model": "gpt-5.6-sol",
+                "reasoning_effort": "ultra",
+                "active_goal": {
+                    "objective": "继续完成游戏内容并保持静态验证",
+                    "status": "active",
+                    "started_at": "2026-07-18T10:00:00Z",
+                    "updated_at": "2026-07-18T10:05:00Z",
+                },
+            },
+            "tasks": [],
+            "session_task_counts": {"codex:thread-goal": 0},
+        }
+
+        render_mobile_stream_section(
+            ui,
+            _translator,
+            mobile_state,
+            "codex:thread-goal",
+            [],
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            on_goal_action=_noop,
+        )
+
+        goal_details = [item for item in ui.elements if "data-goal-details=1" in item.props_text]
+        goal_titles = [item.text for item in ui.elements if "cb-composer-goal-title" in item.class_text]
+        goal_objectives = [item.text for item in ui.elements if "cb-composer-goal-objective" in item.class_text]
+        goal_elapsed = [item for item in ui.elements if "cb-composer-goal-elapsed" in item.class_text]
+        goal_actions = [item for item in ui.elements if "cb-composer-goal-action" in item.class_text.split()]
+        model_indicators = [item for item in ui.elements if "cb-composer-model-indicator" in item.class_text]
+        model_labels = [item.text for item in ui.elements if "cb-composer-model-name" in item.class_text]
+        effort_labels = [item.text for item in ui.elements if "cb-composer-model-effort" in item.class_text]
+        composer_boxes = [item for item in ui.elements if "cb-composer-box" in item.class_text.split()]
+
+        self.assertEqual(1, len(goal_details))
+        self.assertEqual(["进行中的目标"], goal_titles)
+        self.assertEqual(["继续完成游戏内容并保持静态验证"], goal_objectives)
+        self.assertEqual(1, len(goal_elapsed))
+        self.assertIn('data-started-at="', goal_elapsed[0].props_text)
+        self.assertEqual(3, len(goal_actions))
+        self.assertTrue(any("data-goal-action=edit" in item.props_text for item in goal_actions))
+        self.assertTrue(any("data-goal-action=pause" in item.props_text for item in goal_actions))
+        self.assertTrue(any("data-goal-action=delete" in item.props_text for item in goal_actions))
+        self.assertEqual(1, len(model_indicators))
+        self.assertEqual(["5.6 Sol"], model_labels)
+        self.assertEqual(["极高"], effort_labels)
+        self.assertEqual(1, len(composer_boxes))
+        self.assertIn("cb-composer-box-has-goal", composer_boxes[0].class_text)
+
+    def test_paused_codex_goal_keeps_controls_and_static_elapsed_time(self) -> None:
+        ui = FakeUI()
+        mobile_state = {
+            "counts": {"running": 0, "queued": 0},
+            "agents": [{"id": "codex", "name": "Codex", "backend": "codex"}],
+            "selected_codex_thread": {
+                "id": "thread-goal",
+                "active_goal": {
+                    "objective": "暂停后仍然保留的目标",
+                    "status": "paused",
+                    "started_at": "2026-07-18T10:00:00Z",
+                    "updated_at": "2026-07-18T10:05:00Z",
+                    "time_used_seconds": "125",
+                },
+            },
+            "tasks": [],
+            "session_task_counts": {"codex:thread-goal": 0},
+        }
+
+        render_mobile_stream_section(
+            ui,
+            _translator,
+            mobile_state,
+            "codex:thread-goal",
+            [],
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            on_goal_action=_noop,
+        )
+
+        goal_titles = [item.text for item in ui.elements if "cb-composer-goal-title" in item.class_text]
+        goal_elapsed = [item for item in ui.elements if "cb-composer-goal-elapsed" in item.class_text]
+        goal_actions = [item for item in ui.elements if "cb-composer-goal-action" in item.class_text.split()]
+
+        self.assertEqual(["已暂停的目标"], goal_titles)
+        self.assertEqual(["2:05"], [item.text for item in goal_elapsed])
+        self.assertNotIn("cb-stream-live-elapsed", goal_elapsed[0].class_text)
+        self.assertTrue(any("data-goal-action=resume" in item.props_text for item in goal_actions))
+
+    def test_stream_model_labels_match_codex_composer_style(self) -> None:
+        self.assertEqual("5.6 Sol", _stream_model_display_name("gpt-5.6-sol"))
+        self.assertEqual("5 Codex", _stream_model_display_name("gpt-5-codex"))
+        self.assertEqual("极高", _stream_reasoning_effort_label("ultra"))
+
+    def test_completed_codex_goal_is_not_rendered_in_composer(self) -> None:
+        ui = FakeUI()
+        mobile_state = {
+            "counts": {"running": 0, "queued": 0},
+            "agents": [{"id": "codex", "name": "Codex", "backend": "codex"}],
+            "selected_codex_thread": {
+                "id": "thread-goal",
+                "active_goal": {
+                    "objective": "已经完成的目标",
+                    "status": "complete",
+                    "started_at": "2026-07-18T10:00:00Z",
+                    "finished_at": "2026-07-18T10:10:00Z",
+                },
+            },
+            "tasks": [],
+            "session_task_counts": {"codex:thread-goal": 0},
+        }
+
+        render_mobile_stream_section(ui, _translator, mobile_state, "codex:thread-goal", [], _noop, _noop, _noop, _noop, _noop, _noop, _noop)
+
+        self.assertFalse([item for item in ui.elements if "data-goal-details=1" in item.props_text])
+        composer_boxes = [item for item in ui.elements if "cb-composer-box" in item.class_text.split()]
+        self.assertNotIn("cb-composer-box-has-goal", composer_boxes[0].class_text)
+
 
     def test_stream_scroll_observer_is_scoped_to_stream_content(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")
@@ -3066,10 +3206,33 @@ class StreamComposerTests(unittest.TestCase):
         self.assertNotIn("stream_messages_view.refresh()", body)
         self.assertNotIn("stream_composer_view.refresh()", body)
         self.assertIn('panel.dataset.streamKey = {encoded_session_name!r}', body)
+        self.assertIn("window.__cbSelectSidebarStreamSession?.({encoded_session_name!r})", body)
         self.assertIn("delete window.__cbStreamScrollStateByKey[{cleaned_session_name!r}]", body)
         self.assertNotIn("__cbStreamInlineDesiredKey", body)
         self.assertNotIn("stream_panel_view.refresh()", body)
         self.assertNotIn("sidebar_sessions_view.refresh()", body)
+
+    def test_sidebar_session_selection_uses_patchable_attribute(self) -> None:
+        source = Path("ui/app.py").read_text(encoding="utf-8")
+        sidebar_start = source.index("def sidebar_sessions_view() -> None:")
+        sidebar_end = source.index("def right_sidebar_view() -> None:", sidebar_start)
+        sidebar_body = source[sidebar_start:sidebar_end]
+        props_start = source.index("def _stream_session_button_props(session_name: str, selected: bool) -> str:")
+        props_end = source.index("def _open_stream_session_from_input(input_box) -> None:", props_start)
+        props_body = source[props_start:props_end]
+
+        self.assertIn("const selectSidebarStreamSession = (encodedSessionName) => {", source)
+        self.assertIn("window.__cbSelectSidebarStreamSession = selectSidebarStreamSession", source)
+        self.assertIn("link.classList.toggle('q-btn--unelevated', selected)", source)
+        self.assertIn("link.classList.toggle('bg-primary', selected)", source)
+        self.assertIn("data-stream-session-selected", props_body)
+        self.assertIn('variant = "unelevated" if selected else "outline"', props_body)
+        self.assertIn("_stream_session_button_props(session_name, selected)", sidebar_body)
+        self.assertIn("_stream_session_button_props(thread_session_name, selected)", sidebar_body)
+        self.assertNotIn('props = "unelevated" if selected else "outline"', sidebar_body)
+        self.assertIn('.cb-stream-task-button[data-stream-session-selected="1"]', source)
+        self.assertIn("cb-stream-selected-indicator", sidebar_body)
+        self.assertIn("window.__cbSelectSidebarStreamSession?.", sidebar_body)
 
     def test_weixin_binding_navigation_refreshes_once(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")
@@ -3240,7 +3403,8 @@ class StreamComposerTests(unittest.TestCase):
         self.assertNotIn("document.querySelector('.cb-agent-stream')", head_script)
         self.assertNotIn("scroller.scrollTop = scroller.scrollHeight", head_script)
         self.assertNotIn("new ResizeObserver", head_script)
-        self.assertNotIn("new MutationObserver", head_script)
+        self.assertIn("__cbCodexWorkspaceObserver", head_script)
+        self.assertIn("codexWorkspaceObserver.observe(sidebar, {childList: true, subtree: true})", head_script)
 
     def test_general_ui_surfaces_handle_long_content_without_clipping(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")
@@ -3690,6 +3854,44 @@ class StreamComposerTests(unittest.TestCase):
         self.assertNotIn("load_codex_threads_page", refresh_body)
         self.assertNotIn("read_codex_thread", refresh_body)
 
+    def test_codex_runtime_activity_updates_patch_only_the_live_label(self) -> None:
+        source = Path("ui/app.py").read_text(encoding="utf-8")
+        signature_start = source.index("def _stream_signature_snapshot() -> tuple:")
+        signature_end = source.index("def _stream_task_order_key", signature_start)
+        signature_body = source[signature_start:signature_end]
+        refresh_start = source.index("def refresh_stream() -> None:")
+        refresh_end = source.index("client.on_connect", refresh_start)
+        refresh_body = source[refresh_start:refresh_end]
+        patch_start = source.index("def _patch_stream_runtime_activity() -> None:")
+        patch_end = source.index("def _stream_task_order_key", patch_start)
+        patch_body = source[patch_start:patch_end]
+
+        self.assertNotIn("runtime_signature", signature_body)
+        self.assertIn("selected_runtime_status_changed", refresh_body)
+        self.assertIn("elif selected_runtime_activity_changed:", refresh_body)
+        self.assertIn("_patch_stream_runtime_activity()", refresh_body)
+        self.assertIn("document.querySelector('.cb-stream-current-activity')", patch_body)
+        self.assertNotIn("stream_messages_view.refresh()", patch_body)
+
+    def test_codex_sidebar_runtime_updates_do_not_rebuild_workspace_disclosures(self) -> None:
+        source = Path("ui/app.py").read_text(encoding="utf-8")
+        refresh_start = source.index("def refresh_stream() -> None:")
+        refresh_end = source.index("client.on_connect", refresh_start)
+        refresh_body = source[refresh_start:refresh_end]
+        patch_start = source.index("def _patch_sidebar_codex_runtime_status() -> None:")
+        patch_end = source.index("def _load_sidebar_codex_threads() -> None:", patch_start)
+        patch_body = source[patch_start:patch_end]
+        sidebar_start = source.index("def sidebar_sessions_view() -> None:")
+        sidebar_end = source.index("def right_sidebar_view() -> None:", sidebar_start)
+        sidebar_body = source[sidebar_start:sidebar_end]
+
+        self.assertIn("_patch_sidebar_codex_runtime_status()", refresh_body)
+        self.assertNotIn("sidebar_sessions_view.refresh()", refresh_body)
+        self.assertIn("document.querySelectorAll('[data-codex-workspace-running]')", patch_body)
+        self.assertIn("document.querySelectorAll('[data-codex-thread-running]')", patch_body)
+        self.assertIn("data-codex-workspace-running", sidebar_body)
+        self.assertIn("data-codex-thread-running", sidebar_body)
+
     def test_sidebar_mounts_fast_local_sessions_without_manual_load(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")
         open_start = source.index("def open_sidebar")
@@ -3708,6 +3910,20 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("js_handler=\"() => document.body.classList.toggle('cb-sidebar-open')\"", source)
         self.assertNotIn('ui.button("", on_click=open_sidebar, icon="menu")', source)
         self.assertNotIn('ui.button("", on_click=close_sidebar, icon="close")', source)
+
+    def test_codex_workspace_disclosures_keep_manual_state_across_sidebar_refreshes(self) -> None:
+        source = Path("ui/app.py").read_text(encoding="utf-8")
+        sidebar_start = source.index("def sidebar_sessions_view() -> None:")
+        sidebar_end = source.index("def right_sidebar_view() -> None:", sidebar_start)
+        sidebar_body = source[sidebar_start:sidebar_end]
+
+        self.assertIn("cb_codex_workspace_open_state", source)
+        self.assertIn("window.__cbRestoreCodexWorkspaceOpenState", source)
+        self.assertIn("document.addEventListener('toggle'", source)
+        self.assertIn("data-codex-workspace-key", sidebar_body)
+        self.assertIn("stream_sidebar_codex_workspace_open", source)
+        self.assertIn("js_handler=\"(event) => emit({open: event.currentTarget.parentElement.open !== true})\"", sidebar_body)
+        self.assertIn("window.setTimeout(restore, 120)", sidebar_body)
 
     def test_stream_panel_does_not_expose_new_session_shortcut(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")

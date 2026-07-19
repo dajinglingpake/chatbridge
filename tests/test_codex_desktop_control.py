@@ -39,6 +39,27 @@ class CodexDesktopControlTests(unittest.TestCase):
         self.assertIn("chatbridge:message-001", expression)
         self.assertNotIn("process.kill", expression)
 
+    def test_goal_expression_uses_native_goal_protocol_and_interrupts_pause(self) -> None:
+        expression = control._goal_expression(
+            "thread-001",
+            "pause",
+            "继续完成目标",
+            timeout_seconds=5,
+        )
+
+        self.assertIn("thread/resume", expression)
+        self.assertIn("thread/goal/get", expression)
+        self.assertIn("thread/goal/set", expression)
+        self.assertIn("status = action === 'pause' ? 'paused' : 'active'", expression)
+        self.assertIn("turn/interrupt", expression)
+        self.assertIn("\\u7ee7\\u7eed\\u5b8c\\u6210\\u76ee\\u6807", expression)
+
+    def test_goal_expression_uses_native_clear_for_delete(self) -> None:
+        expression = control._goal_expression("thread-001", "delete", "", timeout_seconds=5)
+
+        self.assertIn("thread/goal/clear", expression)
+        self.assertIn("status: 'cleared'", expression)
+
     def test_interrupt_codex_desktop_thread_returns_the_interrupted_turn_id(self) -> None:
         with (
             patch.object(control, "_codex_desktop_websocket_urls", return_value=["ws://127.0.0.1/devtools/page/1"]),
@@ -127,6 +148,33 @@ class CodexDesktopControlTests(unittest.TestCase):
     def test_send_codex_desktop_thread_message_refuses_empty_text(self) -> None:
         with self.assertRaisesRegex(control.CodexDesktopControlError, "消息内容不能为空"):
             control.send_codex_desktop_thread_message("thread-001", "   ")
+
+    def test_control_codex_desktop_thread_goal_returns_goal_state(self) -> None:
+        with patch.object(
+            control,
+            "_run_desktop_action",
+            return_value={
+                "ok": True,
+                "action": "pause",
+                "goal": {"objective": "继续完成目标", "status": "paused"},
+                "interruptedTurnId": "turn-001",
+            },
+        ) as run_action:
+            result = control.control_codex_desktop_thread_goal(
+                " thread-001 ",
+                "pause",
+                objective=" 继续完成目标 ",
+                timeout_seconds=7,
+            )
+
+        self.assertEqual("pause", result.action)
+        self.assertEqual("paused", result.goal["status"])
+        self.assertEqual("turn-001", result.interrupted_turn_id)
+        self.assertIn("thread/goal/set", run_action.call_args.args[0])
+
+    def test_control_codex_desktop_thread_goal_rejects_empty_edit(self) -> None:
+        with self.assertRaisesRegex(control.CodexDesktopControlError, "目标内容不能为空"):
+            control.control_codex_desktop_thread_goal("thread-001", "edit", objective="   ")
 
 
 if __name__ == "__main__":

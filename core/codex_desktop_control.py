@@ -25,6 +25,13 @@ class CodexDesktopMessageResult:
     turn_id: str
 
 
+@dataclass(frozen=True)
+class CodexDesktopGoalResult:
+    action: str
+    goal: dict[str, object]
+    interrupted_turn_id: str = ""
+
+
 def _remote_debugging_port(cmdline: object) -> int | None:
     if not isinstance(cmdline, (list, tuple)):
         return None
@@ -248,6 +255,82 @@ def _message_expression(
     return _desktop_bridge_expression(operation, timeout_seconds=timeout_seconds)
 
 
+def _goal_expression(
+    thread_id: str,
+    action: str,
+    objective: str,
+    *,
+    timeout_seconds: float,
+) -> str:
+    encoded_thread_id = json.dumps(thread_id, ensure_ascii=True)
+    encoded_action = json.dumps(action, ensure_ascii=True)
+    encoded_objective = json.dumps(objective, ensure_ascii=True)
+    operation = f"""
+    const threadId = {encoded_thread_id};
+    const action = {encoded_action};
+    const objective = {encoded_objective};
+    const resumeResponse = await request('thread/resume', {{threadId}});
+    if (resumeResponse?.error) {{
+        return JSON.stringify({{ok: false, error: resumeResponse.error.message || String(resumeResponse.error)}});
+    }}
+
+    if (action === 'delete') {{
+        const clearResponse = await request('thread/goal/clear', {{threadId}});
+        if (clearResponse?.error) {{
+            return JSON.stringify({{ok: false, error: clearResponse.error.message || String(clearResponse.error)}});
+        }}
+        return JSON.stringify({{ok: true, threadId, action, goal: {{threadId, status: 'cleared'}}}});
+    }}
+
+    const currentResponse = await request('thread/goal/get', {{threadId}});
+    if (currentResponse?.error) {{
+        return JSON.stringify({{ok: false, error: currentResponse.error.message || String(currentResponse.error)}});
+    }}
+    const currentGoal = currentResponse?.result?.goal || null;
+    const status = action === 'pause' ? 'paused' : 'active';
+    const params = {{threadId, status}};
+    if (objective) params.objective = objective;
+    if (!currentGoal && !params.objective) {{
+        return JSON.stringify({{ok: false, error: '该 Codex 历史会话当前没有可控制的目标'}});
+    }}
+
+    const setResponse = await request('thread/goal/set', params);
+    if (setResponse?.error) {{
+        return JSON.stringify({{ok: false, error: setResponse.error.message || String(setResponse.error)}});
+    }}
+    let goal = setResponse?.result?.goal || {{...currentGoal, ...params}};
+
+    const turnsResponse = await request('thread/turns/list', {{
+        threadId,
+        limit: 1,
+        sortDirection: 'desc',
+        itemsView: 'notLoaded',
+    }});
+    const turns = Array.isArray(turnsResponse?.result?.data) ? turnsResponse.result.data : [];
+    const activeTurn = turns.find((turn) => ['inProgress', 'in_progress', 'running'].includes(String(turn?.status || '')));
+    const activeTurnId = String(activeTurn?.id || '');
+    let interruptedTurnId = '';
+
+    if (action === 'pause' && activeTurnId) {{
+        const interruptResponse = await request('turn/interrupt', {{threadId, turnId: activeTurnId}});
+        if (interruptResponse?.error) {{
+            return JSON.stringify({{ok: false, error: interruptResponse.error.message || String(interruptResponse.error)}});
+        }}
+        interruptedTurnId = activeTurnId;
+    }} else if (status === 'active' && !activeTurnId) {{
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        const continueResponse = await request('thread/goal/set', {{threadId, status: 'active'}});
+        if (continueResponse?.error) {{
+            return JSON.stringify({{ok: false, error: continueResponse.error.message || String(continueResponse.error)}});
+        }}
+        goal = continueResponse?.result?.goal || goal;
+    }}
+
+    return JSON.stringify({{ok: true, threadId, action, goal, interruptedTurnId}});
+""".strip()
+    return _desktop_bridge_expression(operation, timeout_seconds=timeout_seconds)
+
+
 def _evaluate_cdp(websocket_url: str, expression: str, *, timeout_seconds: float) -> object:
     try:
         import websocket
@@ -370,3 +453,38 @@ def send_codex_desktop_thread_message(
     if not turn_id:
         raise CodexDesktopControlError("Codex 桌面桥接未返回 turn_id")
     return CodexDesktopMessageResult(mode=mode, turn_id=turn_id)
+
+
+def control_codex_desktop_thread_goal(
+    thread_id: str,
+    action: str,
+    *,
+    objective: str = "",
+    timeout_seconds: float = 15.0,
+) -> CodexDesktopGoalResult:
+    cleaned_thread_id = str(thread_id or "").strip()
+    if not cleaned_thread_id:
+        raise CodexDesktopControlError("thread_id 不能为空")
+    cleaned_action = str(action or "").strip().lower()
+    if cleaned_action not in {"pause", "resume", "edit", "delete"}:
+        raise CodexDesktopControlError(f"不支持的目标操作：{cleaned_action or '-'}")
+    cleaned_objective = str(objective or "").strip()
+    if cleaned_action == "edit" and not cleaned_objective:
+        raise CodexDesktopControlError("目标内容不能为空")
+    expression = _goal_expression(
+        cleaned_thread_id,
+        cleaned_action,
+        cleaned_objective,
+        timeout_seconds=timeout_seconds,
+    )
+    payload = _run_desktop_action(
+        expression,
+        timeout_seconds=timeout_seconds,
+        failure_message="无法控制 Codex 历史会话目标",
+    )
+    goal = payload.get("goal") if isinstance(payload.get("goal"), dict) else {}
+    return CodexDesktopGoalResult(
+        action=cleaned_action,
+        goal=dict(goal),
+        interrupted_turn_id=str(payload.get("interruptedTurnId") or "").strip(),
+    )

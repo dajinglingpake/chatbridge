@@ -15,17 +15,17 @@ import uuid
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from core.app_service import cancel_hub_task, delete_agent, interrupt_codex_thread, reset_weixin_conversation, run_named_action, run_repair_command, save_agent, schedule_named_action, send_codex_thread_message, set_weixin_notice_enabled, submit_hub_task, switch_active_account, switch_bridge_agent, switch_weixin_session_backend, terminate_external_agent
+from core.app_service import cancel_hub_task, control_codex_thread_goal, delete_agent, interrupt_codex_thread, reset_weixin_conversation, run_named_action, run_repair_command, save_agent, schedule_named_action, send_codex_thread_message, set_weixin_notice_enabled, submit_hub_task, switch_active_account, switch_bridge_agent, switch_weixin_session_backend, terminate_external_agent
 from core.navigation import PRIMARY_PAGES
 from core.shell_schema import APP_SHELL
 from core.dashboard import refresh_dashboard_cache
 from core.json_store import load_json, save_json
 from core.view_models import build_web_console_view_model
 from localization import Localizer, normalize_language
-from ui.mobile import MOBILE_UPLOAD_ROOT, _codex_custom_tool_exec_commands, _codex_custom_tool_names, build_mobile_access_url, build_mobile_qr_data_url, build_stream_sidebar_state_snapshot, build_stream_signature_snapshot, build_stream_state_snapshot, codex_thread_id_from_session_name, install_mobile_routes, is_mobile_access_authorized, load_codex_threads_page, stream_hub_state_file_signature, stream_qq_current_session_name
+from ui.mobile import MOBILE_UPLOAD_ROOT, _codex_custom_tool_exec_commands, _codex_custom_tool_names, build_mobile_access_url, build_mobile_qr_data_url, build_stream_sidebar_state_snapshot, build_stream_signature_snapshot, build_stream_state_snapshot, codex_thread_id_from_session_name, install_mobile_routes, is_mobile_access_authorized, load_codex_threads_page, stream_hub_state_file_signature, stream_qq_current_session_name, update_codex_goal_cache
 from ui.qr_login import install_qr_login_dialog
 from ui.qq_login import install_qq_login_dialog
-from ui.sections import STREAM_CODEX_INITIAL_HISTORY_LIMIT, STREAM_MANUAL_HISTORY_LIMIT, render_diagnostics_section, render_home_section, render_mobile_section, render_mobile_stream_composer_section, render_mobile_stream_messages_section, render_mobile_stream_shell, render_sessions_section
+from ui.sections import STREAM_CODEX_INITIAL_HISTORY_LIMIT, STREAM_MANUAL_HISTORY_LIMIT, _stream_runtime_activity_text, render_diagnostics_section, render_home_section, render_mobile_section, render_mobile_stream_composer_section, render_mobile_stream_messages_section, render_mobile_stream_shell, render_sessions_section
 
 
 APP_DIR = Path(__file__).resolve().parent.parent
@@ -649,11 +649,70 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                 url.hash = 'stream';
                 window.location.href = url.toString();
             };
+            const selectSidebarStreamSession = (encodedSessionName) => {
+                const selectedKey = String(encodedSessionName || '');
+                document.querySelectorAll('[data-stream-session-link]').forEach((link) => {
+                    const selected = (link.getAttribute('data-stream-session-link') || '') === selectedKey;
+                    link.setAttribute('data-stream-session-selected', selected ? '1' : '0');
+                    link.classList.toggle('q-btn--unelevated', selected);
+                    link.classList.toggle('q-btn--outline', !selected);
+                    link.classList.toggle('bg-primary', selected);
+                    link.classList.toggle('text-white', selected);
+                    link.classList.toggle('text-primary', !selected);
+                    if (selected) {
+                        link.setAttribute('aria-current', 'page');
+                    } else {
+                        link.removeAttribute('aria-current');
+                    }
+                });
+            };
+            window.__cbSelectSidebarStreamSession = selectSidebarStreamSession;
+            const codexWorkspaceStorageKey = 'cb_codex_workspace_open_state';
+            const codexWorkspaceOpenState = window.__cbCodexWorkspaceOpenState || (() => {
+                try {
+                    return JSON.parse(localStorage.getItem(codexWorkspaceStorageKey) || '{}') || {};
+                } catch {
+                    return {};
+                }
+            })();
+            window.__cbCodexWorkspaceOpenState = codexWorkspaceOpenState;
+            const persistCodexWorkspaceOpenState = () => {
+                try {
+                    localStorage.setItem(codexWorkspaceStorageKey, JSON.stringify(codexWorkspaceOpenState));
+                } catch {}
+            };
+            const restoreCodexWorkspaceOpenState = () => {
+                document.querySelectorAll('.cb-codex-workspace[data-codex-workspace-key]').forEach((details) => {
+                    const key = details.getAttribute('data-codex-workspace-key') || '';
+                    if (!key || !Object.prototype.hasOwnProperty.call(codexWorkspaceOpenState, key)) return;
+                    details.open = codexWorkspaceOpenState[key] === true;
+                });
+            };
+            let codexWorkspaceRestoreScheduled = false;
+            const scheduleCodexWorkspaceRestore = () => {
+                if (codexWorkspaceRestoreScheduled) return;
+                codexWorkspaceRestoreScheduled = true;
+                window.requestAnimationFrame(() => {
+                    codexWorkspaceRestoreScheduled = false;
+                    restoreCodexWorkspaceOpenState();
+                });
+            };
+            const codexWorkspaceObserver = new MutationObserver(scheduleCodexWorkspaceRestore);
+            window.__cbCodexWorkspaceObserver = codexWorkspaceObserver;
+            window.__cbRestoreCodexWorkspaceOpenState = () => {
+                restoreCodexWorkspaceOpenState();
+                const sidebar = document.querySelector('.cb-sidebar-shell');
+                if (!sidebar || window.__cbCodexWorkspaceObservedSidebar === sidebar) return;
+                codexWorkspaceObserver.disconnect();
+                codexWorkspaceObserver.observe(sidebar, {childList: true, subtree: true});
+                window.__cbCodexWorkspaceObservedSidebar = sidebar;
+            };
             if (window.__cbSidebarStreamDelegateInstalled !== '1') {
                 window.__cbSidebarStreamDelegateInstalled = '1';
                 document.addEventListener('click', (event) => {
                     const link = event.target?.closest?.('[data-stream-session-link]');
                     if (link) {
+                        selectSidebarStreamSession(link.getAttribute('data-stream-session-link') || '');
                         if (link.matches('button, .q-btn') || link.closest('button, .q-btn') === link) {
                             return;
                         }
@@ -673,8 +732,13 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                 document.addEventListener('click', (event) => {
                     const summary = event.target?.closest?.('.cb-codex-workspace > summary');
                     if (!summary) return;
+                    const details = summary.parentElement;
+                    const key = details?.getAttribute?.('data-codex-workspace-key') || '';
+                    if (key) {
+                        codexWorkspaceOpenState[key] = !details.open;
+                        persistCodexWorkspaceOpenState();
+                    }
                     window.setTimeout(() => {
-                        const details = summary.parentElement;
                         if (!details?.open) return;
                         const sidebar = details.closest('.cb-sidebar-shell');
                         if (!sidebar) return;
@@ -685,6 +749,14 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                             behavior: 'smooth',
                         });
                     }, 0);
+                }, true);
+                document.addEventListener('toggle', (event) => {
+                    const details = event.target;
+                    if (!details?.matches?.('.cb-codex-workspace[data-codex-workspace-key]')) return;
+                    const key = details.getAttribute('data-codex-workspace-key') || '';
+                    if (!key) return;
+                    codexWorkspaceOpenState[key] = details.open === true;
+                    persistCodexWorkspaceOpenState();
                 }, true);
             }
         })();
@@ -1225,6 +1297,34 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             text-transform: none;
             min-height: 4.75rem;
             padding: 0.75rem;
+        }
+        html body .q-btn.cb-stream-task-button[data-stream-session-selected="1"] {
+            border-color: var(--cb-accent) !important;
+            color: #ffffff !important;
+            box-shadow: inset 4px 0 0 rgba(255, 255, 255, 0.92), 0 0 0 1px var(--cb-accent) !important;
+        }
+        html body .q-btn.cb-stream-task-button[data-stream-session-selected="1"]::before {
+            border-color: var(--cb-accent) !important;
+        }
+        html body .q-btn.cb-stream-task-button[data-stream-session-selected="1"]:hover {
+            border-color: var(--cb-accent-bright) !important;
+            background: var(--cb-accent-bright) !important;
+        }
+        .cb-stream-selected-indicator {
+            display: none;
+            flex: 0 0 auto;
+            align-items: center;
+            min-height: 1.35rem;
+            padding: 0.12rem 0.45rem;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.18);
+            color: #ffffff;
+            font-size: 0.72rem;
+            font-weight: 800;
+            line-height: 1;
+        }
+        .cb-stream-task-button[data-stream-session-selected="1"] .cb-stream-selected-indicator {
+            display: inline-flex;
         }
         .cb-stream-task-button .q-btn__content {
             width: 100%;
@@ -2668,12 +2768,123 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             max-width: 51.25rem;
             margin: 0 auto;
         }
+        .cb-composer-goal {
+            position: relative;
+            z-index: 1;
+            margin: 0 1rem -1px;
+            border: 1px solid var(--cb-border);
+            border-radius: 14px 14px 0 0;
+            background: var(--cb-surface-raised);
+            color: var(--cb-muted);
+            overflow: hidden;
+        }
+        .cb-composer-goal-summary {
+            display: grid;
+            grid-template-columns: auto auto minmax(0, 1fr) auto auto auto;
+            align-items: center;
+            gap: 0.45rem;
+            min-height: 2.4rem;
+            padding: 0.4rem 0.75rem;
+            cursor: pointer;
+            list-style: none;
+        }
+        .cb-composer-goal-summary::-webkit-details-marker {
+            display: none;
+        }
+        .cb-composer-goal-icon::before,
+        .cb-composer-goal-chevron::before {
+            font-family: "Material Icons";
+            font-size: 1rem;
+            line-height: 1;
+        }
+        .cb-composer-goal-icon::before {
+            content: "track_changes";
+            color: var(--cb-accent-bright);
+        }
+        .cb-composer-goal[data-goal-status="paused"] .cb-composer-goal-icon::before {
+            content: "pause_circle";
+            color: var(--cb-muted);
+        }
+        .cb-composer-goal-chevron::before {
+            content: "chevron_right";
+            color: var(--cb-muted);
+        }
+        .cb-composer-goal[open] .cb-composer-goal-chevron::before {
+            content: "expand_more";
+        }
+        .cb-composer-goal-title {
+            color: var(--cb-ink);
+            font-size: 0.86rem;
+            font-weight: 750;
+            white-space: nowrap;
+        }
+        .cb-composer-goal-objective {
+            min-width: 0;
+            overflow: hidden;
+            color: var(--cb-muted);
+            font-size: 0.84rem;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .cb-composer-goal-elapsed {
+            color: var(--cb-muted);
+            font-size: 0.78rem;
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+        }
+        .cb-composer-goal-actions {
+            flex-wrap: nowrap;
+        }
+        html body .q-btn.cb-composer-goal-action {
+            width: 1.7rem;
+            min-width: 1.7rem;
+            height: 1.7rem;
+            min-height: 1.7rem;
+            padding: 0;
+            color: var(--cb-muted) !important;
+        }
+        html body .q-btn.cb-composer-goal-action:hover {
+            background: var(--cb-surface-muted) !important;
+            color: var(--cb-ink) !important;
+        }
+        .cb-composer-goal-action .q-icon {
+            font-size: 1rem;
+        }
+        .cb-composer-goal-detail {
+            max-height: 8rem;
+            overflow: auto;
+            border-top: 1px solid var(--cb-border);
+            padding: 0.65rem 0.75rem;
+            color: var(--cb-ink);
+            font-size: 0.84rem;
+            line-height: 1.55;
+            white-space: pre-wrap;
+        }
+        .cb-composer-goal-dialog {
+            width: min(34rem, calc(100vw - 2rem));
+        }
+        .cb-composer-goal-dialog-title {
+            color: var(--cb-ink);
+            font-size: 1rem;
+            font-weight: 800;
+        }
+        .cb-composer-goal-dialog-description {
+            color: var(--cb-muted);
+            font-size: 0.88rem;
+            line-height: 1.5;
+        }
+        .cb-composer-goal-edit-input textarea {
+            min-height: 8rem;
+        }
         .cb-composer-box {
             border: 1px solid var(--cb-border);
             border-radius: 16px;
             background: var(--cb-surface);
             box-shadow: none;
             padding: 1rem;
+        }
+        .cb-composer-box-has-goal {
+            border-radius: 16px;
         }
         .cb-composer-box:focus-within {
             border-color: var(--cb-border-strong);
@@ -2845,6 +3056,46 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             color: var(--cb-muted);
             font-size: 0.78rem;
         }
+        .cb-composer-model-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.28rem;
+            min-width: 0;
+            max-width: 13rem;
+            height: 1.75rem;
+            padding: 0 0.45rem;
+            border-radius: 999px;
+            color: var(--cb-muted);
+            font-size: 0.78rem;
+            white-space: nowrap;
+        }
+        .cb-composer-model-indicator:hover {
+            background: var(--cb-surface-muted);
+        }
+        .cb-composer-model-icon::before {
+            content: "progress_activity";
+            font-family: "Material Icons";
+            font-size: 0.95rem;
+            color: var(--cb-accent-bright);
+        }
+        .cb-composer-model-icon {
+            display: inline-flex;
+            flex: 0 0 1rem;
+            width: 1rem;
+            min-width: 1rem;
+            height: 1rem;
+            align-items: center;
+            justify-content: center;
+        }
+        .cb-composer-model-name {
+            min-width: 0;
+            overflow: hidden;
+            color: var(--cb-ink);
+            text-overflow: ellipsis;
+        }
+        .cb-composer-model-effort {
+            color: var(--cb-accent-bright);
+        }
         .cb-composer-tool-button,
         .cb-composer-stop-button,
         .cb-composer-send-button {
@@ -2985,8 +3236,40 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             .cb-composer-zone {
                 padding: 0.75rem 1rem max(1rem, env(safe-area-inset-bottom));
             }
+            .cb-composer-goal {
+                margin: 0 0.5rem -1px;
+            }
+            .cb-composer-goal-summary {
+                grid-template-columns: auto minmax(0, 1fr) auto auto;
+                gap: 0.35rem;
+                padding: 0.4rem 0.6rem;
+            }
+            .cb-composer-goal-elapsed {
+                display: none;
+            }
+            .cb-composer-goal-title {
+                display: none;
+            }
+            .cb-composer-goal-objective,
+            .cb-composer-goal-detail {
+                font-size: 0.78rem;
+            }
+            html body .q-btn.cb-composer-goal-action {
+                width: 1.55rem;
+                min-width: 1.55rem;
+                height: 1.55rem;
+                min-height: 1.55rem;
+            }
             .cb-composer-box {
                 padding: 0.5rem 0.75rem;
+            }
+            .cb-composer-right-actions {
+                max-width: calc(100% - 2.25rem);
+            }
+            .cb-composer-model-indicator {
+                flex-shrink: 1;
+                max-width: 10rem;
+                padding: 0 0.3rem;
             }
             .cb-context-meter-track {
                 display: none;
@@ -3083,6 +3366,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         "stream_sidebar_codex_done": False,
         "stream_sidebar_codex_error": "",
         "stream_sidebar_codex_runtime_probes": {},
+        "stream_sidebar_codex_workspace_open": {},
         "stream_selected_codex_runtime_thread": {},
     }
     state = _ClientState(state_defaults, lambda: context.client.storage)
@@ -3266,7 +3550,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         thread = state.get("stream_selected_codex_runtime_thread")
         return thread if isinstance(thread, dict) else {}
 
-    def _refresh_codex_runtime_statuses() -> tuple[bool, bool]:
+    def _refresh_codex_runtime_statuses() -> tuple[bool, bool, bool]:
         sidebar_value = state.get("stream_sidebar_codex_threads")
         sidebar_threads = [thread for thread in sidebar_value if isinstance(thread, dict)] if isinstance(sidebar_value, list) else []
         selected_thread = _stream_selected_codex_runtime_thread()
@@ -3276,11 +3560,11 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             for thread in sidebar_threads
             if str(thread.get("id") or "").strip()
         }
-        selected_before = (
+        selected_status_before = (
             str(selected_thread.get("runtime_status") or ""),
             str(selected_thread.get("runtime_started_at") or ""),
-            _codex_runtime_activity_signature(selected_thread.get("runtime_activity")),
         )
+        selected_activity_before = _codex_runtime_activity_signature(selected_thread.get("runtime_activity"))
 
         probe_threads: list[dict[str, object]] = []
         if selected_id:
@@ -3305,12 +3589,12 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             for thread in sidebar_threads
             if str(thread.get("id") or "").strip()
         )
-        selected_changed = selected_before != (
+        selected_status_changed = selected_status_before != (
             str(selected_thread.get("runtime_status") or ""),
             str(selected_thread.get("runtime_started_at") or ""),
-            _codex_runtime_activity_signature(selected_thread.get("runtime_activity")),
         )
-        return sidebar_changed, selected_changed
+        selected_activity_changed = selected_activity_before != _codex_runtime_activity_signature(selected_thread.get("runtime_activity"))
+        return sidebar_changed, selected_status_changed, selected_activity_changed
 
     def _sync_selected_codex_runtime_status(stream_state: dict[str, object]) -> None:
         selected_session = str(state.get("selected_session_name") or "").strip()
@@ -3398,19 +3682,31 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
 
     def _stream_signature_snapshot() -> tuple:
         session_name = str(state["selected_session_name"] or "").strip()
-        signature = build_stream_signature_snapshot(
+        return build_stream_signature_snapshot(
             selected_session_name=session_name,
             task_limit=_stream_global_task_limit(session_name),
             session_task_limit=_stream_session_task_limit(session_name),
         )
+
+    def _patch_stream_runtime_activity() -> None:
         selected_runtime = _stream_selected_codex_runtime_thread()
-        runtime_signature = (
-            str(selected_runtime.get("id") or ""),
-            str(selected_runtime.get("runtime_status") or ""),
-            str(selected_runtime.get("runtime_started_at") or ""),
-            _codex_runtime_activity_signature(selected_runtime.get("runtime_activity")),
+        activity = _codex_runtime_activity_copy(selected_runtime.get("runtime_activity"))
+        text = _stream_runtime_activity_text(activity, translate).strip()
+        if not text:
+            text = t("ui.web.mobile.stream_working", "正在处理")
+        ui.run_javascript(
+            f"""
+            (() => {{
+                const element = document.querySelector('.cb-stream-current-activity');
+                if (!element) return;
+                const text = {json.dumps(text, ensure_ascii=False)};
+                if ((element.dataset.streamFullText || element.textContent || '') === text) return;
+                element.textContent = text;
+                element.dataset.streamFullText = text;
+                window.__cbStreamTypewriterSync?.();
+            }})();
+            """
         )
-        return (*signature, runtime_signature)
 
     def _stream_task_order_key(task: dict[str, object]) -> tuple[tuple[int, float, str], str, str]:
         raw_order = str(task.get("stream_order") or "")
@@ -3460,6 +3756,8 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             {},
         )
         pending_images = tuple(_stream_pending_image_paths(active_session))
+        selected_codex_thread = mobile_state.get("selected_codex_thread") if isinstance(mobile_state.get("selected_codex_thread"), dict) else {}
+        active_goal = selected_codex_thread.get("active_goal") if isinstance(selected_codex_thread.get("active_goal"), dict) else {}
         return (
             active_session,
             tuple(
@@ -3472,7 +3770,11 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             ),
             str(latest_task.get("agent_id") or ""),
             str(latest_task.get("backend") or ""),
+            str(latest_task.get("model") or ""),
+            str(latest_task.get("reasoning_effort") or ""),
             str(latest_task.get("context_left_percent") or ""),
+            tuple(str(active_goal.get(key) or "") for key in ("objective", "status", "started_at", "updated_at", "time_used_seconds")),
+            tuple(str(selected_codex_thread.get(key) or "") for key in ("model", "reasoning_effort", "service_tier")),
             pending_images,
         )
 
@@ -3560,6 +3862,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             _cancel_stream_task,
             _upload_stream_image,
             _remove_stream_image,
+            on_goal_action=_control_stream_goal,
         )
 
     @ui.refreshable
@@ -3899,6 +4202,38 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             ui.notify(t("ui.web.notify.task_cancel_failed", "停止任务失败：{message}", message=result.message), position="top")
         _refresh_stream_parts()
 
+    async def _control_stream_goal(action: str, thread_id: str, objective: str = "") -> bool:
+        cleaned_action = str(action or "").strip().lower()
+        cleaned_thread_id = str(thread_id or "").strip()
+        if not cleaned_thread_id:
+            ui.notify(t("ui.web.notify.goal_missing_thread", "目标操作失败：缺少 Codex 会话标识"), position="top")
+            return False
+        action_labels = {
+            "pause": t("ui.web.mobile.goal_pause", "暂停目标"),
+            "resume": t("ui.web.mobile.goal_resume", "恢复目标"),
+            "edit": t("ui.web.mobile.goal_edit", "编辑目标"),
+            "delete": t("ui.web.mobile.goal_delete", "删除目标"),
+        }
+        action_label = action_labels.get(cleaned_action, cleaned_action or "目标操作")
+        ui.notify(t("ui.web.notify.goal_action_running", "正在{action}…", action=action_label), position="top")
+        result = await asyncio.to_thread(
+            control_codex_thread_goal,
+            cleaned_thread_id,
+            cleaned_action,
+            objective=str(objective or "").strip(),
+        )
+        if result.ok:
+            goal = result.payload.get("goal") if isinstance(result.payload, dict) else {}
+            update_codex_goal_cache(cleaned_thread_id, goal)
+            ui.notify(t("ui.web.notify.goal_action_done", "{action}成功", action=action_label), position="top")
+        else:
+            ui.notify(
+                t("ui.web.notify.goal_action_failed", "{action}失败：{message}", action=action_label, message=result.message),
+                position="top",
+            )
+        _refresh_stream_parts(refresh_messages=False, refresh_composer=True)
+        return result.ok
+
     def _load_older_stream_messages(session_name: str) -> None:
         cleaned_session_name = str(session_name or "").strip() or "default"
         limits = state["stream_session_task_limits"]
@@ -4149,9 +4484,73 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         threads = state.get("stream_sidebar_codex_threads")
         return [thread for thread in threads if isinstance(thread, dict)] if isinstance(threads, list) else []
 
+    def _codex_workspace_open_state() -> dict[str, bool]:
+        value = state.get("stream_sidebar_codex_workspace_open")
+        if isinstance(value, dict):
+            return {str(key): bool(is_open) for key, is_open in value.items()}
+        state["stream_sidebar_codex_workspace_open"] = {}
+        return {}
+
+    def _set_codex_workspace_open(workspace_key: str, event) -> None:
+        args = getattr(event, "args", None)
+        if not isinstance(args, dict) or "open" not in args:
+            return
+        open_state = _codex_workspace_open_state()
+        open_state[workspace_key] = bool(args.get("open"))
+        state["stream_sidebar_codex_workspace_open"] = open_state
+
     def _refresh_sidebar_codex_runtime_status() -> bool:
-        sidebar_changed, _selected_changed = _refresh_codex_runtime_statuses()
+        sidebar_changed, _selected_status_changed, _selected_activity_changed = _refresh_codex_runtime_statuses()
         return sidebar_changed
+
+    def _patch_sidebar_codex_runtime_status() -> None:
+        workspace_states: dict[str, dict[str, object]] = {}
+        thread_states: dict[str, bool] = {}
+        for group in group_codex_threads_by_workspace(_sidebar_codex_threads()):
+            group_threads = group.get("threads") if isinstance(group.get("threads"), list) else []
+            group_project = str(group.get("project") or "").strip()
+            group_cwd = str(group.get("cwd") or "").strip()
+            group_label = group_project or t("ui.web.mobile.codex_workspace_unknown", "未指定工作区")
+            workspace_key = quote(group_cwd or group_label, safe="")
+            running_count = sum(
+                1
+                for thread in group_threads
+                if isinstance(thread, dict) and str(thread.get("runtime_status") or "") == "running"
+            )
+            workspace_states[workspace_key] = {
+                "running": running_count > 0,
+                "label": t(
+                    "ui.web.mobile.codex_workspace_running",
+                    "{count} 个运行中",
+                    count=str(running_count),
+                ),
+            }
+            for thread in group_threads:
+                if not isinstance(thread, dict):
+                    continue
+                thread_id = str(thread.get("id") or "").strip()
+                if thread_id:
+                    thread_states[quote(thread_id, safe="")] = str(thread.get("runtime_status") or "") == "running"
+        ui.run_javascript(
+            f"""
+            (() => {{
+                const workspaceStates = {json.dumps(workspace_states, ensure_ascii=False)};
+                document.querySelectorAll('[data-codex-workspace-running]').forEach((element) => {{
+                    const state = workspaceStates[element.getAttribute('data-codex-workspace-running') || ''];
+                    if (!state) return;
+                    element.hidden = state.running !== true;
+                    if (state.running === true && element.textContent !== state.label) {{
+                        element.textContent = state.label;
+                    }}
+                }});
+                const threadStates = {json.dumps(thread_states, ensure_ascii=False)};
+                document.querySelectorAll('[data-codex-thread-running]').forEach((element) => {{
+                    const running = threadStates[element.getAttribute('data-codex-thread-running') || ''] === true;
+                    element.hidden = !running;
+                }});
+            }})();
+            """
+        )
 
     def _load_sidebar_codex_threads() -> None:
         state["stream_sidebar_codex_loaded"] = True
@@ -4288,15 +4687,16 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                         selected = session_name == state["selected_session_name"] or (
                             not state["selected_session_name"] and session_name == session_order[0]
                         )
-                        props = "unelevated" if selected else "outline"
                         with ui.button(
                             "",
                             on_click=lambda session_name=session_name: _open_stream_session(session_name),
-                        ).props(f"{props} data-stream-session-link={quote(session_name, safe='')}").classes("w-full cb-stream-task-button"):
+                        ).props(_stream_session_button_props(session_name, selected)).classes("w-full cb-stream-task-button"):
                             with ui.column().classes("w-full items-stretch gap-1 text-left"):
                                 with ui.row().classes("w-full items-start justify-between gap-2 flex-wrap"):
                                     ui.label(session_name).classes("font-semibold break-all text-left min-w-0 flex-1")
-                                    ui.label(t(f"bridge.task.status.{status}", status)).classes(f"{_stream_status_badge_class(status)} flex-shrink-0")
+                                    with ui.row().classes("items-center gap-1 flex-shrink-0"):
+                                        ui.label(t("ui.web.mobile.stream_selected", "当前")).classes("cb-stream-selected-indicator")
+                                        ui.label(t(f"bridge.task.status.{status}", status)).classes(f"{_stream_status_badge_class(status)} flex-shrink-0")
                                 ui.label(
                                     t(
                                         "ui.web.mobile.stream_session_meta",
@@ -4340,6 +4740,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     ui.label(t("ui.web.mobile.codex_threads_empty", "没有发现 Codex 会话。")).classes("text-sm cb-muted")
             else:
                 workspace_groups = group_codex_threads_by_workspace(codex_threads)
+                workspace_open_state = _codex_workspace_open_state()
                 with ui.column().classes("w-full gap-2 pr-1"):
                     for group in workspace_groups:
                         group_threads = group.get("threads") if isinstance(group.get("threads"), list) else []
@@ -4364,21 +4765,33 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                             and str(thread.get("session_name") or "").strip() == state["selected_session_name"]
                             for thread in group_threads
                         )
-                        details_props = "open" if selected_in_group else ""
-                        with ui.element("details").props(details_props).classes("cb-codex-workspace w-full"):
-                            with ui.element("summary"):
+                        workspace_key = quote(group_cwd or group_label, safe="")
+                        details_props = f"data-codex-workspace-key={workspace_key}"
+                        manual_open = workspace_open_state.get(workspace_key)
+                        if manual_open is True or (manual_open is None and selected_in_group):
+                            details_props = f"open {details_props}"
+                        workspace_details = ui.element("details").props(details_props).classes("cb-codex-workspace w-full")
+                        with workspace_details:
+                            workspace_summary = ui.element("summary")
+                            workspace_summary.on(
+                                "click",
+                                lambda event, key=workspace_key: _set_codex_workspace_open(key, event),
+                                js_handler="(event) => emit({open: event.currentTarget.parentElement.open !== true})",
+                            )
+                            with workspace_summary:
                                 with ui.column().classes("min-w-0 flex-1 gap-1"):
                                     with ui.row().classes("w-full items-start justify-between gap-2 flex-wrap"):
                                         ui.label(group_label).classes("font-semibold break-all text-left")
                                         with ui.row().classes("gap-1 items-center flex-wrap"):
-                                            if running_count:
-                                                ui.label(
-                                                    t(
-                                                        "ui.web.mobile.codex_workspace_running",
-                                                        "{count} 个运行中",
-                                                        count=str(running_count),
-                                                    )
-                                                ).classes("cb-chip cb-chip-running")
+                                            workspace_running_chip = ui.label(
+                                                t(
+                                                    "ui.web.mobile.codex_workspace_running",
+                                                    "{count} 个运行中",
+                                                    count=str(running_count),
+                                                )
+                                            ).props(f"data-codex-workspace-running={workspace_key}").classes("cb-chip cb-chip-running")
+                                            if not running_count:
+                                                workspace_running_chip.props("hidden")
                                             ui.label(
                                                 t(
                                                     "ui.web.mobile.codex_workspace_count",
@@ -4398,16 +4811,22 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                                     if not thread_session_name or not thread_id:
                                         continue
                                     selected = thread_session_name == state["selected_session_name"]
-                                    props = "unelevated" if selected else "outline"
                                     with ui.button(
                                         "",
                                         on_click=lambda session_name=thread_session_name: _open_stream_session(session_name),
-                                    ).props(f"{props} data-stream-session-link={quote(thread_session_name, safe='')}").classes("w-full cb-stream-task-button"):
+                                    ).props(_stream_session_button_props(thread_session_name, selected)).classes("w-full cb-stream-task-button"):
                                         with ui.column().classes("w-full items-stretch gap-1 text-left"):
-                                            ui.label(str(thread.get("title") or thread_id)).classes("font-semibold break-all text-left")
+                                            with ui.row().classes("w-full items-start justify-between gap-2"):
+                                                ui.label(str(thread.get("title") or thread_id)).classes("font-semibold break-all text-left min-w-0 flex-1")
+                                                ui.label(t("ui.web.mobile.stream_selected", "当前")).classes("cb-stream-selected-indicator")
                                             with ui.row().classes("w-full gap-1 items-center flex-wrap"):
-                                                if str(thread.get("runtime_status") or "") == "running":
-                                                    ui.label(t("ui.web.mobile.codex_thread_running", "运行中")).classes("cb-chip cb-chip-running")
+                                                thread_running_chip = ui.label(
+                                                    t("ui.web.mobile.codex_thread_running", "运行中")
+                                                ).props(
+                                                    f"data-codex-thread-running={quote(thread_id, safe='')}"
+                                                ).classes("cb-chip cb-chip-running")
+                                                if str(thread.get("runtime_status") or "") != "running":
+                                                    thread_running_chip.props("hidden")
                                                 if bool(thread.get("archived")):
                                                     ui.label(t("ui.web.mobile.codex_thread_archived", "已归档")).classes("cb-chip cb-chip-warn")
                                                 if str(thread.get("branch") or "").strip():
@@ -4426,6 +4845,19 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                             on_click=_load_sidebar_codex_threads,
                             icon="expand_more",
                         ).props("flat dense").classes("w-full cb-stream-load-older-button")
+        ui.run_javascript(
+            f"""
+            (() => {{
+                window.__cbSelectSidebarStreamSession?.({quote(selected_sidebar_session, safe='')!r});
+                const restore = () => window.__cbRestoreCodexWorkspaceOpenState?.();
+                window.requestAnimationFrame(() => {{
+                    restore();
+                    window.requestAnimationFrame(restore);
+                }});
+                window.setTimeout(restore, 120);
+            }})();
+            """
+        )
 
     @ui.refreshable
     def right_sidebar_view() -> None:
@@ -4456,6 +4888,15 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             return "cb-chip cb-chip-danger"
         return "cb-chip cb-chip-warn"
 
+    def _stream_session_button_props(session_name: str, selected: bool) -> str:
+        selected_value = "1" if selected else "0"
+        variant = "unelevated" if selected else "outline"
+        props = (
+            f"{variant} data-stream-session-link={quote(session_name, safe='')} "
+            f"data-stream-session-selected={selected_value}"
+        )
+        return f"{props} aria-current=page" if selected else props
+
     def _open_stream_session_from_input(input_box) -> None:
         session_name = str(getattr(input_box, "value", "") or "").strip()
         if not session_name:
@@ -4471,7 +4912,10 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         was_stream_page = state["active_page"] == "stream"
         current_session_name = str(state.get("selected_session_name") or "").strip()
         if was_stream_page and current_session_name == cleaned_session_name:
-            ui.run_javascript("document.body.classList.remove('cb-sidebar-open')")
+            ui.run_javascript(
+                f"window.__cbSelectSidebarStreamSession?.({encoded_session_name!r}); "
+                "document.body.classList.remove('cb-sidebar-open')"
+            )
             return
         try:
             switch_sequence = int(state.get("stream_switch_sequence") or 0) + 1
@@ -4496,6 +4940,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                 window.history.replaceState(null, '', url.toString());
                 const panel = document.querySelector('.cb-agent-panel');
                 if (panel) panel.dataset.streamKey = {encoded_session_name!r};
+                window.__cbSelectSidebarStreamSession?.({encoded_session_name!r});
                 if (window.__cbStreamScrollStateByKey) delete window.__cbStreamScrollStateByKey[{cleaned_session_name!r}];
                 window.__cbStreamForceBottomUntil = Date.now() + 1200;
                 document.body.classList.remove('cb-sidebar-open');
@@ -5882,9 +6327,9 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                 try:
                     if state.get("stream_switch_refresh_pending"):
                         return
-                    sidebar_runtime_changed, _selected_runtime_changed = _refresh_codex_runtime_statuses()
+                    sidebar_runtime_changed, selected_runtime_status_changed, selected_runtime_activity_changed = _refresh_codex_runtime_statuses()
                     if state.get("stream_sidebar_codex_loaded") and sidebar_runtime_changed:
-                        sidebar_sessions_view.refresh()
+                        _patch_sidebar_codex_runtime_status()
                     selected_stream_session = str(state["selected_session_name"] or "").strip()
                     if not codex_thread_id_from_session_name(selected_stream_session):
                         next_hub_file_signature = stream_hub_state_file_signature()
@@ -5895,7 +6340,8 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     next_signature = _stream_signature_snapshot()
                     if next_hub_file_signature is not None:
                         state["stream_hub_state_file_signature"] = next_hub_file_signature
-                    if next_signature != state.get("stream_refresh_signature"):
+                    stream_content_changed = next_signature != state.get("stream_refresh_signature")
+                    if stream_content_changed or selected_runtime_status_changed:
                         stream_state = _stream_state_snapshot()
                         active_stream_session = _resolve_stream_active_session(stream_state)
                         next_composer_signature = _stream_composer_signature(stream_state, active_stream_session)
@@ -5916,6 +6362,8 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                                 refresh_signature=next_signature,
                                 hub_file_signature=next_hub_file_signature,
                             )
+                    elif selected_runtime_activity_changed:
+                        _patch_stream_runtime_activity()
                 except RuntimeError as exc:
                     _append_stream_ui_log(
                         "refresh_timer_runtime_error",

@@ -307,6 +307,7 @@ class MobileStateTests(unittest.TestCase):
                 patch("ui.mobile.MOBILE_UPLOAD_ROOT", upload_root),
                 patch("ui.mobile._codex_sessions_root", return_value=sessions_root),
             ):
+                mobile._codex_raw_view_image_payload(thread["id"])
                 tasks = _codex_thread_task_payloads(thread)
 
             previews = tasks[0]["output_image_previews"]
@@ -385,6 +386,7 @@ class MobileStateTests(unittest.TestCase):
                 patch("ui.mobile.MOBILE_UPLOAD_ROOT", upload_root),
                 patch("ui.mobile._codex_sessions_root", return_value=sessions_root),
             ):
+                mobile._codex_raw_view_image_payload(thread["id"])
                 tasks = _codex_thread_task_payloads(thread)
                 previews = tasks[0]["output_image_previews"]
                 first_source = str(previews[0]["source"])
@@ -461,6 +463,7 @@ class MobileStateTests(unittest.TestCase):
             }
 
             with patch("ui.mobile._codex_sessions_root", return_value=sessions_root):
+                mobile._codex_raw_view_image_payload(thread["id"])
                 tasks = _codex_thread_task_payloads(thread)
                 preview = tasks[0]["output_image_previews"][0]
                 source = str(preview["source"])
@@ -539,6 +542,7 @@ class MobileStateTests(unittest.TestCase):
             }
 
             with patch("ui.mobile._codex_sessions_root", return_value=sessions_root):
+                mobile._codex_raw_view_image_payload(thread["id"])
                 tasks = _codex_thread_task_payloads(thread)
 
             self.assertEqual([image_path.as_posix()], tasks[0]["images"])
@@ -612,6 +616,7 @@ class MobileStateTests(unittest.TestCase):
             }
 
             with patch("ui.mobile._codex_sessions_root", return_value=sessions_root):
+                mobile._codex_raw_view_image_payload(thread["id"])
                 tasks = _codex_thread_task_payloads(thread)
 
             self.assertEqual(1, len(tasks[0]["output_image_previews"]))
@@ -802,6 +807,172 @@ class MobileStateTests(unittest.TestCase):
         mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
         mobile._CODEX_ROLLOUT_PATH_CACHE.clear()
 
+    def test_codex_rollout_tracks_active_goal_across_completion_and_recreation(self) -> None:
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+        mobile._CODEX_ROLLOUT_PATH_CACHE.clear()
+        with TemporaryDirectory() as temp_dir:
+            sessions_root = Path(temp_dir) / "codex" / "sessions"
+            sessions_root.mkdir(parents=True)
+            jsonl_path = sessions_root / "rollout-thread-goal.jsonl"
+
+            def goal_context(timestamp: str, objective: str, *, edited: bool = False) -> dict[str, object]:
+                message = "The active thread goal objective was edited by the user.\n" if edited else "Continue working toward the active thread goal.\n"
+                return {
+                    "type": "response_item",
+                    "timestamp": timestamp,
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": (
+                                    '<codex_internal_context source="goal">\n'
+                                    f"{message}<objective>\n{objective}\n</objective>\n"
+                                    "</codex_internal_context>"
+                                ),
+                            }
+                        ],
+                        "internal_chat_message_metadata_passthrough": {"turn_id": "turn-goal"},
+                    },
+                }
+
+            events = [
+                goal_context("2026-07-18T10:00:00Z", "第一个目标"),
+                {
+                    "type": "response_item",
+                    "timestamp": "2026-07-18T10:05:00Z",
+                    "payload": {
+                        "type": "custom_tool_call",
+                        "name": "exec",
+                        "call_id": "call-complete-goal",
+                        "input": 'const result = await tools.update_goal({ status: "complete" }); text(result);',
+                        "internal_chat_message_metadata_passthrough": {"turn_id": "turn-goal"},
+                    },
+                },
+                goal_context("2026-07-18T11:00:00Z", "第二个目标"),
+                goal_context("2026-07-18T11:05:00Z", "第二个目标（已编辑）", edited=True),
+            ]
+            jsonl_path.write_text("\n".join(json.dumps(event, ensure_ascii=False) for event in events) + "\n", encoding="utf-8")
+
+            with patch("ui.mobile._codex_sessions_root", return_value=sessions_root):
+                payload = mobile._codex_raw_view_image_payload("thread-goal")
+
+            self.assertEqual(
+                {
+                    "objective": "第二个目标（已编辑）",
+                    "status": "active",
+                    "started_at": "2026-07-18T11:00:00Z",
+                    "updated_at": "2026-07-18T11:05:00Z",
+                },
+                payload["goal"],
+            )
+
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+        mobile._CODEX_ROLLOUT_PATH_CACHE.clear()
+
+    def test_codex_rollout_prefers_native_goal_status_and_tracks_model(self) -> None:
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+        mobile._CODEX_ROLLOUT_PATH_CACHE.clear()
+        with TemporaryDirectory() as temp_dir:
+            sessions_root = Path(temp_dir) / "codex" / "sessions"
+            sessions_root.mkdir(parents=True)
+            jsonl_path = sessions_root / "rollout-thread-native-goal.jsonl"
+            events = [
+                {
+                    "type": "turn_context",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "payload": {
+                        "model": "gpt-5.6-sol",
+                        "effort": "ultra",
+                        "service_tier": "default",
+                    },
+                },
+                {
+                    "type": "event_msg",
+                    "timestamp": "2026-01-01T00:02:05Z",
+                    "payload": {
+                        "type": "thread_goal_updated",
+                        "threadId": "thread-native-goal",
+                        "goal": {
+                            "threadId": "thread-native-goal",
+                            "objective": "继续原生目标",
+                            "status": "paused",
+                            "tokensUsed": 4200,
+                            "timeUsedSeconds": 125,
+                            "createdAt": 1767225600,
+                            "updatedAt": 1767225725,
+                        },
+                    },
+                },
+            ]
+            jsonl_path.write_text("\n".join(json.dumps(event, ensure_ascii=False) for event in events) + "\n", encoding="utf-8")
+
+            with patch("ui.mobile._codex_sessions_root", return_value=sessions_root):
+                payload = mobile._codex_raw_view_image_payload("thread-native-goal")
+
+            self.assertEqual("paused", payload["goal"]["status"])
+            self.assertEqual("继续原生目标", payload["goal"]["objective"])
+            self.assertEqual("125", payload["goal"]["time_used_seconds"])
+            self.assertEqual("1", payload["goal"]["native"])
+            self.assertEqual("gpt-5.6-sol", payload["model"]["model"])
+            self.assertEqual("ultra", payload["model"]["reasoning_effort"])
+
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+        mobile._CODEX_ROLLOUT_PATH_CACHE.clear()
+
+    def test_codex_rollout_keeps_newer_goal_control_cache_during_parse(self) -> None:
+        thread_id = "thread-newer-goal-cache"
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+        mobile._CODEX_ROLLOUT_PATH_CACHE.clear()
+        with TemporaryDirectory() as temp_dir:
+            sessions_root = Path(temp_dir) / "codex" / "sessions"
+            sessions_root.mkdir(parents=True)
+            rollout_path = sessions_root / f"rollout-{thread_id}.jsonl"
+            rollout_path.write_text(
+                json.dumps(
+                    {
+                        "timestamp": "2026-07-19T10:00:00Z",
+                        "payload": {
+                            "type": "thread_goal_updated",
+                            "threadId": thread_id,
+                            "goal": {
+                                "threadId": thread_id,
+                                "objective": "文件中的旧目标",
+                                "status": "active",
+                                "startedAt": "2026-07-19T10:00:00Z",
+                                "updatedAt": "2026-07-19T10:00:00Z",
+                            },
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE[thread_id] = {
+                **mobile._empty_codex_rollout_payload(),
+                "signature": None,
+                "path": "",
+                "offset": 0,
+                "checked_at": 0.0,
+                "goal": {
+                    "objective": "刚刚暂停的目标",
+                    "status": "paused",
+                    "started_at": "2026-07-19T10:00:00Z",
+                    "updated_at": "2026-07-19T10:05:00Z",
+                    "native": "1",
+                },
+            }
+
+            with patch("ui.mobile._codex_sessions_root", return_value=sessions_root):
+                payload = mobile._codex_raw_view_image_payload(thread_id)
+
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+        mobile._CODEX_ROLLOUT_PATH_CACHE.clear()
+        self.assertEqual("paused", payload["goal"]["status"])
+        self.assertEqual("刚刚暂停的目标", payload["goal"]["objective"])
+
     def test_codex_function_tool_image_result_gets_mobile_preview(self) -> None:
         mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
         with TemporaryDirectory() as temp_dir:
@@ -845,6 +1016,7 @@ class MobileStateTests(unittest.TestCase):
             }
 
             with patch("ui.mobile._codex_sessions_root", return_value=sessions_root):
+                mobile._codex_raw_view_image_payload(thread["id"])
                 tasks = _codex_thread_task_payloads(thread)
                 source = str(tasks[0]["output_image_previews"][0]["source"])
                 _empty, _route, signature, encoded_thread, encoded_reference = source.split("/", 4)
@@ -977,7 +1149,7 @@ class MobileStateTests(unittest.TestCase):
         }
 
         with patch(
-            "ui.mobile._codex_raw_view_image_payload",
+            "ui.mobile._codex_cached_rollout_payload",
             return_value={
                 "turn_times": {
                     "turn-timed": {
@@ -1031,7 +1203,7 @@ class MobileStateTests(unittest.TestCase):
             },
         }
 
-        with patch("ui.mobile._codex_raw_view_image_payload", return_value=raw_payload):
+        with patch("ui.mobile._codex_cached_rollout_payload", return_value=raw_payload):
             tasks = _codex_thread_task_payloads(thread)
 
         reasoning_items = [item for item in tasks[0]["activity_items"] if item["event"] == "codex_reasoning"]
@@ -1413,11 +1585,15 @@ class MobileStateTests(unittest.TestCase):
             calls.append({"thread_id": thread_id, **kwargs})
             return {"id": thread_id, "messages": []}
 
-        with patch("ui.mobile.read_codex_thread", side_effect=fake_read_codex_thread):
+        with (
+            patch("ui.mobile.read_codex_thread", side_effect=fake_read_codex_thread),
+            patch("ui.mobile._refresh_codex_rollout_cache_now") as refresh_rollout,
+        ):
             thread = mobile._load_codex_thread_now("thread-1")
 
         self.assertEqual({"id": "thread-1", "messages": []}, thread)
         self.assertEqual([{"thread_id": "thread-1", "timeout_seconds": 8}], calls)
+        refresh_rollout.assert_called_once_with("thread-1")
 
     def test_mobile_state_defaults_to_lightweight_payload(self) -> None:
         with (
@@ -1775,6 +1951,61 @@ class MobileStateTests(unittest.TestCase):
         self.assertEqual(1, payloads.call_count)
         self.assertIn(("codex:thread-1", "1"), first[1])
 
+    def test_stream_signature_tracks_active_goal_updates(self) -> None:
+        with (
+            patch("ui.mobile._load_raw_hub_state", return_value={"tasks": [], "agents": []}),
+            patch("ui.mobile._codex_thread_signature_parts_cached", return_value=((), 0)),
+            patch(
+                "ui.mobile._codex_cached_rollout_payload",
+                side_effect=[
+                    {
+                        "goal": {
+                            "objective": "第一个目标",
+                            "status": "active",
+                            "started_at": "2026-07-18T10:00:00Z",
+                            "updated_at": "2026-07-18T10:00:00Z",
+                        }
+                    },
+                    {
+                        "goal": {
+                            "objective": "更新后的目标",
+                            "status": "active",
+                            "started_at": "2026-07-18T10:00:00Z",
+                            "updated_at": "2026-07-18T10:05:00Z",
+                        }
+                    },
+                ],
+            ),
+        ):
+            first = build_stream_signature_snapshot(selected_session_name="codex:thread-goal", task_limit=1, session_task_limit=30)
+            second = build_stream_signature_snapshot(selected_session_name="codex:thread-goal", task_limit=1, session_task_limit=30)
+
+        self.assertNotEqual(first, second)
+        self.assertEqual("第一个目标", first[-2][0])
+        self.assertEqual("更新后的目标", second[-2][0])
+
+    def test_stream_state_exposes_paused_codex_goal_and_model(self) -> None:
+        paused_goal = {
+            "objective": "继续完善游戏内容",
+            "status": "paused",
+            "started_at": "2026-07-18T10:00:00Z",
+            "updated_at": "2026-07-18T10:05:00Z",
+            "time_used_seconds": "300",
+        }
+        model_state = {"model": "gpt-5.6-sol", "reasoning_effort": "ultra", "service_tier": "default"}
+        with (
+            patch("ui.mobile._load_raw_hub_state", return_value={"tasks": [], "agents": []}),
+            patch("ui.mobile._load_codex_thread_cached", return_value={"id": "thread-goal", "messages": []}),
+            patch("ui.mobile._codex_cached_rollout_payload", return_value={"goal": paused_goal, "model": model_state}),
+            patch("ui.mobile._codex_thread_task_payloads_cached", return_value=[]),
+            patch("ui.mobile._codex_thread_turn_count_cached", return_value=0),
+        ):
+            state = build_stream_state_snapshot(selected_session_name="codex:thread-goal", task_limit=1, session_task_limit=30)
+
+        self.assertEqual(paused_goal, state["selected_codex_thread"]["active_goal"])
+        self.assertEqual("gpt-5.6-sol", state["selected_codex_thread"]["model"])
+        self.assertEqual("ultra", state["selected_codex_thread"]["reasoning_effort"])
+
     def test_codex_thread_signature_tracks_related_local_command_updates(self) -> None:
         mobile._CODEX_THREAD_DETAIL_CACHE.clear()
         mobile._CODEX_THREAD_DETAIL_INFLIGHT.clear()
@@ -1859,6 +2090,7 @@ class MobileStateTests(unittest.TestCase):
                 patch("ui.mobile._load_raw_hub_state", return_value={"tasks": [], "agents": []}),
                 patch("ui.mobile.read_codex_thread") as read_thread,
                 patch("ui.mobile._start_codex_thread_detail_load") as start_load,
+                patch("ui.mobile._start_codex_rollout_refresh") as start_rollout,
             ):
                 signature = build_stream_signature_snapshot(selected_session_name="codex:thread-lazy", task_limit=1, session_task_limit=30)
         finally:
@@ -1867,7 +2099,128 @@ class MobileStateTests(unittest.TestCase):
 
         read_thread.assert_not_called()
         start_load.assert_called_once_with("thread-lazy")
+        self.assertGreaterEqual(start_rollout.call_count, 1)
+        self.assertTrue(all(item.args == ("thread-lazy",) for item in start_rollout.call_args_list))
         self.assertIn(("codex:thread-lazy", "0"), signature[1])
+
+    def test_stream_signature_reads_rollout_cache_without_synchronous_parse(self) -> None:
+        thread_id = "thread-rollout-cache"
+        mobile._CODEX_THREAD_DETAIL_CACHE.clear()
+        mobile._CODEX_THREAD_DETAIL_INFLIGHT.clear()
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+        mobile._CODEX_ROLLOUT_REFRESH_INFLIGHT.clear()
+        thread = {"id": thread_id, "messages": []}
+        try:
+            mobile._CODEX_THREAD_DETAIL_CACHE[thread_id] = {
+                "loaded_at": mobile.time.monotonic(),
+                "thread": thread,
+                "signature_parts_by_limit": {},
+                "task_payloads_by_limit": {},
+                "turn_count": 0,
+                "rollout_revision": 0,
+            }
+            mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE[thread_id] = {
+                **mobile._empty_codex_rollout_payload(),
+                "signature": ("", 0, 0),
+                "path": "",
+                "offset": 0,
+                "checked_at": mobile.time.monotonic(),
+                "goal": {
+                    "objective": "保持流畅",
+                    "status": "active",
+                    "started_at": "2026-07-19T10:00:00Z",
+                },
+                "model": {"model": "gpt-5.6-sol", "reasoning_effort": "ultra"},
+            }
+            with (
+                patch("ui.mobile._load_raw_hub_state", return_value={"tasks": [], "agents": []}),
+                patch("ui.mobile._codex_raw_view_image_payload") as parse_rollout,
+                patch("ui.mobile._start_codex_rollout_refresh") as start_refresh,
+            ):
+                signature = build_stream_signature_snapshot(
+                    selected_session_name=f"codex:{thread_id}",
+                    task_limit=1,
+                    session_task_limit=30,
+                )
+        finally:
+            mobile._CODEX_THREAD_DETAIL_CACHE.clear()
+            mobile._CODEX_THREAD_DETAIL_INFLIGHT.clear()
+            mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+            mobile._CODEX_ROLLOUT_REFRESH_INFLIGHT.clear()
+
+        parse_rollout.assert_not_called()
+        start_refresh.assert_not_called()
+        self.assertEqual("保持流畅", signature[-2][0])
+        self.assertEqual("gpt-5.6-sol", signature[-1][0])
+
+    def test_cached_rollout_payload_returns_stale_data_while_scheduling_refresh(self) -> None:
+        thread_id = "thread-stale-rollout"
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+        mobile._CODEX_ROLLOUT_PATH_CACHE.clear()
+        with TemporaryDirectory() as temp_dir:
+            rollout_path = Path(temp_dir) / f"rollout-{thread_id}.jsonl"
+            rollout_path.write_text("{}\n", encoding="utf-8")
+            mobile._CODEX_ROLLOUT_PATH_CACHE[thread_id] = rollout_path
+            mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE[thread_id] = {
+                **mobile._empty_codex_rollout_payload(),
+                "signature": (str(rollout_path), rollout_path.stat().st_mtime_ns, 0),
+                "path": str(rollout_path),
+                "offset": 0,
+                "checked_at": mobile.time.monotonic(),
+                "goal": {"objective": "旧缓存仍可见", "status": "paused"},
+            }
+            with patch("ui.mobile._start_codex_rollout_refresh") as start_refresh:
+                payload = mobile._codex_cached_rollout_payload(thread_id)
+
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+        mobile._CODEX_ROLLOUT_PATH_CACHE.clear()
+        self.assertEqual("旧缓存仍可见", payload["goal"]["objective"])
+        start_refresh.assert_called_once_with(thread_id)
+
+    def test_rollout_path_priming_keeps_existing_valid_path(self) -> None:
+        thread_id = "thread-existing-rollout-path"
+        mobile._CODEX_ROLLOUT_PATH_CACHE.clear()
+        with TemporaryDirectory() as temp_dir:
+            first_path = Path(temp_dir) / "first.jsonl"
+            second_path = Path(temp_dir) / "second.jsonl"
+            first_path.write_text("{}\n", encoding="utf-8")
+            second_path.write_text("{}\n", encoding="utf-8")
+            mobile._CODEX_ROLLOUT_PATH_CACHE[thread_id] = first_path
+
+            mobile._prime_codex_rollout_path(thread_id, second_path)
+
+            self.assertEqual(first_path, mobile._CODEX_ROLLOUT_PATH_CACHE[thread_id])
+        mobile._CODEX_ROLLOUT_PATH_CACHE.clear()
+
+    def test_rollout_refresh_invalidates_cached_thread_payloads(self) -> None:
+        thread_id = "thread-rollout-revision"
+        mobile._CODEX_THREAD_DETAIL_CACHE.clear()
+        mobile._CODEX_ROLLOUT_REFRESH_INFLIGHT.clear()
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE[thread_id] = {"signature": ("old", 1, 1)}
+        mobile._CODEX_THREAD_DETAIL_CACHE[thread_id] = {
+            "loaded_at": mobile.time.monotonic(),
+            "thread": {"id": thread_id, "messages": []},
+            "signature_parts_by_limit": {30: (("old",), 1)},
+            "task_payloads_by_limit": {30: [{"id": "old"}]},
+            "rollout_revision": 2,
+        }
+
+        def refresh_payload(_thread_id: str) -> dict[str, object]:
+            mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE[thread_id] = {"signature": ("new", 2, 2)}
+            return mobile._empty_codex_rollout_payload()
+
+        try:
+            with patch("ui.mobile._codex_raw_view_image_payload", side_effect=refresh_payload):
+                mobile._refresh_codex_rollout_cache_now(thread_id)
+            cached = mobile._CODEX_THREAD_DETAIL_CACHE[thread_id]
+        finally:
+            mobile._CODEX_THREAD_DETAIL_CACHE.clear()
+            mobile._CODEX_ROLLOUT_REFRESH_INFLIGHT.clear()
+            mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+
+        self.assertEqual(3, cached["rollout_revision"])
+        self.assertEqual({}, cached["signature_parts_by_limit"])
+        self.assertEqual({}, cached["task_payloads_by_limit"])
 
     def test_stream_signature_keeps_stale_codex_thread_while_refreshing(self) -> None:
         mobile._CODEX_THREAD_DETAIL_CACHE.clear()

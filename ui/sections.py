@@ -1885,6 +1885,29 @@ def _stream_live_execution_text(task: dict[str, object], *, started_at: object) 
     return _stream_elapsed_clock_text(max(0, int((now - parsed_started_at).total_seconds())))
 
 
+def _stream_model_display_name(value: object) -> str:
+    cleaned = str(value or "").strip()
+    if not cleaned:
+        return ""
+    short = cleaned[4:] if cleaned.lower().startswith("gpt-") else cleaned
+    parts = [part for part in short.split("-") if part]
+    if not parts:
+        return cleaned
+    return " ".join([parts[0], *(part.capitalize() for part in parts[1:])])
+
+
+def _stream_reasoning_effort_label(value: object) -> str:
+    cleaned = str(value or "").strip().lower()
+    return {
+        "minimal": "最低",
+        "low": "低",
+        "medium": "中",
+        "high": "高",
+        "xhigh": "极高",
+        "ultra": "极高",
+    }.get(cleaned, cleaned.capitalize() if cleaned else "")
+
+
 def _stream_footer_label(task: dict[str, object], status: str, t: Translator) -> str:
     status_text = _tr(t, f"bridge.task.status.{status}", status)
     duration_text = _stream_duration_text(task, t)
@@ -1947,6 +1970,7 @@ def _prepare_stream_render_context(mobile_state: dict[str, object], selected_ses
     visible_tasks = [task for task in tasks if isinstance(task, dict)]
     agents = mobile_state.get("agents") if isinstance(mobile_state.get("agents"), list) else []
     selected_codex_thread = mobile_state.get("selected_codex_thread") if isinstance(mobile_state.get("selected_codex_thread"), dict) else {}
+    active_goal = selected_codex_thread.get("active_goal") if isinstance(selected_codex_thread.get("active_goal"), dict) else {}
     default_agent_item = next((agent for agent in agents if isinstance(agent, dict)), {})
     sessions: dict[str, list[dict[str, object]]] = {}
     session_order: list[str] = []
@@ -2085,6 +2109,21 @@ def _prepare_stream_render_context(mobile_state: dict[str, object], selected_ses
     default_agent = str(status_task.get("agent_id") or default_agent_item.get("id") or "main") if isinstance(status_task, dict) else str(default_agent_item.get("id") or "main")
     default_backend = str(status_task.get("backend") or default_agent_item.get("backend") or "") if isinstance(status_task, dict) else str(default_agent_item.get("backend") or "")
     context_left_percent = _stream_context_left_percent(status_task.get("context_left_percent")) if isinstance(status_task, dict) else None
+    composer_model = str(
+        selected_codex_thread.get("model")
+        or (status_task.get("model") if isinstance(status_task, dict) else "")
+        or default_agent_item.get("model")
+        or ""
+    ).strip()
+    composer_reasoning_effort = str(
+        selected_codex_thread.get("reasoning_effort")
+        or (status_task.get("reasoning_effort") if isinstance(status_task, dict) else "")
+        or default_agent_item.get("reasoning_effort")
+        or ""
+    ).strip()
+    goal_thread_id = str(selected_codex_thread.get("id") or "").strip()
+    if not goal_thread_id and active_session.startswith("codex:"):
+        goal_thread_id = active_session[len("codex:") :].strip()
 
     return {
         "active_session": active_session,
@@ -2104,6 +2143,10 @@ def _prepare_stream_render_context(mobile_state: dict[str, object], selected_ses
         "default_backend": default_backend,
         "context_left_percent": context_left_percent,
         "codex_runtime_running": codex_runtime_running,
+        "active_goal": dict(active_goal),
+        "goal_thread_id": goal_thread_id,
+        "composer_model": composer_model,
+        "composer_reasoning_effort": composer_reasoning_effort,
     }
 
 def render_mobile_stream_shell(
@@ -2501,6 +2544,7 @@ def render_mobile_stream_composer_section(
     on_upload_image,
     on_remove_image,
     on_new_session=None,
+    on_goal_action=None,
 ) -> None:
     context = _prepare_stream_render_context(mobile_state, selected_session_name)
     _render_mobile_stream_composer(
@@ -2512,6 +2556,7 @@ def render_mobile_stream_composer_section(
         on_cancel_task,
         on_upload_image,
         on_remove_image,
+        on_goal_action,
     )
 
 def _render_mobile_stream_composer(
@@ -2523,6 +2568,7 @@ def _render_mobile_stream_composer(
     on_cancel_task,
     on_upload_image,
     on_remove_image,
+    on_goal_action=None,
 ) -> None:
     active_session = str(context.get("active_session") or "default")
     queued_composer_tasks = [task for task in context.get("queued_composer_tasks", []) if isinstance(task, dict)]
@@ -2533,6 +2579,15 @@ def _render_mobile_stream_composer(
     default_agent = str(context.get("default_agent") or "main")
     default_backend = str(context.get("default_backend") or "")
     context_left_percent = context.get("context_left_percent")
+    active_goal = context.get("active_goal") if isinstance(context.get("active_goal"), dict) else {}
+    goal_objective = _stream_text(active_goal.get("objective"), limit=4000)
+    goal_status = str(active_goal.get("status") or "").strip().lower()
+    goal_started_at = str(active_goal.get("started_at") or "").strip()
+    goal_thread_id = str(context.get("goal_thread_id") or "").strip()
+    goal_time_used_seconds = str(active_goal.get("time_used_seconds") or "").strip()
+    show_goal = bool(goal_objective and goal_status in {"active", "paused"})
+    composer_model = _stream_model_display_name(context.get("composer_model"))
+    composer_reasoning_effort = _stream_reasoning_effort_label(context.get("composer_reasoning_effort"))
 
     async def submit_composer(input_box: UIElementLike, session: str, agent: str, backend: str) -> None:
         prompt = str(input_box.value or "")
@@ -2546,10 +2601,109 @@ def _render_mobile_stream_composer(
         if submitted is not False:
             input_box.set_value("")
 
+    async def submit_goal_action(action: str, objective: str = "") -> bool:
+        if on_goal_action is None or not goal_thread_id:
+            return False
+        submitted = on_goal_action(action, goal_thread_id, objective)
+        if inspect.isawaitable(submitted):
+            submitted = await submitted
+        return submitted is not False
+
     composer_zone_classes = "cb-composer-zone" if active_session else "cb-composer-zone hidden"
     with ui.element("div").classes(composer_zone_classes):
         with ui.element("div").classes("cb-composer-inner"):
-            with ui.element("div").classes("cb-composer-box"):
+            goal_edit_dialog = None
+            goal_delete_dialog = None
+            if show_goal and on_goal_action is not None and goal_thread_id:
+                with ui.dialog() as goal_edit_dialog, _dialog_card(ui, "cb-composer-goal-dialog"):
+                    ui.label(_tr(t, "ui.web.mobile.goal_edit_title", "编辑目标")).classes("cb-composer-goal-dialog-title")
+                    goal_edit_input = ui.textarea(
+                        label=_tr(t, "ui.web.mobile.goal_edit_label", "目标内容"),
+                    ).props("autogrow outlined").classes("w-full cb-composer-goal-edit-input")
+                    goal_edit_input.set_value(goal_objective)
+
+                    async def save_goal_edit() -> None:
+                        objective = str(goal_edit_input.value or "").strip()
+                        if objective and await submit_goal_action("edit", objective):
+                            goal_edit_dialog.close()
+
+                    with ui.row().classes("w-full justify-end gap-2"):
+                        ui.button(_tr(t, "ui.button.cancel", "取消"), on_click=goal_edit_dialog.close).props("flat")
+                        ui.button(_tr(t, "ui.button.save", "保存"), on_click=save_goal_edit, icon="check").props("unelevated")
+                with ui.dialog() as goal_delete_dialog, _dialog_card(ui, "cb-composer-goal-dialog"):
+                    ui.label(_tr(t, "ui.web.mobile.goal_delete_title", "删除目标？")).classes("cb-composer-goal-dialog-title")
+                    ui.label(
+                        _tr(t, "ui.web.mobile.goal_delete_description", "删除后，Codex 将不再继续追踪这个目标。")
+                    ).classes("cb-composer-goal-dialog-description")
+
+                    async def delete_goal() -> None:
+                        if await submit_goal_action("delete", goal_objective):
+                            goal_delete_dialog.close()
+
+                    with ui.row().classes("w-full justify-end gap-2"):
+                        ui.button(_tr(t, "ui.button.cancel", "取消"), on_click=goal_delete_dialog.close).props("flat")
+                        ui.button(_tr(t, "ui.button.delete", "删除"), on_click=delete_goal, icon="delete_outline", color="negative").props("unelevated")
+            if show_goal:
+                with ui.element("details").props(f"data-goal-details=1 data-goal-status={goal_status}").classes("cb-composer-goal"):
+                    with ui.element("summary").classes("cb-composer-goal-summary"):
+                        ui.element("span").classes("cb-composer-goal-icon")
+                        goal_title = (
+                            _tr(t, "ui.web.mobile.paused_goal", "已暂停的目标")
+                            if goal_status == "paused"
+                            else _tr(t, "ui.web.mobile.active_goal", "进行中的目标")
+                        )
+                        ui.label(goal_title).classes("cb-composer-goal-title")
+                        ui.label(goal_objective).classes("cb-composer-goal-objective")
+                        if goal_status == "paused" and goal_time_used_seconds.isdigit():
+                            ui.label(_stream_elapsed_clock_text(int(goal_time_used_seconds))).classes("cb-composer-goal-elapsed")
+                        elif goal_started_at:
+                            client_started_at = _stream_client_time(goal_started_at, assume_utc_naive=False)
+                            elapsed_text = _stream_live_execution_text(
+                                {"source": "codex-app-server"},
+                                started_at=goal_started_at,
+                            )
+                            ui.label(elapsed_text).props(f'data-started-at="{client_started_at}"').classes("cb-composer-goal-elapsed cb-stream-live-elapsed")
+                        if on_goal_action is not None and goal_thread_id:
+                            async def toggle_goal() -> None:
+                                await submit_goal_action("resume" if goal_status == "paused" else "pause", goal_objective)
+
+                            with ui.row().classes("items-center gap-0 cb-composer-goal-actions"):
+                                edit_label = _tr(t, "ui.web.mobile.goal_edit", "编辑目标")
+                                ui.button(
+                                    "",
+                                    on_click=goal_edit_dialog.open if goal_edit_dialog is not None else None,
+                                    icon="edit",
+                                    color=None,
+                                ).props(f'flat dense round title="{edit_label}" aria-label="{edit_label}" data-goal-action=edit').classes("cb-composer-goal-action").on(
+                                    "click", js_handler="(event) => event.stopPropagation()"
+                                )
+                                toggle_label = (
+                                    _tr(t, "ui.web.mobile.goal_resume", "恢复目标")
+                                    if goal_status == "paused"
+                                    else _tr(t, "ui.web.mobile.goal_pause", "暂停目标")
+                                )
+                                ui.button(
+                                    "",
+                                    on_click=toggle_goal,
+                                    icon="play_circle_outline" if goal_status == "paused" else "pause_circle_outline",
+                                    color=None,
+                                ).props(
+                                    f'flat dense round title="{toggle_label}" aria-label="{toggle_label}" '
+                                    f'data-goal-action={"resume" if goal_status == "paused" else "pause"}'
+                                ).classes("cb-composer-goal-action").on("click", js_handler="(event) => event.stopPropagation()")
+                                delete_label = _tr(t, "ui.web.mobile.goal_delete", "删除目标")
+                                ui.button(
+                                    "",
+                                    on_click=goal_delete_dialog.open if goal_delete_dialog is not None else None,
+                                    icon="delete_outline",
+                                    color=None,
+                                ).props(f'flat dense round title="{delete_label}" aria-label="{delete_label}" data-goal-action=delete').classes("cb-composer-goal-action").on(
+                                    "click", js_handler="(event) => event.stopPropagation()"
+                                )
+                        ui.element("span").classes("cb-composer-goal-chevron")
+                    ui.label(goal_objective).classes("cb-composer-goal-detail")
+            composer_box_classes = "cb-composer-box cb-composer-box-has-goal" if show_goal else "cb-composer-box"
+            with ui.element("div").classes(composer_box_classes):
                 if queued_composer_tasks:
                     with ui.element("div").classes("cb-composer-queue-track"):
                         for queued_task in queued_composer_tasks:
@@ -2623,6 +2777,13 @@ def _render_mobile_stream_composer(
                                 with ui.element("span").classes("cb-context-meter-track"):
                                     ui.element("span").classes("cb-context-meter-fill").style(f"width: {context_left_percent}%")
                                 ui.label(meter_label).classes("cb-context-meter-label")
+                        if composer_model:
+                            model_props = f'data-composer-model="{quote(str(context.get("composer_model") or ""), safe="")}"'
+                            with ui.element("div").props(model_props).classes("cb-composer-model-indicator"):
+                                ui.element("span").classes("cb-composer-model-icon")
+                                ui.label(composer_model).classes("cb-composer-model-name")
+                                if composer_reasoning_effort:
+                                    ui.label(composer_reasoning_effort).classes("cb-composer-model-effort")
                         if latest_cancelable_task_id and latest_cancel_target_id:
                             stop_label = _tr(t, "ui.web.mobile.cancel_task", "停止任务")
                             ui.button(
@@ -2663,6 +2824,7 @@ def render_mobile_stream_section(
     on_upload_image,
     on_remove_image,
     on_new_session=None,
+    on_goal_action=None,
 ) -> None:
     context = _prepare_stream_render_context(mobile_state, selected_session_name)
     active_session = str(context.get("active_session") or "default")
@@ -2679,6 +2841,7 @@ def render_mobile_stream_section(
             on_cancel_task,
             on_upload_image,
             on_remove_image,
+            on_goal_action,
         ),
     )
 

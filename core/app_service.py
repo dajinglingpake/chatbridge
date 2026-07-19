@@ -5,7 +5,7 @@ import json
 import os
 import traceback
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 import subprocess
@@ -44,6 +44,7 @@ from core.state_models import HubAgentSnapshot, HubTask, JsonObject, WeixinConve
 from core.bridge_notifier import broadcast_bridge_notice_by_kind
 from core.codex_desktop_control import (
     CodexDesktopControlError,
+    control_codex_desktop_thread_goal,
     interrupt_codex_desktop_thread,
     send_codex_desktop_thread_message,
 )
@@ -86,6 +87,7 @@ ACTION_RUNNER_ENV = "CHATBRIDGE_SERVICE_ACTION_RUNNER"
 class ServiceResult:
     ok: bool
     message: str
+    payload: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -417,6 +419,46 @@ def send_codex_thread_message(
     return ServiceResult(
         ok=True,
         message=f"Codex 历史会话已接收消息：{cleaned_thread_id} | {action}：{result.turn_id}",
+    )
+
+
+def control_codex_thread_goal(
+    thread_id: str,
+    action: str,
+    *,
+    objective: str = "",
+    timeout_seconds: float = 15.0,
+) -> ServiceResult:
+    cleaned_thread_id = str(thread_id or "").strip()
+    cleaned_action = str(action or "").strip().lower()
+    if not cleaned_thread_id:
+        return ServiceResult(ok=False, message="目标操作失败：thread_id 不能为空")
+    action_labels = {
+        "pause": "暂停",
+        "resume": "恢复",
+        "edit": "编辑",
+        "delete": "删除",
+    }
+    action_label = action_labels.get(cleaned_action)
+    if action_label is None:
+        return ServiceResult(ok=False, message=f"目标操作失败：不支持的操作 {cleaned_action or '-'}")
+    try:
+        result = control_codex_desktop_thread_goal(
+            cleaned_thread_id,
+            cleaned_action,
+            objective=objective,
+            timeout_seconds=timeout_seconds,
+        )
+    except CodexDesktopControlError as exc:
+        return ServiceResult(ok=False, message=f"{action_label}目标失败：{exc}")
+    return ServiceResult(
+        ok=True,
+        message=f"已{action_label} Codex 目标：{cleaned_thread_id}",
+        payload={
+            "action": result.action,
+            "goal": dict(result.goal),
+            "interrupted_turn_id": result.interrupted_turn_id,
+        },
     )
 
 

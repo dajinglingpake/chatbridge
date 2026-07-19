@@ -210,6 +210,41 @@ class AppServiceConversationTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("desktop unavailable", result.message)
 
+    def test_control_codex_thread_goal_uses_desktop_bridge(self) -> None:
+        bridge_result = SimpleNamespace(
+            action="pause",
+            goal={"objective": "继续目标", "status": "paused"},
+            interrupted_turn_id="turn-003",
+        )
+        with patch.object(app_service, "control_codex_desktop_thread_goal", return_value=bridge_result) as control_goal:
+            result = app_service.control_codex_thread_goal(
+                " thread-001 ",
+                "pause",
+                objective=" 继续目标 ",
+                timeout_seconds=9,
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual("paused", result.payload["goal"]["status"])
+        self.assertEqual("turn-003", result.payload["interrupted_turn_id"])
+        control_goal.assert_called_once_with(
+            "thread-001",
+            "pause",
+            objective=" 继续目标 ",
+            timeout_seconds=9,
+        )
+
+    def test_control_codex_thread_goal_reports_desktop_bridge_failure(self) -> None:
+        with patch.object(
+            app_service,
+            "control_codex_desktop_thread_goal",
+            side_effect=app_service.CodexDesktopControlError("desktop unavailable"),
+        ):
+            result = app_service.control_codex_thread_goal("thread-001", "delete")
+
+        self.assertFalse(result.ok)
+        self.assertIn("desktop unavailable", result.message)
+
     def test_submit_hub_task_includes_images(self) -> None:
         requests: list[tuple[str, dict[str, object]]] = []
 

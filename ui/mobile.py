@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import copy
 from dataclasses import dataclass
 import hashlib
 import heapq
@@ -57,6 +58,11 @@ MOBILE_NO_STORE_PATHS = ("/mobile", "/mobile-link", "/mobile-ui")
 _MARKDOWN_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)\r\n]+)\)")
 _MARKDOWN_IMAGE_LINK_RE = re.compile(r"(?<!!)\[[^\]]+\]\(([^)\r\n]+?\.(?:png|jpe?g|gif|webp|bmp)(?:[?#][^)\r\n]*)?)\)", re.IGNORECASE)
 _LOCAL_IMAGE_PATH_RE = re.compile(r"(?<![\w:/\\])(?:[A-Za-z]:[\\/][^\r\n`*<>|]+?\.(?:png|jpe?g|gif|webp|bmp)|/[^\r\n`*<>|]+?\.(?:png|jpe?g|gif|webp|bmp))", re.IGNORECASE)
+_CODEX_GOAL_CONTEXT_RE = re.compile(r'<codex_internal_context\s+source=["\']goal["\']>', re.IGNORECASE)
+_CODEX_GOAL_OBJECTIVE_RE = re.compile(
+    r"<(?:untrusted_)?objective>\s*(.*?)\s*</(?:untrusted_)?objective>",
+    re.IGNORECASE | re.DOTALL,
+)
 _CODEX_THREADS_CACHE: dict[str, object] = {"loaded_at": 0.0, "payload": {"threads": [], "error": ""}}
 _CODEX_THREAD_DETAIL_CACHE: dict[str, dict[str, object]] = {}
 _CODEX_THREAD_DETAIL_INFLIGHT: set[str] = set()
@@ -68,6 +74,8 @@ _RAW_STREAM_INDEX_CACHE: dict[str, object] = {"key": None, "index": None}
 _RAW_STREAM_SIDEBAR_CACHE: dict[str, object] = {"key": None, "state": None}
 _CODEX_VIEW_IMAGE_PREVIEW_CACHE: dict[str, dict[str, object]] = {}
 _CODEX_ROLLOUT_PATH_CACHE: dict[str, Path] = {}
+_CODEX_ROLLOUT_REFRESH_INFLIGHT: set[str] = set()
+_CODEX_ROLLOUT_PARSE_LOCKS: dict[str, threading.Lock] = {}
 MOBILE_ASYNC_ACTIONS = {
     "restart",
     "restart-bridge",
@@ -319,6 +327,8 @@ def build_stream_signature_snapshot(
         session_task_limit=session_task_limit,
     )
     task_parts = [_raw_hub_task_signature_part(task) for task in window.tasks]
+    goal_signature: tuple[str, ...] = ()
+    model_signature: tuple[str, ...] = ()
     selected_codex_thread_id = codex_thread_id_from_session_name(selected_session_name)
     if selected_codex_thread_id:
         selected_limit = _safe_limit(session_task_limit, MOBILE_SESSION_TASK_LIMIT)
@@ -334,6 +344,18 @@ def build_stream_signature_snapshot(
             and _raw_clean_text(task, "id") not in window_task_ids
         ]
         task_parts = list(codex_task_parts) + related_task_parts + task_parts
+        rollout_state = _codex_cached_rollout_payload(selected_codex_thread_id)
+        goal_state = _copy_codex_goal_state(rollout_state.get("goal"))
+        if goal_state.get("status") in {"active", "paused"}:
+            goal_signature = tuple(
+                goal_state.get(key, "")
+                for key in ("objective", "status", "started_at", "updated_at", "time_used_seconds")
+            )
+        model_state = _copy_codex_model_state(rollout_state.get("model"))
+        model_signature = tuple(
+            model_state.get(key, "")
+            for key in ("model", "reasoning_effort", "service_tier", "updated_at")
+        )
 
     selected_session = selected_session_name.strip()
     if selected_session:
@@ -347,6 +369,8 @@ def build_stream_signature_snapshot(
         counts_part,
         session_counts_part,
         tuple(task_parts),
+        goal_signature,
+        model_signature,
     )
 
 def _copy_stream_sidebar_state(state: dict[str, object]) -> dict[str, object]:
@@ -1015,6 +1039,7 @@ def _raw_task_payload(raw: dict[str, object], *, stream_order: int = 0) -> dict[
         "session_name": _raw_task_session_name(raw),
         "workdir": _raw_clean_text(raw, "workdir"),
         "model": _raw_clean_text(raw, "model"),
+        "reasoning_effort": _raw_clean_text(raw, "reasoning_effort"),
         "status": _raw_clean_text(raw, "status", "queued") or "queued",
         "stream_order": stream_order,
         "created_at": _mobile_display_time(_raw_clean_text(raw, "created_at"), assume_utc_naive=assume_utc_naive),
@@ -1085,6 +1110,7 @@ def _raw_agent_payloads(raw_state: dict[str, object]) -> list[dict[str, object]]
                 "name": str(item.get("name") or agent_id).strip() or agent_id,
                 "backend": str(item.get("backend") or "").strip(),
                 "model": str(item.get("model") or "").strip(),
+                "reasoning_effort": str(item.get("reasoning_effort") or "").strip(),
                 "status": str(runtime.get("status") or "idle").strip() if isinstance(runtime, dict) else "idle",
                 "queue_size": _raw_int(runtime.get("queue_size")) if isinstance(runtime, dict) else 0,
             }
@@ -1237,6 +1263,7 @@ def _task_payload(task: HubTask, *, stream_order: int = 0) -> dict[str, object]:
         "session_name": task.session_name or "default",
         "workdir": task.workdir,
         "model": task.model,
+        "reasoning_effort": task.reasoning_effort,
         "status": task.status or "queued",
         "stream_order": stream_order,
         "created_at": _mobile_display_time(task.created_at, assume_utc_naive=assume_utc_naive),
@@ -1466,6 +1493,48 @@ def _codex_sessions_root() -> Path:
     codex_home = Path(raw_codex_home).expanduser() if raw_codex_home else Path.home() / ".codex"
     return codex_home / "sessions"
 
+
+def _empty_codex_rollout_payload() -> dict[str, object]:
+    return {
+        "previews": {},
+        "outputs": {},
+        "output_segments": {},
+        "image_refs": {},
+        "turn_times": {},
+        "reasoning_times": {},
+        "commands": {},
+        "goal": {},
+        "model": {},
+    }
+
+
+def _copy_codex_rollout_payload(value: object) -> dict[str, object]:
+    cached = value if isinstance(value, dict) else {}
+    return {
+        "previews": _copy_preview_map(cached.get("previews")),
+        "outputs": {
+            str(turn_id): str(output)
+            for turn_id, output in (cached.get("outputs") or {}).items()
+        } if isinstance(cached.get("outputs"), dict) else {},
+        "output_segments": _copy_codex_output_segments_by_turn(cached.get("output_segments")),
+        "image_refs": _copy_codex_image_refs(cached.get("image_refs")),
+        "turn_times": _copy_codex_turn_times(cached.get("turn_times")),
+        "reasoning_times": _copy_codex_reasoning_times(cached.get("reasoning_times")),
+        "commands": _copy_codex_commands(cached.get("commands")),
+        "goal": _copy_codex_goal_state(cached.get("goal")),
+        "model": _copy_codex_model_state(cached.get("model")),
+    }
+
+
+def _codex_rollout_parse_lock(thread_id: str) -> threading.Lock:
+    with _CODEX_THREAD_DETAIL_LOCK:
+        lock = _CODEX_ROLLOUT_PARSE_LOCKS.get(thread_id)
+        if lock is None:
+            lock = threading.Lock()
+            _CODEX_ROLLOUT_PARSE_LOCKS[thread_id] = lock
+        return lock
+
+
 def _find_codex_rollout_jsonl(thread_id: str) -> Path | None:
     cleaned = re.sub(r"[^A-Za-z0-9_.-]", "", str(thread_id or "").strip())
     if not cleaned:
@@ -1489,15 +1558,15 @@ def _find_codex_rollout_jsonl(thread_id: str) -> Path | None:
 def _codex_raw_view_image_payload(thread_id: str) -> dict[str, object]:
     cleaned = str(thread_id or "").strip()
     if not cleaned:
-        return {
-            "previews": {},
-            "outputs": {},
-            "output_segments": {},
-            "image_refs": {},
-            "turn_times": {},
-            "reasoning_times": {},
-            "commands": {},
-        }
+        return _empty_codex_rollout_payload()
+    with _codex_rollout_parse_lock(cleaned):
+        return _codex_raw_view_image_payload_unlocked(cleaned)
+
+
+def _codex_raw_view_image_payload_unlocked(thread_id: str) -> dict[str, object]:
+    cleaned = str(thread_id or "").strip()
+    if not cleaned:
+        return _empty_codex_rollout_payload()
     path = _find_codex_rollout_jsonl(cleaned)
     try:
         path_signature = (str(path), path.stat().st_mtime_ns, path.stat().st_size) if path else ("", 0, 0)
@@ -1506,19 +1575,8 @@ def _codex_raw_view_image_payload(thread_id: str) -> dict[str, object]:
         path = None
     cached = _CODEX_VIEW_IMAGE_PREVIEW_CACHE.get(cleaned)
     if isinstance(cached, dict) and cached.get("signature") == path_signature:
-        return {
-            "previews": _copy_preview_map(cached.get("previews")),
-            "outputs": {
-                str(turn_id): str(output)
-                for turn_id, output in (cached.get("outputs") or {}).items()
-            } if isinstance(cached.get("outputs"), dict) else {},
-            "output_segments": _copy_codex_output_segments_by_turn(cached.get("output_segments")),
-            "image_refs": _copy_codex_image_refs(cached.get("image_refs")),
-            "turn_times": _copy_codex_turn_times(cached.get("turn_times")),
-            "reasoning_times": _copy_codex_reasoning_times(cached.get("reasoning_times")),
-            "commands": _copy_codex_commands(cached.get("commands")),
-        }
-    parser_state = cached.get("parser_state") if isinstance(cached, dict) else None
+        return _copy_codex_rollout_payload(cached)
+    parser_state = copy.deepcopy(cached.get("parser_state")) if isinstance(cached, dict) else None
     cached_offset = int(cached.get("offset") or 0) if isinstance(cached, dict) else 0
     can_resume = (
         isinstance(parser_state, dict)
@@ -1536,6 +1594,9 @@ def _codex_raw_view_image_payload(thread_id: str) -> dict[str, object]:
         reasoning_times_by_turn = parser_state.get("reasoning_times_by_turn")
         commands_by_turn = parser_state.get("commands_by_turn")
         pending_exec_commands = parser_state.get("pending_exec_commands")
+        goal_state = parser_state.get("goal_state")
+        goal_native_seen = parser_state.get("goal_native_seen")
+        model_state = parser_state.get("model_state")
         can_resume = all(
             (
                 isinstance(previews_by_turn, dict),
@@ -1547,6 +1608,9 @@ def _codex_raw_view_image_payload(thread_id: str) -> dict[str, object]:
                 isinstance(reasoning_times_by_turn, dict),
                 isinstance(commands_by_turn, dict),
                 isinstance(pending_exec_commands, dict),
+                isinstance(goal_state, dict),
+                isinstance(goal_native_seen, bool),
+                isinstance(model_state, dict),
             )
         )
     if not can_resume:
@@ -1560,6 +1624,9 @@ def _codex_raw_view_image_payload(thread_id: str) -> dict[str, object]:
         reasoning_times_by_turn: dict[str, list[dict[str, str]]] = {}
         commands_by_turn: dict[str, list[dict[str, object]]] = {}
         pending_exec_commands: dict[str, list[dict[str, object]]] = {}
+        goal_state: dict[str, str] = {}
+        goal_native_seen = False
+        model_state: dict[str, str] = {}
     processed_offset = cached_offset
     if path is not None:
         try:
@@ -1579,6 +1646,7 @@ def _codex_raw_view_image_payload(thread_id: str) -> dict[str, object]:
                     except (json.JSONDecodeError, UnicodeDecodeError):
                         continue
                     payload = item.get("payload") if isinstance(item, dict) and isinstance(item.get("payload"), dict) else {}
+                    record_type = str(item.get("type") or "").strip() if isinstance(item, dict) else ""
                     metadata = payload.get("internal_chat_message_metadata_passthrough")
                     turn_id = str(
                         (metadata.get("turn_id") if isinstance(metadata, dict) else "")
@@ -1587,6 +1655,9 @@ def _codex_raw_view_image_payload(thread_id: str) -> dict[str, object]:
                     ).strip()
                     event_type = str(payload.get("type") or "")
                     record_at = str(item.get("timestamp") or "").strip() if isinstance(item, dict) else ""
+                    turn_context_model = _codex_turn_context_model_state(record_type, payload, record_at=record_at)
+                    if turn_context_model:
+                        model_state = turn_context_model
                     if turn_id and record_at:
                         turn_times = turn_times_by_turn.setdefault(turn_id, {"started_at": "", "finished_at": ""})
                         if event_type in {"task_started", "user_message"} or (event_type == "message" and payload.get("role") == "user"):
@@ -1596,6 +1667,44 @@ def _codex_raw_view_image_payload(thread_id: str) -> dict[str, object]:
                         phase = str(payload.get("phase") or "").strip()
                         if phase == "final_answer" and event_type in {"agent_message", "message"}:
                             turn_times["finished_at"] = record_at
+                    if not goal_native_seen:
+                        goal_objective = _codex_goal_context_objective(payload)
+                        if goal_objective:
+                            started_at = (
+                                str(goal_state.get("started_at") or "").strip()
+                                if str(goal_state.get("status") or "") == "active"
+                                else record_at
+                            )
+                            goal_state = {
+                                "objective": goal_objective,
+                                "status": "active",
+                                "started_at": started_at or record_at,
+                                "updated_at": record_at,
+                                "finished_at": "",
+                            }
+                        goal_tool_event = _codex_goal_tool_event(payload)
+                        goal_action = str(goal_tool_event.get("action") or "")
+                        if goal_action == "create":
+                            goal_state = {
+                                "objective": str(goal_tool_event.get("objective") or "").strip(),
+                                "status": "active",
+                                "started_at": record_at,
+                                "updated_at": record_at,
+                                "finished_at": "",
+                            }
+                        elif goal_action == "update":
+                            goal_status = str(goal_tool_event.get("status") or "").strip().lower()
+                            if goal_status in {"complete", "blocked"}:
+                                goal_state = {
+                                    **goal_state,
+                                    "status": goal_status,
+                                    "updated_at": record_at,
+                                    "finished_at": record_at,
+                                }
+                    native_goal_state = _codex_native_goal_event(payload, thread_id=cleaned, record_at=record_at)
+                    if native_goal_state:
+                        goal_state = native_goal_state
+                        goal_native_seen = True
                     if (
                         isinstance(item, dict)
                         and str(item.get("type") or "") == "response_item"
@@ -1802,10 +1911,23 @@ def _codex_raw_view_image_payload(thread_id: str) -> dict[str, object]:
         if processed_offset >= final_path_signature[2]
         else (final_path_signature[0], final_path_signature[1], processed_offset)
     )
+    latest_cached = _CODEX_VIEW_IMAGE_PREVIEW_CACHE.get(cleaned)
+    latest_goal_state = _copy_codex_goal_state(latest_cached.get("goal")) if isinstance(latest_cached, dict) else {}
+    latest_goal_updated_at = str(latest_goal_state.get("updated_at") or "").strip()
+    parsed_goal_updated_at = str(goal_state.get("updated_at") or "").strip()
+    latest_goal_time = _stream_time_sort_key(latest_goal_updated_at)
+    parsed_goal_time = _stream_time_sort_key(parsed_goal_updated_at)
+    if latest_goal_updated_at and (
+        not parsed_goal_updated_at
+        or (latest_goal_time[0] == 0 and (parsed_goal_time[0] != 0 or latest_goal_time[1] > parsed_goal_time[1]))
+    ):
+        goal_state = latest_goal_state
+        goal_native_seen = goal_native_seen or latest_goal_state.get("native") == "1"
     _CODEX_VIEW_IMAGE_PREVIEW_CACHE[cleaned] = {
         "signature": cached_signature,
         "path": str(path or ""),
         "offset": processed_offset,
+        "checked_at": time.monotonic(),
         "parser_state": {
             "previews_by_turn": previews_by_turn,
             "events_by_turn": events_by_turn,
@@ -1816,6 +1938,9 @@ def _codex_raw_view_image_payload(thread_id: str) -> dict[str, object]:
             "reasoning_times_by_turn": reasoning_times_by_turn,
             "commands_by_turn": commands_by_turn,
             "pending_exec_commands": pending_exec_commands,
+            "goal_state": goal_state,
+            "goal_native_seen": goal_native_seen,
+            "model_state": model_state,
         },
         "previews": {
             turn_id: [dict(preview) for preview in previews]
@@ -1827,16 +1952,116 @@ def _codex_raw_view_image_payload(thread_id: str) -> dict[str, object]:
         "turn_times": _copy_codex_turn_times(turn_times_by_turn),
         "reasoning_times": _copy_codex_reasoning_times(reasoning_times_by_turn),
         "commands": _copy_codex_commands(commands_by_turn),
+        "goal": _copy_codex_goal_state(goal_state),
+        "model": _copy_codex_model_state(model_state),
     }
-    return {
-        "previews": _copy_preview_map(previews_by_turn),
-        "outputs": dict(outputs_by_turn),
-        "output_segments": _copy_codex_output_segments_by_turn(output_segments_by_turn),
-        "image_refs": _copy_codex_image_refs(image_refs),
-        "turn_times": _copy_codex_turn_times(turn_times_by_turn),
-        "reasoning_times": _copy_codex_reasoning_times(reasoning_times_by_turn),
-        "commands": _copy_codex_commands(commands_by_turn),
-    }
+    return _copy_codex_rollout_payload(_CODEX_VIEW_IMAGE_PREVIEW_CACHE[cleaned])
+
+
+def _prime_codex_rollout_path(thread_id: str, path_value: object) -> None:
+    cleaned_thread_id = str(thread_id or "").strip()
+    path_text = str(path_value or "").strip()
+    if not cleaned_thread_id or not path_text:
+        return
+    existing = _CODEX_ROLLOUT_PATH_CACHE.get(cleaned_thread_id)
+    try:
+        if isinstance(existing, Path) and existing.is_file():
+            return
+    except OSError:
+        pass
+    path = Path(path_text).expanduser()
+    try:
+        if path.is_file():
+            _CODEX_ROLLOUT_PATH_CACHE[cleaned_thread_id] = path
+    except OSError:
+        return
+
+
+def _codex_rollout_refresh_needed(thread_id: str) -> bool:
+    cleaned_thread_id = str(thread_id or "").strip()
+    if not cleaned_thread_id:
+        return False
+    cached = _CODEX_VIEW_IMAGE_PREVIEW_CACHE.get(cleaned_thread_id)
+    cached_path = str(cached.get("path") or "").strip() if isinstance(cached, dict) else ""
+    path = Path(cached_path) if cached_path else _CODEX_ROLLOUT_PATH_CACHE.get(cleaned_thread_id)
+    if not isinstance(path, Path):
+        checked_at = float(cached.get("checked_at") or 0.0) if isinstance(cached, dict) else 0.0
+        return not cached or time.monotonic() - checked_at > CODEX_THREAD_CACHE_SECONDS
+    try:
+        path_signature = (str(path), path.stat().st_mtime_ns, path.stat().st_size)
+    except OSError:
+        checked_at = float(cached.get("checked_at") or 0.0) if isinstance(cached, dict) else 0.0
+        return not cached or time.monotonic() - checked_at > CODEX_THREAD_CACHE_SECONDS
+    return not isinstance(cached, dict) or cached.get("signature") != path_signature
+
+
+def _invalidate_codex_thread_rollout_cache(thread_id: str) -> None:
+    with _CODEX_THREAD_DETAIL_LOCK:
+        cached = _CODEX_THREAD_DETAIL_CACHE.get(thread_id)
+        if not isinstance(cached, dict):
+            return
+        cached["rollout_revision"] = int(cached.get("rollout_revision") or 0) + 1
+        cached["signature_parts_by_limit"] = {}
+        cached["task_payloads_by_limit"] = {}
+
+
+def _claim_codex_rollout_refresh(thread_id: str) -> bool:
+    with _CODEX_THREAD_DETAIL_LOCK:
+        if thread_id in _CODEX_ROLLOUT_REFRESH_INFLIGHT:
+            return False
+        _CODEX_ROLLOUT_REFRESH_INFLIGHT.add(thread_id)
+        return True
+
+
+def _refresh_codex_rollout_cache_now(thread_id: str, *, claimed: bool = False) -> dict[str, object]:
+    cleaned_thread_id = str(thread_id or "").strip()
+    if not cleaned_thread_id:
+        return _empty_codex_rollout_payload()
+    if not claimed and not _claim_codex_rollout_refresh(cleaned_thread_id):
+        return _copy_codex_rollout_payload(_CODEX_VIEW_IMAGE_PREVIEW_CACHE.get(cleaned_thread_id))
+    cached_before = _CODEX_VIEW_IMAGE_PREVIEW_CACHE.get(cleaned_thread_id)
+    signature_before = cached_before.get("signature") if isinstance(cached_before, dict) else None
+    try:
+        payload = _codex_raw_view_image_payload(cleaned_thread_id)
+        cached_after = _CODEX_VIEW_IMAGE_PREVIEW_CACHE.get(cleaned_thread_id)
+        signature_after = cached_after.get("signature") if isinstance(cached_after, dict) else None
+        if signature_after != signature_before:
+            _invalidate_codex_thread_rollout_cache(cleaned_thread_id)
+        return payload
+    finally:
+        with _CODEX_THREAD_DETAIL_LOCK:
+            _CODEX_ROLLOUT_REFRESH_INFLIGHT.discard(cleaned_thread_id)
+
+
+def _start_codex_rollout_refresh(thread_id: str) -> None:
+    cleaned_thread_id = str(thread_id or "").strip()
+    if not cleaned_thread_id or not _claim_codex_rollout_refresh(cleaned_thread_id):
+        return
+    thread = threading.Thread(
+        target=_refresh_codex_rollout_cache_now,
+        kwargs={"thread_id": cleaned_thread_id, "claimed": True},
+        daemon=True,
+        name=f"codex-rollout-detail-{cleaned_thread_id[:12]}",
+    )
+    thread.start()
+
+
+def _codex_cached_rollout_payload(thread_id: str, *, refresh: bool = True) -> dict[str, object]:
+    cleaned_thread_id = str(thread_id or "").strip()
+    if not cleaned_thread_id:
+        return _empty_codex_rollout_payload()
+    cached = _CODEX_VIEW_IMAGE_PREVIEW_CACHE.get(cleaned_thread_id)
+    payload = _copy_codex_rollout_payload(cached)
+    if refresh and _codex_rollout_refresh_needed(cleaned_thread_id):
+        known_path = bool(
+            (isinstance(cached, dict) and str(cached.get("path") or "").strip())
+            or isinstance(_CODEX_ROLLOUT_PATH_CACHE.get(cleaned_thread_id), Path)
+        )
+        with _CODEX_THREAD_DETAIL_LOCK:
+            detail_cached = isinstance(_CODEX_THREAD_DETAIL_CACHE.get(cleaned_thread_id), dict)
+        if known_path or not detail_cached:
+            _start_codex_rollout_refresh(cleaned_thread_id)
+    return payload
 
 
 def _codex_custom_tool_view_image_path(payload: dict[str, object]) -> str:
@@ -2008,6 +2233,44 @@ def _codex_javascript_string_property(source: str, key: str) -> str:
         parsed_value = _codex_javascript_string_literal(source, value_start)
         return parsed_value[0].strip() if parsed_value is not None else ""
     return ""
+
+
+def _codex_goal_tool_event(payload: dict[str, object]) -> dict[str, str]:
+    event_type = str(payload.get("type") or "").strip()
+    if event_type == "function_call":
+        tool_name = str(payload.get("name") or "").strip().rsplit("__", 1)[-1]
+        if tool_name not in {"create_goal", "update_goal"}:
+            return {}
+        arguments = payload.get("arguments")
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                arguments = {}
+        arguments = arguments if isinstance(arguments, dict) else {}
+        return {
+            "action": "create" if tool_name == "create_goal" else "update",
+            "objective": str(arguments.get("objective") or "").strip(),
+            "status": str(arguments.get("status") or "").strip().lower(),
+        }
+    if event_type != "custom_tool_call":
+        return {}
+    source = str(payload.get("input") or "")
+    create_calls = _codex_javascript_call_arguments(source, "tools.create_goal")
+    if create_calls:
+        return {
+            "action": "create",
+            "objective": _codex_javascript_string_property(create_calls[0], "objective"),
+            "status": "active",
+        }
+    update_calls = _codex_javascript_call_arguments(source, "tools.update_goal")
+    if update_calls:
+        return {
+            "action": "update",
+            "objective": "",
+            "status": _codex_javascript_string_property(update_calls[0], "status").lower(),
+        }
+    return {}
 
 
 def _codex_javascript_skip_space_and_comments(source: str, cursor: int) -> int:
@@ -2196,6 +2459,131 @@ def _copy_codex_image_refs(value: object) -> dict[str, dict[str, object]]:
     }
 
 
+def _copy_codex_goal_state(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        key: str(value.get(key) or "").strip()
+        for key in (
+            "objective",
+            "status",
+            "started_at",
+            "updated_at",
+            "finished_at",
+            "tokens_used",
+            "time_used_seconds",
+            "native",
+        )
+        if str(value.get(key) or "").strip()
+    }
+
+
+def _copy_codex_model_state(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        key: str(value.get(key) or "").strip()
+        for key in ("model", "reasoning_effort", "service_tier", "updated_at")
+        if str(value.get(key) or "").strip()
+    }
+
+
+def _codex_epoch_time(value: object, fallback: str = "") -> str:
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        return str(fallback or "").strip()
+    if timestamp <= 0:
+        return str(fallback or "").strip()
+    try:
+        return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    except (OSError, OverflowError, ValueError):
+        return str(fallback or "").strip()
+
+
+def _codex_native_goal_state(
+    value: object,
+    *,
+    record_at: str = "",
+    status: str = "",
+) -> dict[str, str]:
+    goal = value if isinstance(value, dict) else {}
+    normalized_status = str(status or goal.get("status") or "").strip().lower()
+    if not normalized_status:
+        return {}
+    updated_at = _codex_epoch_time(goal.get("updatedAt"), record_at)
+    started_at = _codex_epoch_time(goal.get("createdAt"), record_at or updated_at)
+    normalized = {
+        "objective": str(goal.get("objective") or "").strip(),
+        "status": normalized_status,
+        "started_at": started_at,
+        "updated_at": updated_at or record_at,
+        "finished_at": updated_at if normalized_status in {"paused", "complete", "blocked", "cleared"} else "",
+        "tokens_used": str(goal.get("tokensUsed") or "").strip(),
+        "time_used_seconds": str(goal.get("timeUsedSeconds") or "").strip(),
+        "native": "1",
+    }
+    return _copy_codex_goal_state(normalized)
+
+
+def _codex_native_goal_event(payload: dict[str, object], *, thread_id: str, record_at: str) -> dict[str, str]:
+    event_type = str(payload.get("type") or "").strip()
+    event_thread_id = str(payload.get("threadId") or "").strip()
+    if event_thread_id and event_thread_id != thread_id:
+        return {}
+    if event_type == "thread_goal_cleared":
+        return _codex_native_goal_state({}, record_at=record_at, status="cleared")
+    if event_type != "thread_goal_updated":
+        return {}
+    return _codex_native_goal_state(payload.get("goal"), record_at=record_at)
+
+
+def _codex_turn_context_model_state(record_type: str, payload: dict[str, object], *, record_at: str) -> dict[str, str]:
+    if str(record_type or "").strip() != "turn_context":
+        return {}
+    model = str(payload.get("model") or "").strip()
+    if not model:
+        return {}
+    return _copy_codex_model_state(
+        {
+            "model": model,
+            "reasoning_effort": str(payload.get("reasoning_effort") or payload.get("effort") or "").strip(),
+            "service_tier": str(payload.get("service_tier") or "").strip(),
+            "updated_at": record_at,
+        }
+    )
+
+
+def update_codex_goal_cache(thread_id: str, goal: object) -> None:
+    cleaned_thread_id = str(thread_id or "").strip()
+    if not cleaned_thread_id:
+        return
+    cached = _CODEX_VIEW_IMAGE_PREVIEW_CACHE.get(cleaned_thread_id)
+    if not isinstance(cached, dict):
+        cached = {
+            **_empty_codex_rollout_payload(),
+            "signature": None,
+            "path": "",
+            "offset": 0,
+            "checked_at": 0.0,
+        }
+        _CODEX_VIEW_IMAGE_PREVIEW_CACHE[cleaned_thread_id] = cached
+    raw_goal = goal if isinstance(goal, dict) else {}
+    goal_state = _codex_native_goal_state(
+        raw_goal,
+        record_at=_state_now(),
+        status=str(raw_goal.get("status") or "cleared"),
+    )
+    cached["goal"] = goal_state
+    parser_state = cached.get("parser_state")
+    if isinstance(parser_state, dict):
+        parser_state["goal_state"] = goal_state
+        parser_state["goal_native_seen"] = True
+    _invalidate_codex_thread_rollout_cache(cleaned_thread_id)
+    if _codex_rollout_refresh_needed(cleaned_thread_id):
+        _start_codex_rollout_refresh(cleaned_thread_id)
+
+
 def _codex_view_image_bytes(thread_id: str, reference: str) -> tuple[str, bytes] | None:
     cached = _CODEX_VIEW_IMAGE_PREVIEW_CACHE.get(thread_id)
     image_refs = cached.get("image_refs") if isinstance(cached, dict) and isinstance(cached.get("image_refs"), dict) else {}
@@ -2345,6 +2733,16 @@ def _codex_raw_message_text(payload: dict[str, object]) -> str:
         ]
         return "\n\n".join(parts).strip()
     return str(payload.get("text") or "").strip()
+
+
+def _codex_goal_context_objective(payload: dict[str, object]) -> str:
+    if str(payload.get("type") or "") != "message" or str(payload.get("role") or "") != "user":
+        return ""
+    text = _codex_raw_message_text(payload)
+    if not _CODEX_GOAL_CONTEXT_RE.search(text):
+        return ""
+    match = _CODEX_GOAL_OBJECTIVE_RE.search(text)
+    return str(match.group(1) or "").strip() if match else ""
 
 
 def _codex_raw_reasoning_text(payload: dict[str, object]) -> str:
@@ -2558,6 +2956,20 @@ def _merge_codex_thread_local_timeline(
 
     return merged
 
+def _apply_codex_rollout_state(thread_id: str, thread: dict[str, object]) -> None:
+    rollout_state = _codex_cached_rollout_payload(thread_id)
+    goal_state = _copy_codex_goal_state(rollout_state.get("goal"))
+    if goal_state.get("status") in {"active", "paused"} and goal_state.get("objective"):
+        thread["active_goal"] = goal_state
+    else:
+        thread.pop("active_goal", None)
+    model_state = _copy_codex_model_state(rollout_state.get("model"))
+    for key in ("model", "reasoning_effort", "service_tier"):
+        value = str(model_state.get(key) or "").strip()
+        if value:
+            thread[key] = value
+
+
 def _build_mobile_state(
     *,
     selected_session_name: str = "",
@@ -2592,6 +3004,7 @@ def _build_mobile_state(
         selected_codex_thread: dict[str, object] = {}
         if selected_codex_thread_id:
             selected_codex_thread = _load_codex_thread_cached(selected_codex_thread_id)
+            _apply_codex_rollout_state(selected_codex_thread_id, selected_codex_thread)
             selected_limit = _safe_limit(session_task_limit, MOBILE_SESSION_TASK_LIMIT)
             codex_thread_tasks = _codex_thread_task_payloads_cached(selected_codex_thread_id, selected_codex_thread, limit=selected_limit)
             raw_tasks = raw_state.get("tasks") if isinstance(raw_state.get("tasks"), list) else []
@@ -2655,6 +3068,7 @@ def _build_mobile_state(
     selected_codex_thread: dict[str, object] = {}
     if selected_codex_thread_id:
         selected_codex_thread = _load_codex_thread_cached(selected_codex_thread_id)
+        _apply_codex_rollout_state(selected_codex_thread_id, selected_codex_thread)
         selected_limit = _safe_limit(session_task_limit, MOBILE_SESSION_TASK_LIMIT)
         codex_thread_tasks = _codex_thread_task_payloads_cached(selected_codex_thread_id, selected_codex_thread, limit=selected_limit)
         codex_thread_tasks = _merge_codex_thread_local_timeline(
@@ -2772,6 +3186,7 @@ def _build_stream_state(
     selected_codex_thread: dict[str, object] = {}
     if selected_codex_thread_id:
         selected_codex_thread = _load_codex_thread_cached(selected_codex_thread_id)
+        _apply_codex_rollout_state(selected_codex_thread_id, selected_codex_thread)
         selected_limit = _safe_limit(session_task_limit, MOBILE_SESSION_TASK_LIMIT)
         codex_thread_tasks = _codex_thread_task_payloads_cached(selected_codex_thread_id, selected_codex_thread, limit=selected_limit)
         raw_tasks = raw_state.get("tasks") if isinstance(raw_state.get("tasks"), list) else []
@@ -2931,14 +3346,21 @@ def _load_codex_thread_now(cleaned_thread_id: str) -> dict[str, object]:
     except Exception as exc:  # noqa: BLE001
         thread = {"id": cleaned_thread_id, "messages": [], "error": str(exc)}
     with _CODEX_THREAD_DETAIL_LOCK:
+        previous = _CODEX_THREAD_DETAIL_CACHE.get(cleaned_thread_id)
         _CODEX_THREAD_DETAIL_CACHE[cleaned_thread_id] = {
             "loaded_at": time.monotonic(),
             "thread": thread,
             "signature_parts_by_limit": {},
             "task_payloads_by_limit": {},
             "turn_count": None,
+            "rollout_revision": int(previous.get("rollout_revision") or 0) if isinstance(previous, dict) else 0,
         }
-        _CODEX_THREAD_DETAIL_INFLIGHT.discard(cleaned_thread_id)
+    _prime_codex_rollout_path(cleaned_thread_id, thread.get("path"))
+    try:
+        _refresh_codex_rollout_cache_now(cleaned_thread_id)
+    finally:
+        with _CODEX_THREAD_DETAIL_LOCK:
+            _CODEX_THREAD_DETAIL_INFLIGHT.discard(cleaned_thread_id)
     return dict(thread)
 
 
@@ -2965,27 +3387,30 @@ def _codex_thread_signature_parts_cached(
         return (), 0
     safe_limit = _safe_limit(limit, MOBILE_SESSION_TASK_LIMIT)
     thread = _load_codex_thread_cached(cleaned_thread_id)
-    cached = _CODEX_THREAD_DETAIL_CACHE.get(cleaned_thread_id)
-    if cached and time.monotonic() - float(cached.get("loaded_at") or 0.0) <= CODEX_THREAD_CACHE_SECONDS:
-        signatures = cached.get("signature_parts_by_limit")
-        if isinstance(signatures, dict):
-            cached_signature = signatures.get(safe_limit)
-            if isinstance(cached_signature, tuple) and len(cached_signature) == 2:
-                parts, turn_count = cached_signature
-                if isinstance(parts, tuple):
-                    return parts, int(turn_count or 0)
+    with _CODEX_THREAD_DETAIL_LOCK:
+        cached = _CODEX_THREAD_DETAIL_CACHE.get(cleaned_thread_id)
+        rollout_revision = int(cached.get("rollout_revision") or 0) if isinstance(cached, dict) else 0
+        if cached and time.monotonic() - float(cached.get("loaded_at") or 0.0) <= CODEX_THREAD_CACHE_SECONDS:
+            signatures = cached.get("signature_parts_by_limit")
+            if isinstance(signatures, dict):
+                cached_signature = signatures.get(safe_limit)
+                if isinstance(cached_signature, tuple) and len(cached_signature) == 2:
+                    parts, turn_count = cached_signature
+                    if isinstance(parts, tuple):
+                        return parts, int(turn_count or 0)
     codex_thread_tasks = _codex_thread_task_payloads_cached(cleaned_thread_id, thread, limit=safe_limit)
     signature = (
         tuple(_payload_task_signature_part(task) for task in codex_thread_tasks),
         _codex_thread_turn_count_cached(cleaned_thread_id, thread),
     )
-    cached = _CODEX_THREAD_DETAIL_CACHE.get(cleaned_thread_id)
-    if cached is not None:
-        signatures = cached.get("signature_parts_by_limit")
-        if not isinstance(signatures, dict):
-            signatures = {}
-            cached["signature_parts_by_limit"] = signatures
-        signatures[safe_limit] = signature
+    with _CODEX_THREAD_DETAIL_LOCK:
+        cached = _CODEX_THREAD_DETAIL_CACHE.get(cleaned_thread_id)
+        if isinstance(cached, dict) and int(cached.get("rollout_revision") or 0) == rollout_revision:
+            signatures = cached.get("signature_parts_by_limit")
+            if not isinstance(signatures, dict):
+                signatures = {}
+                cached["signature_parts_by_limit"] = signatures
+            signatures[safe_limit] = signature
     return signature
 
 
@@ -3355,6 +3780,7 @@ def _codex_thread_task_payloads_cached(thread_id: str, thread: dict[str, object]
     safe_limit = _safe_limit(limit, MOBILE_SESSION_TASK_LIMIT) if limit is not None else -1
     with _CODEX_THREAD_DETAIL_LOCK:
         cached = _CODEX_THREAD_DETAIL_CACHE.get(cleaned_thread_id)
+        rollout_revision = int(cached.get("rollout_revision") or 0) if isinstance(cached, dict) else 0
         payloads = cached.get("task_payloads_by_limit") if isinstance(cached, dict) else None
         cached_payload = payloads.get(safe_limit) if isinstance(payloads, dict) else None
         if isinstance(cached_payload, list):
@@ -3362,7 +3788,7 @@ def _codex_thread_task_payloads_cached(thread_id: str, thread: dict[str, object]
     tasks = _codex_thread_task_payloads(thread, limit=limit)
     with _CODEX_THREAD_DETAIL_LOCK:
         cached = _CODEX_THREAD_DETAIL_CACHE.get(cleaned_thread_id)
-        if isinstance(cached, dict):
+        if isinstance(cached, dict) and int(cached.get("rollout_revision") or 0) == rollout_revision:
             payloads = cached.get("task_payloads_by_limit")
             if not isinstance(payloads, dict):
                 payloads = {}
@@ -3379,7 +3805,7 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
     messages = thread.get("messages") if isinstance(thread.get("messages"), list) else []
     selected_turns, turn_order_lookup = _codex_thread_selected_turns(thread, limit)
     selected_turn_set = set(selected_turns)
-    raw_rollout_payload = _codex_raw_view_image_payload(thread_id)
+    raw_rollout_payload = _codex_cached_rollout_payload(thread_id)
     view_image_previews_by_turn = _copy_preview_map(raw_rollout_payload.get("previews"))
     raw_outputs = raw_rollout_payload.get("outputs")
     raw_output_with_images_by_turn = {
