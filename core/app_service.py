@@ -329,6 +329,7 @@ def submit_hub_task(
     sender_id: str = "",
     workdir: str = "",
     model: str = "",
+    reasoning_effort: str = "",
     images: list[str] | None = None,
     session_id: str = "",
 ) -> ServiceResult:
@@ -347,6 +348,7 @@ def submit_hub_task(
             "backend": backend.strip(),
             "workdir": workdir.strip(),
             "model": model.strip(),
+            "reasoning_effort": reasoning_effort.strip(),
             "session_id": session_id.strip(),
             "images": [str(item).strip() for item in (images or []) if str(item).strip()],
         },
@@ -406,6 +408,8 @@ def send_codex_thread_message(
     prompt: str,
     *,
     images: list[str] | None = None,
+    model: str = "",
+    reasoning_effort: str = "",
     timeout_seconds: float = 15.0,
 ) -> ServiceResult:
     cleaned_thread_id = str(thread_id or "").strip()
@@ -416,11 +420,15 @@ def send_codex_thread_message(
         return ServiceResult(ok=False, message="发送失败：消息内容不能为空")
     prompt_preview = " ".join(cleaned_prompt.split())[:240]
     image_count = len([item for item in (images or []) if str(item or "").strip()])
+    cleaned_model = str(model or "").strip()
+    cleaned_reasoning_effort = str(reasoning_effort or "").strip()
     try:
         result = send_codex_desktop_thread_message(
             cleaned_thread_id,
             cleaned_prompt,
             images=images,
+            model=cleaned_model,
+            reasoning_effort=cleaned_reasoning_effort,
             timeout_seconds=timeout_seconds,
         )
     except CodexDesktopControlError as exc:
@@ -431,6 +439,8 @@ def send_codex_thread_message(
             prompt_preview=prompt_preview,
             prompt_chars=len(cleaned_prompt),
             image_count=image_count,
+            model=cleaned_model,
+            reasoning_effort=cleaned_reasoning_effort,
             error=error,
         )
         return ServiceResult(ok=False, message=f"发送失败：{error}", payload={"error": error})
@@ -447,6 +457,8 @@ def send_codex_thread_message(
         prompt_preview=prompt_preview,
         prompt_chars=len(cleaned_prompt),
         image_count=image_count,
+        model=cleaned_model,
+        reasoning_effort=cleaned_reasoning_effort,
     )
     return ServiceResult(
         ok=True,
@@ -457,6 +469,9 @@ def send_codex_thread_message(
             "mode": result.mode,
             "client_user_message_id": client_user_message_id,
             "reconciled": reconciled,
+            "model": cleaned_model,
+            "reasoning_effort": cleaned_reasoning_effort,
+            "model_applied": bool(result.mode == "start" and cleaned_model),
         },
     )
 

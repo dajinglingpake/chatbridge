@@ -10,7 +10,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from ui.app import _codex_rollout_runtime_hint, _codex_rollout_runtime_snapshot, _codex_rollout_runtime_started_at, _load_persisted_stream_session, _normalize_stream_session_name, _persist_stream_session, _stream_initial_history_limit, _update_codex_thread_runtime_statuses, group_codex_threads_by_workspace
-from ui.sections import _prepare_stream_render_context, _stream_activity_render_window, _stream_client_time, _stream_display_time, _stream_image_is_previewable, _stream_markdown, _stream_model_display_name, _stream_reasoning_effort_label, _stream_task_sort_key, _stream_task_uses_utc_naive_time, _stream_text, _stream_time_delta_ms, _stream_timeline_items, render_mobile_stream_section
+from ui.sections import _prepare_stream_render_context, _stream_activity_render_window, _stream_client_time, _stream_display_time, _stream_image_is_previewable, _stream_markdown, _stream_model_display_name, _stream_reasoning_effort_label, _stream_task_sort_key, _stream_task_uses_utc_naive_time, _stream_text, _stream_time_delta_ms, _stream_timeline_items, render_mobile_stream_composer_section, render_mobile_stream_section
 
 
 class FakeElement:
@@ -57,6 +57,13 @@ class FakeElement:
     def set_value(self, value: object) -> "FakeElement":
         self.value = value
         return self
+
+    def set_options(self, options: list | dict, *, value: object = None) -> None:
+        self.attrs["options"] = options
+        self.value = value
+
+    def update(self) -> None:
+        return None
 
     def open(self) -> None:
         return None
@@ -109,6 +116,9 @@ class FakeUI:
 
     def input(self, *, label: str = "", placeholder: str = "") -> FakeElement:
         return self._element("input", label, placeholder=placeholder)
+
+    def select(self, options: list | dict, *, value=None, label: str = "", **kwargs) -> FakeElement:
+        return self._element("select", label, options=options, value=value, **kwargs).set_value(value)
 
     def upload(self, **kwargs) -> FakeElement:
         return self._element("upload", **kwargs)
@@ -3008,7 +3018,7 @@ class StreamComposerTests(unittest.TestCase):
         self.assertTrue(any("data-goal-action=delete" in item.props_text for item in goal_actions))
         self.assertEqual(1, len(model_indicators))
         self.assertEqual(["5.6 Sol"], model_labels)
-        self.assertEqual(["极高"], effort_labels)
+        self.assertEqual(["最高（自动调度子代理）"], effort_labels)
         self.assertEqual(1, len(composer_boxes))
         self.assertIn("cb-composer-box-has-goal", composer_boxes[0].class_text)
 
@@ -3059,7 +3069,78 @@ class StreamComposerTests(unittest.TestCase):
     def test_stream_model_labels_match_codex_composer_style(self) -> None:
         self.assertEqual("5.6 Sol", _stream_model_display_name("gpt-5.6-sol"))
         self.assertEqual("5 Codex", _stream_model_display_name("gpt-5-codex"))
-        self.assertEqual("极高", _stream_reasoning_effort_label("ultra"))
+        self.assertEqual("极高", _stream_reasoning_effort_label("xhigh"))
+        self.assertEqual("最高", _stream_reasoning_effort_label("max"))
+        self.assertEqual("最高（自动调度子代理）", _stream_reasoning_effort_label("ultra"))
+
+    def test_stream_model_preference_overrides_rollout_model(self) -> None:
+        context = _prepare_stream_render_context(
+            {
+                "agents": [{"id": "codex", "name": "Codex", "backend": "codex"}],
+                "tasks": [],
+                "selected_codex_thread": {
+                    "id": "thread-model",
+                    "model": "gpt-5.2",
+                    "reasoning_effort": "medium",
+                },
+                "composer_model_preference": {
+                    "model": "gpt-5.6-sol",
+                    "reasoning_effort": "ultra",
+                },
+            },
+            "codex:thread-model",
+        )
+
+        self.assertEqual("gpt-5.6-sol", context["composer_model"])
+        self.assertEqual("ultra", context["composer_reasoning_effort"])
+        self.assertTrue(context["composer_model_pending"])
+
+    def test_stream_composer_model_indicator_opens_switch_dialog(self) -> None:
+        ui = FakeUI()
+        render_mobile_stream_composer_section(
+            ui,
+            _translator,
+            {
+                "agents": [{"id": "codex", "name": "Codex", "backend": "codex"}],
+                "tasks": [],
+                "selected_codex_thread": {
+                    "id": "thread-model",
+                    "model": "gpt-5.6-sol",
+                    "reasoning_effort": "ultra",
+                },
+            },
+            "codex:thread-model",
+            [],
+            _noop,
+            _noop,
+            _noop,
+            _noop,
+            model_catalog=[
+                {
+                    "slug": "gpt-5.6-sol",
+                    "display_name": "GPT-5.6-Sol",
+                    "default_reasoning": "low",
+                    "reasoning_levels": ["low", "medium", "high", "ultra"],
+                },
+                {
+                    "slug": "gpt-5.4-mini",
+                    "display_name": "GPT-5.4-Mini",
+                    "default_reasoning": "medium",
+                    "reasoning_levels": ["low", "medium", "high"],
+                },
+            ],
+            on_model_change=_noop,
+        )
+
+        model_buttons = [item for item in ui.elements if item.kind == "button" and "cb-composer-model-indicator" in item.class_text]
+        model_selects = [item for item in ui.elements if item.kind == "select" and "cb-composer-model-select" in item.class_text]
+        effort_selects = [item for item in ui.elements if item.kind == "select" and "cb-composer-effort-select" in item.class_text]
+        switch_buttons = [item for item in ui.elements if "data-model-switch=1" in item.props_text]
+
+        self.assertEqual(1, len(model_buttons))
+        self.assertEqual("gpt-5.6-sol", model_selects[0].value)
+        self.assertEqual("ultra", effort_selects[0].value)
+        self.assertEqual(1, len(switch_buttons))
 
     def test_completed_codex_goal_is_not_rendered_in_composer(self) -> None:
         ui = FakeUI()
@@ -4316,6 +4397,11 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("_finish_stream_message_send(", submit_body)
         self.assertIn("client=context.client", submit_body)
         self.assertIn("images=images", submit_body)
+        self.assertIn("model=model", finish_body)
+        self.assertIn("reasoning_effort=reasoning_effort", finish_body)
+        self.assertIn("_prepare_stream_render_context(stream_state, cleaned_session_name)", submit_body)
+        self.assertIn("load_codex_model_catalog_cached", app_source)
+        self.assertIn('name="load Codex model catalog"', app_source)
         self.assertIn("return True", submit_body)
         self.assertNotIn("await asyncio.to_thread", submit_body)
         self.assertIn("async def submit_composer", sections_source)

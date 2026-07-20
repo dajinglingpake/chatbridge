@@ -180,16 +180,28 @@ def _message_expression(
     *,
     client_user_message_id: str,
     timeout_seconds: float,
+    model: str = "",
+    reasoning_effort: str = "",
 ) -> str:
     input_items: list[dict[str, str]] = [{"type": "text", "text": text}]
     input_items.extend({"type": "localImage", "path": image} for image in images)
     encoded_thread_id = json.dumps(thread_id, ensure_ascii=True)
     encoded_input = json.dumps(input_items, ensure_ascii=True)
     encoded_message_id = json.dumps(client_user_message_id, ensure_ascii=True)
+    encoded_model = json.dumps(str(model or "").strip(), ensure_ascii=True)
+    encoded_reasoning_effort = json.dumps(str(reasoning_effort or "").strip(), ensure_ascii=True)
     operation = f"""
     const threadId = {encoded_thread_id};
     const input = {encoded_input};
     const clientUserMessageId = {encoded_message_id};
+    const model = {encoded_model};
+    const reasoningEffort = {encoded_reasoning_effort};
+    const startTurn = async () => {{
+        const params = {{threadId, input, clientUserMessageId}};
+        if (model) params.model = model;
+        if (reasoningEffort) params.effort = reasoningEffort;
+        return request('turn/start', params);
+    }};
     const reconcileAcceptedMessage = async () => {{
         const recentResponse = await request('thread/turns/list', {{
             threadId,
@@ -229,11 +241,7 @@ def _message_expression(
             input,
             clientUserMessageId,
         }})
-        : await request('turn/start', {{
-            threadId,
-            input,
-            clientUserMessageId,
-        }});
+        : await startTurn();
     if (response?.error && activeTurnId) {{
         const refreshedTurnsResponse = await request('thread/turns/list', {{
             threadId,
@@ -257,11 +265,7 @@ def _message_expression(
                     input,
                     clientUserMessageId,
                 }})
-                : await request('turn/start', {{
-                    threadId,
-                    input,
-                    clientUserMessageId,
-                }});
+                : await startTurn();
         }}
     }}
     if (response?.error) {{
@@ -472,6 +476,8 @@ def send_codex_desktop_thread_message(
     text: str,
     *,
     images: list[str] | None = None,
+    model: str = "",
+    reasoning_effort: str = "",
     timeout_seconds: float = 15.0,
 ) -> CodexDesktopMessageResult:
     cleaned_thread_id = str(thread_id or "").strip()
@@ -490,6 +496,8 @@ def send_codex_desktop_thread_message(
         cleaned_images,
         client_user_message_id=client_user_message_id,
         timeout_seconds=timeout_seconds,
+        model=str(model or "").strip(),
+        reasoning_effort=str(reasoning_effort or "").strip(),
     )
     payload = _run_desktop_action(
         expression,

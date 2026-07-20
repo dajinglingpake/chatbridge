@@ -16,6 +16,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from core.app_service import cancel_hub_task, control_codex_thread_goal, delete_agent, interrupt_codex_thread, reset_weixin_conversation, run_named_action, run_repair_command, save_agent, schedule_named_action, send_codex_thread_message, set_weixin_notice_enabled, submit_hub_task, switch_active_account, switch_bridge_agent, switch_weixin_session_backend, terminate_external_agent
+from core.codex_model_catalog import load_codex_model_catalog_cached
 from core.navigation import PRIMARY_PAGES
 from core.shell_schema import APP_SHELL
 from core.dashboard import refresh_dashboard_cache
@@ -26,7 +27,7 @@ from runtime_stack import get_system_resource_usage
 from ui.mobile import MOBILE_UPLOAD_ROOT, _codex_custom_tool_exec_commands, _codex_custom_tool_names, build_mobile_access_url, build_mobile_qr_data_url, build_stream_sidebar_state_snapshot, build_stream_signature_snapshot, build_stream_state_snapshot, codex_thread_id_from_session_name, install_mobile_routes, is_mobile_access_authorized, load_codex_threads_page, stream_hub_state_file_signature, stream_qq_current_session_name, update_codex_goal_cache
 from ui.qr_login import install_qr_login_dialog
 from ui.qq_login import install_qq_login_dialog
-from ui.sections import STREAM_CODEX_INITIAL_HISTORY_LIMIT, STREAM_MANUAL_HISTORY_LIMIT, _stream_runtime_activity_text, render_diagnostics_section, render_home_section, render_mobile_section, render_mobile_stream_composer_section, render_mobile_stream_messages_section, render_mobile_stream_shell, render_sessions_section
+from ui.sections import STREAM_CODEX_INITIAL_HISTORY_LIMIT, STREAM_MANUAL_HISTORY_LIMIT, _prepare_stream_render_context, _stream_runtime_activity_text, render_diagnostics_section, render_home_section, render_mobile_section, render_mobile_stream_composer_section, render_mobile_stream_messages_section, render_mobile_stream_shell, render_sessions_section
 
 
 APP_DIR = Path(__file__).resolve().parent.parent
@@ -3148,8 +3149,19 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             font-size: 0.78rem;
             white-space: nowrap;
         }
+        button.cb-composer-model-indicator {
+            min-height: 1.75rem;
+            padding: 0 0.45rem !important;
+        }
+        button.cb-composer-model-indicator .q-btn__content {
+            flex-wrap: nowrap;
+            gap: 0.28rem;
+        }
         .cb-composer-model-indicator:hover {
             background: var(--cb-surface-muted);
+        }
+        .cb-composer-model-pending {
+            background: color-mix(in srgb, var(--cb-accent-bright) 10%, transparent);
         }
         .cb-composer-model-icon::before {
             content: "progress_activity";
@@ -3174,6 +3186,25 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         }
         .cb-composer-model-effort {
             color: var(--cb-accent-bright);
+        }
+        .cb-composer-model-chevron::before {
+            content: "expand_more";
+            font-family: "Material Icons";
+            font-size: 0.95rem;
+            color: var(--cb-muted);
+        }
+        .cb-composer-model-dialog {
+            width: min(30rem, calc(100vw - 2rem));
+            gap: 0.85rem;
+        }
+        .cb-composer-model-dialog-title {
+            color: var(--cb-ink);
+            font-size: 1.05rem;
+            font-weight: 700;
+        }
+        .cb-composer-model-dialog-hint {
+            color: var(--cb-muted);
+            font-size: 0.8rem;
         }
         .cb-composer-tool-button,
         .cb-composer-stop-button,
@@ -3447,6 +3478,10 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         "stream_sidebar_codex_runtime_probes": {},
         "stream_sidebar_codex_workspace_open": {},
         "stream_selected_codex_runtime_thread": {},
+        "stream_model_catalog": [],
+        "stream_model_catalog_error": "",
+        "stream_model_catalog_loading": False,
+        "stream_model_preferences": {},
         "system_resource_updated_at": 0.0,
     }
     state = _ClientState(state_defaults, lambda: context.client.storage)
@@ -3630,6 +3665,34 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         thread = state.get("stream_selected_codex_runtime_thread")
         return thread if isinstance(thread, dict) else {}
 
+    def _stream_model_catalog() -> list[dict[str, object]]:
+        catalog = state.get("stream_model_catalog")
+        return [dict(entry) for entry in catalog if isinstance(entry, dict)] if isinstance(catalog, list) else []
+
+    def _stream_model_preferences() -> dict[str, dict[str, str]]:
+        preferences = state.get("stream_model_preferences")
+        if not isinstance(preferences, dict):
+            preferences = {}
+            state["stream_model_preferences"] = preferences
+        return preferences
+
+    def _stream_model_preference(session_name: str) -> dict[str, str]:
+        preference = _stream_model_preferences().get(str(session_name or "").strip())
+        if not isinstance(preference, dict):
+            return {}
+        return {
+            key: str(preference.get(key) or "").strip()
+            for key in ("model", "reasoning_effort")
+            if str(preference.get(key) or "").strip()
+        }
+
+    def _apply_stream_model_preference(stream_state: dict[str, object], session_name: str) -> None:
+        preference = _stream_model_preference(session_name)
+        if preference:
+            stream_state["composer_model_preference"] = preference
+        else:
+            stream_state.pop("composer_model_preference", None)
+
     def _refresh_codex_runtime_statuses() -> tuple[bool, bool, bool]:
         sidebar_value = state.get("stream_sidebar_codex_threads")
         sidebar_threads = [thread for thread in sidebar_value if isinstance(thread, dict)] if isinstance(sidebar_value, list) else []
@@ -3734,10 +3797,12 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         )
         if session_name:
             _sync_selected_codex_runtime_status(stream_state)
+            _apply_stream_model_preference(stream_state, session_name)
             return stream_state
         inferred_session = _resolve_stream_active_session(stream_state)
         if inferred_session == "default":
             _sync_selected_codex_runtime_status(stream_state)
+            _apply_stream_model_preference(stream_state, inferred_session)
             return stream_state
         state["selected_session_name"] = inferred_session
         state["stream_force_bottom_session"] = inferred_session
@@ -3747,6 +3812,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             session_task_limit=_stream_session_task_limit(inferred_session),
         )
         _sync_selected_codex_runtime_status(stream_state)
+        _apply_stream_model_preference(stream_state, inferred_session)
         return stream_state
 
     def _stream_render_snapshot() -> tuple[dict[str, object], str]:
@@ -3839,6 +3905,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         )
         pending_images = tuple(_stream_pending_image_paths(active_session))
         selected_codex_thread = mobile_state.get("selected_codex_thread") if isinstance(mobile_state.get("selected_codex_thread"), dict) else {}
+        model_preference = mobile_state.get("composer_model_preference") if isinstance(mobile_state.get("composer_model_preference"), dict) else {}
         active_goal = selected_codex_thread.get("active_goal") if isinstance(selected_codex_thread.get("active_goal"), dict) else {}
         return (
             active_session,
@@ -3863,6 +3930,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                 str(selected_codex_thread.get(key) or "")
                 for key in ("model", "reasoning_effort", "service_tier", "runtime_status", "runtime_started_at")
             ),
+            tuple(str(model_preference.get(key) or "") for key in ("model", "reasoning_effort")),
             pending_images,
         )
 
@@ -3933,6 +4001,35 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             state["stream_preserve_top_session"] = ""
         scroll_stream_to_bottom(active_stream_session, force_bottom=force_bottom, preserve_top=preserve_top)
 
+    async def _load_stream_model_catalog(client) -> None:
+        try:
+            catalog = await asyncio.to_thread(load_codex_model_catalog_cached)
+            error = ""
+        except Exception as exc:  # noqa: BLE001
+            catalog = []
+            error = str(exc)
+        if getattr(client, "_deleted", False):
+            return
+        with client:
+            state["stream_model_catalog"] = catalog
+            state["stream_model_catalog_error"] = error
+            state["stream_model_catalog_loading"] = False
+            if state.get("active_page") == "stream":
+                stream_state = _stream_state_snapshot()
+                active_stream_session = _resolve_stream_active_session(stream_state)
+                state["stream_panel_render_snapshot"] = (stream_state, active_stream_session)
+                state["stream_composer_signature"] = _stream_composer_signature(stream_state, active_stream_session)
+                stream_composer_view.refresh()
+
+    def _ensure_stream_model_catalog(client) -> None:
+        if _stream_model_catalog() or bool(state.get("stream_model_catalog_loading")):
+            return
+        state["stream_model_catalog_loading"] = True
+        background_tasks.create(
+            _load_stream_model_catalog(client),
+            name="load Codex model catalog",
+        )
+
     @ui.refreshable
     def stream_composer_view() -> None:
         current_client = context.client
@@ -3951,6 +4048,8 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             _upload_stream_image,
             _remove_stream_image,
             on_goal_action=_control_stream_goal,
+            model_catalog=_stream_model_catalog(),
+            on_model_change=_set_stream_model,
         )
 
     @ui.refreshable
@@ -4361,6 +4460,8 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         codex_thread_id: str,
         codex_thread: dict[str, object],
         images: list[str],
+        model: str,
+        reasoning_effort: str,
     ) -> None:
         try:
             if codex_thread_id:
@@ -4369,6 +4470,8 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     codex_thread_id,
                     prompt,
                     images=images,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
                 )
             else:
                 result = await asyncio.to_thread(
@@ -4380,6 +4483,8 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     source="stream-web",
                     workdir=str(codex_thread.get("cwd") or ""),
                     session_id=codex_thread_id,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
                     images=images,
                 )
         except Exception as exc:
@@ -4436,6 +4541,11 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             stream_state = _stream_state_snapshot()
             selected_codex_thread = stream_state.get("selected_codex_thread")
             codex_thread = selected_codex_thread if isinstance(selected_codex_thread, dict) else {}
+        else:
+            stream_state = _stream_state_snapshot()
+        composer_context = _prepare_stream_render_context(stream_state, cleaned_session_name)
+        model = str(composer_context.get("composer_model") or "").strip()
+        reasoning_effort = str(composer_context.get("composer_reasoning_effort") or "").strip()
         images = _stream_pending_image_paths(cleaned_session_name)
         if codex_thread_id:
             ui.notify(
@@ -4456,8 +4566,48 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                 codex_thread_id=codex_thread_id,
                 codex_thread=codex_thread,
                 images=images,
+                model=model,
+                reasoning_effort=reasoning_effort,
             ),
             name=f"send stream message {cleaned_session_name}",
+        )
+        return True
+
+    def _set_stream_model(session_name: str, model: str, reasoning_effort: str) -> bool:
+        cleaned_session_name = str(session_name or "").strip()
+        cleaned_model = str(model or "").strip()
+        if not cleaned_session_name or not cleaned_model:
+            return False
+        entry = next(
+            (item for item in _stream_model_catalog() if str(item.get("slug") or "").strip() == cleaned_model),
+            None,
+        )
+        if entry is None:
+            _notify(t("ui.web.notify.model_not_available", "所选模型当前不可用"))
+            return False
+        supported_efforts = [
+            str(item or "").strip()
+            for item in (entry.get("reasoning_levels") or [])
+            if str(item or "").strip()
+        ]
+        cleaned_effort = str(reasoning_effort or "").strip()
+        if cleaned_effort not in supported_efforts:
+            cleaned_effort = str(entry.get("default_reasoning") or "").strip()
+        _stream_model_preferences()[cleaned_session_name] = {
+            "model": cleaned_model,
+            "reasoning_effort": cleaned_effort,
+        }
+        stream_state = _stream_state_snapshot()
+        active_stream_session = _resolve_stream_active_session(stream_state)
+        state["stream_panel_render_snapshot"] = (stream_state, active_stream_session)
+        state["stream_composer_signature"] = _stream_composer_signature(stream_state, active_stream_session)
+        ui.timer(0.01, stream_composer_view.refresh, once=True)
+        _notify(
+            t(
+                "ui.web.notify.model_switched",
+                "已选择模型 {model}，将在下一轮任务中生效",
+                model=cleaned_model,
+            )
         )
         return True
 
@@ -6461,6 +6611,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             if isinstance(installed_clients, set):
                 installed_clients.discard(str(getattr(client, "id", id(client))))
             if state["active_page"] == "stream":
+                _ensure_stream_model_catalog(client)
                 stream_state = _stream_state_snapshot()
                 active_stream_session = _resolve_stream_active_session(stream_state)
                 selected_stream_session = str(state["selected_session_name"] or "").strip()
@@ -6594,6 +6745,8 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         else:
             state["bridge_mode_selected"] = False
         apply_request_session(request)
+        if not _stream_model_catalog():
+            state["stream_model_catalog_loading"] = False
         _refresh_runtime_status_on_ui_entry()
         shell_view()
         content_view()
@@ -6614,6 +6767,8 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         state["bridge_mode_selected"] = False
         apply_request_page(request)
         apply_request_session(request)
+        if not _stream_model_catalog():
+            state["stream_model_catalog_loading"] = False
         shell_view()
         content_view()
         ui.run_javascript(f"window.__cbApplyTheme && window.__cbApplyTheme({state['theme']!r})")

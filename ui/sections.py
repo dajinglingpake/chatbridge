@@ -41,6 +41,8 @@ class UIElementLike(Protocol):
     def set_source(self, value: str) -> Self: ...
     def on_value_change(self, handler: Callable[[UIEventLike], None]) -> Self: ...
     def set_value(self, value: object) -> Self: ...
+    def set_options(self, options: list | dict, *, value: object = ...) -> None: ...
+    def update(self) -> None: ...
     def open(self) -> None: ...
     def close(self) -> None: ...
     def deactivate(self) -> None: ...
@@ -1896,16 +1898,20 @@ def _stream_model_display_name(value: object) -> str:
     return " ".join([parts[0], *(part.capitalize() for part in parts[1:])])
 
 
-def _stream_reasoning_effort_label(value: object) -> str:
+def _stream_reasoning_effort_label(value: object, t: Translator | None = None) -> str:
     cleaned = str(value or "").strip().lower()
-    return {
+    fallback = {
         "minimal": "最低",
         "low": "低",
         "medium": "中",
         "high": "高",
         "xhigh": "极高",
-        "ultra": "极高",
+        "max": "最高",
+        "ultra": "最高（自动调度子代理）",
     }.get(cleaned, cleaned.capitalize() if cleaned else "")
+    if not cleaned or t is None:
+        return fallback
+    return _tr(t, f"ui.web.mobile.reasoning_effort.{cleaned}", fallback)
 
 
 def _stream_footer_label(task: dict[str, object], status: str, t: Translator) -> str:
@@ -2135,14 +2141,17 @@ def _prepare_stream_render_context(mobile_state: dict[str, object], selected_ses
     default_agent = str(status_task.get("agent_id") or default_agent_item.get("id") or "main") if isinstance(status_task, dict) else str(default_agent_item.get("id") or "main")
     default_backend = str(status_task.get("backend") or default_agent_item.get("backend") or "") if isinstance(status_task, dict) else str(default_agent_item.get("backend") or "")
     context_left_percent = _stream_context_left_percent(status_task.get("context_left_percent")) if isinstance(status_task, dict) else None
+    model_preference = mobile_state.get("composer_model_preference") if isinstance(mobile_state.get("composer_model_preference"), dict) else {}
     composer_model = str(
-        selected_codex_thread.get("model")
+        model_preference.get("model")
+        or selected_codex_thread.get("model")
         or (status_task.get("model") if isinstance(status_task, dict) else "")
         or default_agent_item.get("model")
         or ""
     ).strip()
     composer_reasoning_effort = str(
-        selected_codex_thread.get("reasoning_effort")
+        model_preference.get("reasoning_effort")
+        or selected_codex_thread.get("reasoning_effort")
         or (status_task.get("reasoning_effort") if isinstance(status_task, dict) else "")
         or default_agent_item.get("reasoning_effort")
         or ""
@@ -2173,6 +2182,7 @@ def _prepare_stream_render_context(mobile_state: dict[str, object], selected_ses
         "goal_thread_id": goal_thread_id,
         "composer_model": composer_model,
         "composer_reasoning_effort": composer_reasoning_effort,
+        "composer_model_pending": bool(model_preference),
     }
 
 def render_mobile_stream_shell(
@@ -2571,6 +2581,8 @@ def render_mobile_stream_composer_section(
     on_remove_image,
     on_new_session=None,
     on_goal_action=None,
+    model_catalog: list[dict[str, object]] | None = None,
+    on_model_change=None,
 ) -> None:
     context = _prepare_stream_render_context(mobile_state, selected_session_name)
     _render_mobile_stream_composer(
@@ -2583,6 +2595,8 @@ def render_mobile_stream_composer_section(
         on_upload_image,
         on_remove_image,
         on_goal_action,
+        model_catalog or [],
+        on_model_change,
     )
 
 def _render_mobile_stream_composer(
@@ -2595,6 +2609,8 @@ def _render_mobile_stream_composer(
     on_upload_image,
     on_remove_image,
     on_goal_action=None,
+    model_catalog: list[dict[str, object]] | None = None,
+    on_model_change=None,
 ) -> None:
     active_session = str(context.get("active_session") or "default")
     queued_composer_tasks = [task for task in context.get("queued_composer_tasks", []) if isinstance(task, dict)]
@@ -2612,8 +2628,10 @@ def _render_mobile_stream_composer(
     goal_thread_id = str(context.get("goal_thread_id") or "").strip()
     goal_time_used_seconds = str(active_goal.get("time_used_seconds") or "").strip()
     show_goal = bool(goal_objective and goal_status in {"active", "paused"})
-    composer_model = _stream_model_display_name(context.get("composer_model"))
-    composer_reasoning_effort = _stream_reasoning_effort_label(context.get("composer_reasoning_effort"))
+    composer_model_value = str(context.get("composer_model") or "").strip()
+    composer_model = _stream_model_display_name(composer_model_value)
+    composer_reasoning_effort = _stream_reasoning_effort_label(context.get("composer_reasoning_effort"), t)
+    model_catalog = [dict(entry) for entry in (model_catalog or []) if isinstance(entry, dict)]
 
     async def submit_composer(input_box: UIElementLike, session: str, agent: str, backend: str) -> None:
         prompt = str(input_box.value or "")
@@ -2640,6 +2658,84 @@ def _render_mobile_stream_composer(
         with ui.element("div").classes("cb-composer-inner"):
             goal_edit_dialog = None
             goal_delete_dialog = None
+            model_dialog = None
+            if model_catalog and on_model_change is not None:
+                model_options = {
+                    str(entry.get("slug") or "").strip(): str(entry.get("display_name") or entry.get("slug") or "").strip()
+                    for entry in model_catalog
+                    if str(entry.get("slug") or "").strip()
+                }
+                initial_model = composer_model_value if composer_model_value in model_options else next(iter(model_options), "")
+
+                def model_entry(model: object) -> dict[str, object]:
+                    cleaned_model = str(model or "").strip()
+                    return next(
+                        (entry for entry in model_catalog if str(entry.get("slug") or "").strip() == cleaned_model),
+                        {},
+                    )
+
+                def effort_options(model: object) -> dict[str, str]:
+                    entry = model_entry(model)
+                    return {
+                        effort: _stream_reasoning_effort_label(effort, t)
+                        for effort in (
+                            str(item or "").strip()
+                            for item in (entry.get("reasoning_levels") or [])
+                        )
+                        if effort
+                    }
+
+                with ui.dialog() as model_dialog, _dialog_card(ui, "cb-composer-model-dialog"):
+                    ui.label(_tr(t, "ui.web.mobile.model_select_title", "选择模型")).classes("cb-composer-model-dialog-title")
+                    model_select = ui.select(
+                        model_options,
+                        value=initial_model or None,
+                        label=_tr(t, "ui.web.field.model", "模型"),
+                    ).props("outlined options-dense").classes("w-full cb-composer-model-select")
+                    initial_effort_options = effort_options(initial_model)
+                    current_effort = str(context.get("composer_reasoning_effort") or "").strip()
+                    initial_entry = model_entry(initial_model)
+                    initial_effort = (
+                        current_effort
+                        if current_effort in initial_effort_options
+                        else str(initial_entry.get("default_reasoning") or "").strip()
+                    )
+                    effort_select = ui.select(
+                        initial_effort_options,
+                        value=initial_effort if initial_effort in initial_effort_options else None,
+                        label=_tr(t, "ui.web.mobile.reasoning_effort", "推理强度"),
+                    ).props("outlined options-dense").classes("w-full cb-composer-effort-select")
+
+                    def sync_effort_options(event) -> None:
+                        selected_entry = model_entry(event.value)
+                        options = effort_options(event.value)
+                        selected_effort = str(selected_entry.get("default_reasoning") or "").strip()
+                        effort_select.set_options(
+                            options,
+                            value=selected_effort if selected_effort in options else next(iter(options), None),
+                        )
+
+                    model_select.on_value_change(sync_effort_options)
+                    ui.label(
+                        _tr(t, "ui.web.mobile.model_select_hint", "模型和推理强度将在下一轮任务中生效。")
+                    ).classes("cb-composer-model-dialog-hint")
+
+                    async def save_model_selection() -> None:
+                        selected_model = str(model_select.value or "").strip()
+                        selected_effort = str(effort_select.value or "").strip()
+                        submitted = on_model_change(active_session, selected_model, selected_effort)
+                        if inspect.isawaitable(submitted):
+                            submitted = await submitted
+                        if submitted is not False:
+                            model_dialog.close()
+
+                    with ui.row().classes("w-full justify-end gap-2"):
+                        ui.button(_tr(t, "ui.button.cancel", "取消"), on_click=model_dialog.close).props("flat")
+                        ui.button(
+                            _tr(t, "ui.web.mobile.model_switch", "切换模型"),
+                            on_click=save_model_selection,
+                            icon="check",
+                        ).props("unelevated data-model-switch=1")
             if show_goal and on_goal_action is not None and goal_thread_id:
                 with ui.dialog() as goal_edit_dialog, _dialog_card(ui, "cb-composer-goal-dialog"):
                     ui.label(_tr(t, "ui.web.mobile.goal_edit_title", "编辑目标")).classes("cb-composer-goal-dialog-title")
@@ -2803,13 +2899,28 @@ def _render_mobile_stream_composer(
                                 with ui.element("span").classes("cb-context-meter-track"):
                                     ui.element("span").classes("cb-context-meter-fill").style(f"width: {context_left_percent}%")
                                 ui.label(meter_label).classes("cb-context-meter-label")
-                        if composer_model:
-                            model_props = f'data-composer-model="{quote(str(context.get("composer_model") or ""), safe="")}"'
-                            with ui.element("div").props(model_props).classes("cb-composer-model-indicator"):
-                                ui.element("span").classes("cb-composer-model-icon")
-                                ui.label(composer_model).classes("cb-composer-model-name")
-                                if composer_reasoning_effort:
-                                    ui.label(composer_reasoning_effort).classes("cb-composer-model-effort")
+                        if composer_model or model_dialog is not None:
+                            model_props = (
+                                f'flat dense no-caps data-composer-model="{quote(composer_model_value, safe="")}" '
+                                f'title="{_tr(t, "ui.web.mobile.model_select_title", "选择模型")}"'
+                            )
+                            model_classes = "cb-composer-model-indicator"
+                            if bool(context.get("composer_model_pending")):
+                                model_classes += " cb-composer-model-pending"
+                            model_label = composer_model or _tr(t, "ui.web.mobile.model_select_title", "选择模型")
+                            if model_dialog is not None:
+                                with ui.button("", on_click=model_dialog.open, color=None).props(model_props).classes(model_classes):
+                                    ui.element("span").classes("cb-composer-model-icon")
+                                    ui.label(model_label).classes("cb-composer-model-name")
+                                    if composer_reasoning_effort:
+                                        ui.label(composer_reasoning_effort).classes("cb-composer-model-effort")
+                                    ui.element("span").classes("cb-composer-model-chevron")
+                            else:
+                                with ui.element("div").props(model_props).classes(model_classes):
+                                    ui.element("span").classes("cb-composer-model-icon")
+                                    ui.label(model_label).classes("cb-composer-model-name")
+                                    if composer_reasoning_effort:
+                                        ui.label(composer_reasoning_effort).classes("cb-composer-model-effort")
                         if latest_cancelable_task_id and latest_cancel_target_id:
                             stop_label = _tr(t, "ui.web.mobile.cancel_task", "停止任务")
                             ui.button(

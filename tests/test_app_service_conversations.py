@@ -194,6 +194,8 @@ class AppServiceConversationTests(unittest.TestCase):
                 " thread-001 ",
                 " continue ",
                 images=["C:/tmp/shot.png"],
+                model="gpt-5.6-sol",
+                reasoning_effort="ultra",
                 timeout_seconds=9,
             )
 
@@ -201,17 +203,22 @@ class AppServiceConversationTests(unittest.TestCase):
         self.assertIn("已追加到运行中的轮次", result.message)
         self.assertIn("turn-002", result.message)
         self.assertTrue(result.payload["reconciled"])
+        self.assertFalse(result.payload["model_applied"])
         self.assertEqual("chatbridge:message-002", result.payload["client_user_message_id"])
         send.assert_called_once_with(
             "thread-001",
             "continue",
             images=["C:/tmp/shot.png"],
+            model="gpt-5.6-sol",
+            reasoning_effort="ultra",
             timeout_seconds=9,
         )
         append_log.assert_called_once()
         self.assertEqual("codex_thread_message", append_log.call_args.args[0])
         self.assertEqual("succeeded", append_log.call_args.kwargs["status"])
         self.assertTrue(append_log.call_args.kwargs["reconciled"])
+        self.assertEqual("gpt-5.6-sol", append_log.call_args.kwargs["model"])
+        self.assertEqual("ultra", append_log.call_args.kwargs["reasoning_effort"])
 
     def test_send_codex_thread_message_reports_desktop_bridge_failure(self) -> None:
         with (
@@ -305,12 +312,16 @@ class AppServiceConversationTests(unittest.TestCase):
                 agent_id="main",
                 prompt="inspect image",
                 session_name="focus",
+                model="gpt-5.6-sol",
+                reasoning_effort="high",
                 images=[" C:/tmp/a.png ", "", "C:/tmp/b.jpg"],
             )
 
         self.assertTrue(result.ok)
         self.assertEqual("submit_task", requests[0][0])
         self.assertEqual(["C:/tmp/a.png", "C:/tmp/b.jpg"], requests[0][1]["images"])
+        self.assertEqual("gpt-5.6-sol", requests[0][1]["model"])
+        self.assertEqual("high", requests[0][1]["reasoning_effort"])
 
 
 if __name__ == "__main__":

@@ -28,6 +28,8 @@ class CodexDesktopControlTests(unittest.TestCase):
             ["C:/tmp/shot.png"],
             client_user_message_id="chatbridge:message-001",
             timeout_seconds=5,
+            model="gpt-5.6-sol",
+            reasoning_effort="ultra",
         )
 
         self.assertIn("thread/turns/list", expression)
@@ -40,6 +42,10 @@ class CodexDesktopControlTests(unittest.TestCase):
         self.assertIn("reconciled: true", expression)
         self.assertIn('"type": "localImage"', expression)
         self.assertIn("chatbridge:message-001", expression)
+        self.assertIn("params.model = model", expression)
+        self.assertIn("params.effort = reasoningEffort", expression)
+        self.assertIn('"gpt-5.6-sol"', expression)
+        self.assertIn('"ultra"', expression)
         self.assertNotIn("process.kill", expression)
 
     def test_goal_expression_uses_native_goal_protocol_and_interrupts_pause(self) -> None:
@@ -126,6 +132,8 @@ class CodexDesktopControlTests(unittest.TestCase):
                 " thread-001 ",
                 " continue ",
                 images=[" C:/tmp/a.png ", "C:/tmp/a.png", ""],
+                model=" gpt-5.6-sol ",
+                reasoning_effort=" ultra ",
                 timeout_seconds=7,
             )
 
@@ -136,6 +144,8 @@ class CodexDesktopControlTests(unittest.TestCase):
         expression = evaluate.call_args.args[1]
         self.assertEqual(1, expression.count('"path": "C:/tmp/a.png"'))
         self.assertIn('"text": "continue"', expression)
+        self.assertIn('"gpt-5.6-sol"', expression)
+        self.assertIn('"ultra"', expression)
 
     def test_send_codex_desktop_thread_message_returns_start_result(self) -> None:
         with (
