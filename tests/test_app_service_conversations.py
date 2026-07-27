@@ -220,6 +220,53 @@ class AppServiceConversationTests(unittest.TestCase):
         self.assertEqual("gpt-5.6-sol", append_log.call_args.kwargs["model"])
         self.assertEqual("ultra", append_log.call_args.kwargs["reasoning_effort"])
 
+    def test_send_codex_thread_message_falls_back_to_app_server_when_desktop_is_not_discoverable(self) -> None:
+        requests: list[tuple[str, dict[str, object]]] = []
+
+        def create_request(action: str, payload: dict[str, object]) -> str:
+            requests.append((action, payload))
+            return "request-codex-message"
+
+        response = SimpleNamespace(
+            ok=True,
+            error="",
+            payload={
+                "thread_id": "thread-001",
+                "turn_id": "turn-003",
+                "mode": "start",
+                "client_user_message_id": "chatbridge:message-003",
+                "reconciled": False,
+            },
+        )
+        with (
+            patch.object(
+                app_service,
+                "send_codex_desktop_thread_message",
+                side_effect=app_service.CodexDesktopUnavailableError("未发现可安全控制的 Codex 桌面窗口"),
+            ),
+            patch.object(app_service, "create_request", side_effect=create_request),
+            patch.object(app_service, "wait_for_response", return_value=response) as wait_for_response,
+            patch.object(app_service, "_append_action_log"),
+        ):
+            result = app_service.send_codex_thread_message(
+                "thread-001",
+                "继续",
+                images=["C:/tmp/shot.png"],
+                model="gpt-5.6-sol",
+                reasoning_effort="ultra",
+                timeout_seconds=9,
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual("turn-003", result.payload["turn_id"])
+        self.assertEqual("chatbridge:message-003", result.payload["client_user_message_id"])
+        self.assertEqual("codex_thread_message", requests[0][0])
+        self.assertEqual("继续", requests[0][1]["prompt"])
+        self.assertEqual(["C:/tmp/shot.png"], requests[0][1]["images"])
+        self.assertEqual("gpt-5.6-sol", requests[0][1]["model"])
+        self.assertEqual("ultra", requests[0][1]["reasoning_effort"])
+        wait_for_response.assert_called_once_with("request-codex-message", timeout_seconds=11.0)
+
     def test_send_codex_thread_message_reports_desktop_bridge_failure(self) -> None:
         with (
             patch.object(

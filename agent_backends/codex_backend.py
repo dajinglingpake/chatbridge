@@ -51,9 +51,12 @@ class _CodexAppServerClient:
         self.slim_exec = slim_exec
         self.proc: subprocess.Popen | None = None
         self._messages: queue.Queue[dict[str, Any]] = queue.Queue()
+        self._response_queues: dict[int, queue.Queue[dict[str, Any]]] = {}
+        self._turn_queues: dict[tuple[str, str], queue.Queue[dict[str, Any]]] = {}
         self._stderr_lines: list[str] = []
         self._next_id = 1
         self._lock = threading.RLock()
+        self._dispatch_lock = threading.RLock()
 
     def start(self) -> None:
         argv = [self.command, "app-server", "--listen", "stdio://"]
@@ -92,21 +95,36 @@ class _CodexAppServerClient:
         return self.proc is not None and self.proc.poll() is None
 
     def request(self, method: str, params: dict[str, object], *, timeout: float) -> dict[str, Any]:
-        request_id = self._send(method, params, expect_response=True)
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            message = self._read_message(deadline)
-            if message.get("id") != request_id:
-                continue
-            if isinstance(message.get("error"), dict):
-                error = message["error"]
-                raise RuntimeError(str(error.get("message") or error))
-            result = message.get("result")
-            return result if isinstance(result, dict) else {}
-        raise RuntimeError(f"timed out waiting for app-server response: {method}")
+        with self._lock:
+            request_id = self._next_id
+            self._next_id += 1
+            response_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=1)
+            with self._dispatch_lock:
+                self._response_queues[request_id] = response_queue
+            try:
+                self._write_message({"id": request_id, "method": method, "params": params})
+            except Exception:
+                with self._dispatch_lock:
+                    self._response_queues.pop(request_id, None)
+                raise
+        try:
+            message = response_queue.get(timeout=max(0.1, timeout))
+        except queue.Empty as exc:
+            stderr_tail = "\n".join(self._stderr_lines[-8:])
+            raise RuntimeError(
+                f"timed out waiting for app-server response: {method}; stderr={stderr_tail}"
+            ) from exc
+        finally:
+            with self._dispatch_lock:
+                self._response_queues.pop(request_id, None)
+        if isinstance(message.get("error"), dict):
+            error = message["error"]
+            raise RuntimeError(str(error.get("message") or error))
+        result = message.get("result")
+        return result if isinstance(result, dict) else {}
 
     def notify(self, method: str, params: dict[str, object]) -> None:
-        self._send(method, params, expect_response=False)
+        self._send(method, params)
 
     def wait_for_turn(
         self,
@@ -121,6 +139,7 @@ class _CodexAppServerClient:
         reasoning_progress_label: Callable[[str], str] | None = None,
     ) -> tuple[str, int | None]:
         deadline = time.time() + timeout
+        message_queue = self._subscribe_turn(thread_id, turn_id)
         output = ""
         pending_answer_delta = ""
         pending_reasoning_delta = ""
@@ -207,63 +226,66 @@ class _CodexAppServerClient:
                 last_command_output_at[item_id] = now
                 on_activity(dict(activity))
 
-        while time.time() < deadline:
-            message = self._read_message(deadline)
-            method = str(message.get("method") or "")
-            params = message.get("params") if isinstance(message.get("params"), dict) else {}
-            if str(params.get("threadId") or "") not in {"", thread_id}:
-                continue
-            message_turn_id = str(params.get("turnId") or "")
-            turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
-            if not message_turn_id and isinstance(turn, dict):
-                message_turn_id = str(turn.get("id") or "")
-            if message_turn_id not in {"", turn_id}:
-                continue
-            item = params.get("item") if isinstance(params.get("item"), dict) else {}
-            if method == "item/started" and item.get("type") == "commandExecution":
-                push_command_activity(item, at_ms=params.get("startedAtMs"))
-            if method == "item/commandExecution/outputDelta":
-                push_command_output(str(params.get("itemId") or "").strip(), self._extract_delta(message))
-            if method == "item/completed" and item.get("type") == "commandExecution":
-                push_command_activity(item, at_ms=params.get("completedAtMs"))
-            if method == "item/completed" and item.get("type") == "agentMessage":
-                text = self._extract_agent_message_text(item)
-                if text:
-                    output = text
-            if method == "item/agentMessage/delta":
-                delta = self._extract_delta(message)
-                if delta:
-                    pending_answer_delta += delta
-                    push_live_output(pending_answer_delta)
-            if method in {"item/reasoning/summaryTextDelta", "item/reasoning/textDelta"}:
-                delta = self._extract_delta(message)
-                if delta:
-                    reasoning_item_id = str(params.get("itemId") or params.get("item_id") or "reasoning").strip() or "reasoning"
-                    reasoning_activities[reasoning_item_id] = f"{reasoning_activities.get(reasoning_item_id, '')}{delta}"
-                    emit_reasoning_activity(reasoning_item_id, reasoning_activities[reasoning_item_id])
-                    if last_reasoning_item_id and reasoning_item_id != last_reasoning_item_id and pending_reasoning_delta:
-                        pending_reasoning_delta = f"{pending_reasoning_delta.rstrip()}\n\n"
-                    last_reasoning_item_id = reasoning_item_id
-                    pending_reasoning_delta += delta
-                    push_reasoning(pending_reasoning_delta)
-            next_context_left = self._extract_context_left_percent(message)
-            if next_context_left is not None:
-                context_left_percent = next_context_left
-            if method == "turn/completed":
-                for reasoning_item_id, reasoning_text in reasoning_activities.items():
-                    emit_reasoning_activity(reasoning_item_id, reasoning_text, force=True)
-                push_reasoning(pending_reasoning_delta, force=True)
-                error = turn.get("error") if isinstance(turn, dict) else None
-                if error:
-                    raise RuntimeError(self._extract_error_message(error))
-                status = str(turn.get("status") or "") if isinstance(turn, dict) else ""
-                if status in {"failed", "interrupted"}:
-                    raise RuntimeError(f"Codex app-server turn {status}")
-                if not output.strip() and pending_answer_delta.strip():
-                    output = pending_answer_delta.strip()
-                push_live_output(output or pending_answer_delta, force=True)
-                return output, context_left_percent
-        raise RuntimeError(f"timed out waiting for app-server turn: {turn_id}")
+        try:
+            while time.time() < deadline:
+                message = self._read_message(deadline, message_queue=message_queue)
+                method = str(message.get("method") or "")
+                params = message.get("params") if isinstance(message.get("params"), dict) else {}
+                if str(params.get("threadId") or "") not in {"", thread_id}:
+                    continue
+                message_turn_id = str(params.get("turnId") or "")
+                turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+                if not message_turn_id and isinstance(turn, dict):
+                    message_turn_id = str(turn.get("id") or "")
+                if message_turn_id not in {"", turn_id}:
+                    continue
+                item = params.get("item") if isinstance(params.get("item"), dict) else {}
+                if method == "item/started" and item.get("type") == "commandExecution":
+                    push_command_activity(item, at_ms=params.get("startedAtMs"))
+                if method == "item/commandExecution/outputDelta":
+                    push_command_output(str(params.get("itemId") or "").strip(), self._extract_delta(message))
+                if method == "item/completed" and item.get("type") == "commandExecution":
+                    push_command_activity(item, at_ms=params.get("completedAtMs"))
+                if method == "item/completed" and item.get("type") == "agentMessage":
+                    text = self._extract_agent_message_text(item)
+                    if text:
+                        output = text
+                if method == "item/agentMessage/delta":
+                    delta = self._extract_delta(message)
+                    if delta:
+                        pending_answer_delta += delta
+                        push_live_output(pending_answer_delta)
+                if method in {"item/reasoning/summaryTextDelta", "item/reasoning/textDelta"}:
+                    delta = self._extract_delta(message)
+                    if delta:
+                        reasoning_item_id = str(params.get("itemId") or params.get("item_id") or "reasoning").strip() or "reasoning"
+                        reasoning_activities[reasoning_item_id] = f"{reasoning_activities.get(reasoning_item_id, '')}{delta}"
+                        emit_reasoning_activity(reasoning_item_id, reasoning_activities[reasoning_item_id])
+                        if last_reasoning_item_id and reasoning_item_id != last_reasoning_item_id and pending_reasoning_delta:
+                            pending_reasoning_delta = f"{pending_reasoning_delta.rstrip()}\n\n"
+                        last_reasoning_item_id = reasoning_item_id
+                        pending_reasoning_delta += delta
+                        push_reasoning(pending_reasoning_delta)
+                next_context_left = self._extract_context_left_percent(message)
+                if next_context_left is not None:
+                    context_left_percent = next_context_left
+                if method == "turn/completed":
+                    for reasoning_item_id, reasoning_text in reasoning_activities.items():
+                        emit_reasoning_activity(reasoning_item_id, reasoning_text, force=True)
+                    push_reasoning(pending_reasoning_delta, force=True)
+                    error = turn.get("error") if isinstance(turn, dict) else None
+                    if error:
+                        raise RuntimeError(self._extract_error_message(error))
+                    status = str(turn.get("status") or "") if isinstance(turn, dict) else ""
+                    if status in {"failed", "interrupted"}:
+                        raise RuntimeError(f"Codex app-server turn {status}")
+                    if not output.strip() and pending_answer_delta.strip():
+                        output = pending_answer_delta.strip()
+                    push_live_output(output or pending_answer_delta, force=True)
+                    return output, context_left_percent
+            raise RuntimeError(f"timed out waiting for app-server turn: {turn_id}")
+        finally:
+            self._unsubscribe_turn(thread_id, turn_id, message_queue)
 
     def list_threads(
         self,
@@ -298,24 +320,25 @@ class _CodexAppServerClient:
             timeout=60,
         )
 
-    def _send(self, method: str, params: dict[str, object], *, expect_response: bool) -> int | None:
+    def _send(self, method: str, params: dict[str, object]) -> None:
         with self._lock:
-            if self.proc is None or self.proc.stdin is None or self.proc.poll() is not None:
-                raise RuntimeError("Codex app-server is not running")
-            message: dict[str, object] = {"method": method, "params": params}
-            request_id: int | None = None
-            if expect_response:
-                request_id = self._next_id
-                self._next_id += 1
-                message["id"] = request_id
-            self.proc.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
-            self.proc.stdin.flush()
-            return request_id
+            self._write_message({"method": method, "params": params})
 
-    def _read_message(self, deadline: float) -> dict[str, Any]:
+    def _write_message(self, message: dict[str, object]) -> None:
+        if self.proc is None or self.proc.stdin is None or self.proc.poll() is not None:
+            raise RuntimeError("Codex app-server is not running")
+        self.proc.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
+        self.proc.stdin.flush()
+
+    def _read_message(
+        self,
+        deadline: float,
+        *,
+        message_queue: queue.Queue[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         timeout = max(0.1, deadline - time.time())
         try:
-            return self._messages.get(timeout=timeout)
+            return (message_queue or self._messages).get(timeout=timeout)
         except queue.Empty as exc:
             stderr_tail = "\n".join(self._stderr_lines[-8:])
             raise RuntimeError(f"timed out reading Codex app-server message; stderr={stderr_tail}") from exc
@@ -333,7 +356,71 @@ class _CodexAppServerClient:
             except json.JSONDecodeError:
                 continue
             if isinstance(message, dict):
+                self._dispatch_message(message)
+
+    def _dispatch_message(self, message: dict[str, Any]) -> None:
+        request_id = message.get("id")
+        with self._dispatch_lock:
+            response_queue = self._response_queues.get(request_id) if isinstance(request_id, int) else None
+            if response_queue is not None and not message.get("method"):
+                response_queue.put(message)
+                return
+            thread_id, turn_id = self._message_turn_identity(message)
+            turn_queue = self._turn_queues.get((thread_id, turn_id)) if thread_id and turn_id else None
+            if turn_queue is None and thread_id and not turn_id:
+                matching = [item for (candidate_thread_id, _), item in self._turn_queues.items() if candidate_thread_id == thread_id]
+                turn_queue = matching[0] if len(matching) == 1 else None
+            if turn_queue is not None:
+                turn_queue.put(message)
+                return
+            self._messages.put(message)
+            while self._messages.qsize() > 512:
+                try:
+                    self._messages.get_nowait()
+                except queue.Empty:
+                    break
+
+    def _subscribe_turn(self, thread_id: str, turn_id: str) -> queue.Queue[dict[str, Any]]:
+        turn_key = (thread_id, turn_id)
+        turn_queue: queue.Queue[dict[str, Any]] = queue.Queue()
+        with self._dispatch_lock:
+            if turn_key in self._turn_queues:
+                raise RuntimeError(f"Codex app-server turn is already being monitored: {turn_id}")
+            self._turn_queues[turn_key] = turn_queue
+            unmatched: list[dict[str, Any]] = []
+            while True:
+                try:
+                    message = self._messages.get_nowait()
+                except queue.Empty:
+                    break
+                message_thread_id, message_turn_id = self._message_turn_identity(message)
+                if message_thread_id == thread_id and message_turn_id in {"", turn_id}:
+                    turn_queue.put(message)
+                else:
+                    unmatched.append(message)
+            for message in unmatched:
                 self._messages.put(message)
+        return turn_queue
+
+    def _unsubscribe_turn(
+        self,
+        thread_id: str,
+        turn_id: str,
+        turn_queue: queue.Queue[dict[str, Any]],
+    ) -> None:
+        with self._dispatch_lock:
+            if self._turn_queues.get((thread_id, turn_id)) is turn_queue:
+                self._turn_queues.pop((thread_id, turn_id), None)
+
+    @staticmethod
+    def _message_turn_identity(message: dict[str, Any]) -> tuple[str, str]:
+        params = message.get("params") if isinstance(message.get("params"), dict) else {}
+        thread_id = str(params.get("threadId") or "").strip()
+        turn_id = str(params.get("turnId") or "").strip()
+        turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+        if not turn_id:
+            turn_id = str(turn.get("id") or "").strip()
+        return thread_id, turn_id
 
     def _read_stderr(self) -> None:
         proc = self.proc
@@ -460,8 +547,7 @@ class CodexBackend(AgentBackend):
     def invoke(self, agent: AgentLike, prompt: str, session_name: str, context: BackendContext) -> dict[str, str]:
         translate = Localizer().translate
         if context.codex_transport.strip().lower() == "app-server":
-            with self._app_server_lock:
-                return self._invoke_app_server(agent, prompt, session_name, context)
+            return self._invoke_app_server(agent, prompt, session_name, context)
         last_error: RuntimeError | None = None
         current_prompt = prompt
         for attempt in range(CODEX_TRANSIENT_RETRY_ATTEMPTS + 1):
@@ -559,16 +645,17 @@ class CodexBackend(AgentBackend):
         return result
 
     def _get_app_server(self, context: BackendContext) -> "_CodexAppServerClient":
-        if self._app_server is not None and self._app_server.is_alive():
+        with self._app_server_lock:
+            if self._app_server is not None and self._app_server.is_alive():
+                return self._app_server
+            self._app_server = _CodexAppServerClient(
+                context.codex_command,
+                creationflags=context.creationflags,
+                start_new_session=context.start_new_session,
+                slim_exec=context.codex_slim_exec,
+            )
+            self._app_server.start()
             return self._app_server
-        self._app_server = _CodexAppServerClient(
-            context.codex_command,
-            creationflags=context.creationflags,
-            start_new_session=context.start_new_session,
-            slim_exec=context.codex_slim_exec,
-        )
-        self._app_server.start()
-        return self._app_server
 
     def _app_server_thread_params(self, agent: AgentLike, workdir: Path, context: BackendContext) -> dict[str, object]:
         config: dict[str, object] = {}
@@ -965,6 +1052,125 @@ class CodexBackend(AgentBackend):
         normalized = self._normalize_app_server_thread(thread)
         normalized["messages"] = self._normalize_app_server_thread_messages(thread)
         return normalized
+
+    def send_app_server_thread_message(
+        self,
+        context: BackendContext,
+        thread_id: str,
+        prompt: str,
+        *,
+        images: list[str] | None = None,
+        model: str = "",
+        reasoning_effort: str = "",
+        timeout_seconds: float = 15.0,
+    ) -> dict[str, object]:
+        cleaned_thread_id = str(thread_id or "").strip()
+        cleaned_prompt = str(prompt or "").strip()
+        if not cleaned_thread_id:
+            raise ValueError("thread_id is required")
+        if not cleaned_prompt:
+            raise ValueError("prompt is required")
+        cleaned_images = list(
+            dict.fromkeys(str(item or "").strip() for item in (images or []) if str(item or "").strip())
+        )
+        client_user_message_id = f"chatbridge:{uuid.uuid4()}"
+        input_items: list[dict[str, str]] = [{"type": "text", "text": cleaned_prompt}]
+        input_items.extend({"type": "localImage", "path": image} for image in cleaned_images)
+        deadline = time.monotonic() + max(3.0, float(timeout_seconds or 15.0))
+
+        def request(method: str, params: dict[str, object]) -> dict[str, Any]:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError(f"timed out preparing Codex app-server message: {method}")
+            return client.request(method, params, timeout=max(0.5, remaining))
+
+        client = self._get_app_server(context)
+        thread_payload = request(
+            "thread/read",
+            {"threadId": cleaned_thread_id, "includeTurns": False},
+        )
+        thread = thread_payload.get("thread") if isinstance(thread_payload.get("thread"), dict) else {}
+        resume_params: dict[str, object] = {
+            "threadId": cleaned_thread_id,
+            "excludeTurns": True,
+        }
+        rollout_path = str(thread.get("path") or "").strip()
+        if rollout_path:
+            resume_params["path"] = rollout_path
+        request("thread/resume", resume_params)
+        turns_payload = request(
+            "thread/turns/list",
+            {
+                "threadId": cleaned_thread_id,
+                "limit": 1,
+                "sortDirection": "desc",
+                "itemsView": "notLoaded",
+            },
+        )
+        turns = turns_payload.get("data") if isinstance(turns_payload.get("data"), list) else []
+        active_turn = next(
+            (
+                item
+                for item in turns
+                if isinstance(item, dict)
+                and str(item.get("status") or "").replace("_", "").lower() in {"inprogress", "running"}
+            ),
+            None,
+        )
+        active_turn_id = str(active_turn.get("id") or "").strip() if isinstance(active_turn, dict) else ""
+        if active_turn_id:
+            mode = "steer"
+            result = request(
+                "turn/steer",
+                {
+                    "threadId": cleaned_thread_id,
+                    "expectedTurnId": active_turn_id,
+                    "input": input_items,
+                    "clientUserMessageId": client_user_message_id,
+                },
+            )
+            turn_id = str(result.get("turnId") or active_turn_id).strip()
+        else:
+            mode = "start"
+            params: dict[str, object] = {
+                "threadId": cleaned_thread_id,
+                "input": input_items,
+                "clientUserMessageId": client_user_message_id,
+            }
+            if str(model or "").strip():
+                params["model"] = str(model).strip()
+            if str(reasoning_effort or "").strip():
+                params["effort"] = str(reasoning_effort).strip()
+            result = request("turn/start", params)
+            turn = result.get("turn") if isinstance(result.get("turn"), dict) else {}
+            turn_id = str(turn.get("id") or "").strip()
+        if not turn_id:
+            raise RuntimeError("Codex app-server did not return a turn id")
+        threading.Thread(
+            target=self._drain_app_server_turn,
+            args=(client, cleaned_thread_id, turn_id),
+            daemon=True,
+            name=f"codex-history-turn-{turn_id[:8]}",
+        ).start()
+        return {
+            "thread_id": cleaned_thread_id,
+            "turn_id": turn_id,
+            "mode": mode,
+            "client_user_message_id": client_user_message_id,
+            "reconciled": False,
+        }
+
+    @staticmethod
+    def _drain_app_server_turn(client: _CodexAppServerClient, thread_id: str, turn_id: str) -> None:
+        try:
+            client.wait_for_turn(
+                thread_id,
+                turn_id,
+                timeout=60 * 60 * 6,
+                on_progress=None,
+            )
+        except RuntimeError:
+            pass
 
     @classmethod
     def _normalize_app_server_thread(cls, thread: dict[str, Any]) -> dict[str, object]:

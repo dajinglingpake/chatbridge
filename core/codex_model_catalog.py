@@ -78,11 +78,9 @@ def display_reasoning_effort(effort: str) -> str:
     cleaned = str(effort or "").strip().lower()
     if not cleaned:
         return "-"
-    return {
-        "xhigh": "Extra high",
-        "max": "Maximum",
-        "ultra": "Maximum (automatic delegation)",
-    }.get(cleaned, cleaned.title())
+    if cleaned == "xhigh":
+        return "XHigh"
+    return cleaned.capitalize()
 
 
 def display_model(model: str) -> str:

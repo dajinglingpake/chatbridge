@@ -1898,20 +1898,11 @@ def _stream_model_display_name(value: object) -> str:
     return " ".join([parts[0], *(part.capitalize() for part in parts[1:])])
 
 
-def _stream_reasoning_effort_label(value: object, t: Translator | None = None) -> str:
+def _stream_reasoning_effort_label(value: object) -> str:
     cleaned = str(value or "").strip().lower()
-    fallback = {
-        "minimal": "最低",
-        "low": "低",
-        "medium": "中",
-        "high": "高",
-        "xhigh": "极高",
-        "max": "最高",
-        "ultra": "最高（自动调度子代理）",
-    }.get(cleaned, cleaned.capitalize() if cleaned else "")
-    if not cleaned or t is None:
-        return fallback
-    return _tr(t, f"ui.web.mobile.reasoning_effort.{cleaned}", fallback)
+    if cleaned == "xhigh":
+        return "XHigh"
+    return cleaned.capitalize() if cleaned else ""
 
 
 def _stream_footer_label(task: dict[str, object], status: str, t: Translator) -> str:
@@ -2630,7 +2621,7 @@ def _render_mobile_stream_composer(
     show_goal = bool(goal_objective and goal_status in {"active", "paused"})
     composer_model_value = str(context.get("composer_model") or "").strip()
     composer_model = _stream_model_display_name(composer_model_value)
-    composer_reasoning_effort = _stream_reasoning_effort_label(context.get("composer_reasoning_effort"), t)
+    composer_reasoning_effort = _stream_reasoning_effort_label(context.get("composer_reasoning_effort"))
     model_catalog = [dict(entry) for entry in (model_catalog or []) if isinstance(entry, dict)]
 
     async def submit_composer(input_box: UIElementLike, session: str, agent: str, backend: str) -> None:
@@ -2677,7 +2668,7 @@ def _render_mobile_stream_composer(
                 def effort_options(model: object) -> dict[str, str]:
                     entry = model_entry(model)
                     return {
-                        effort: _stream_reasoning_effort_label(effort, t)
+                        effort: _stream_reasoning_effort_label(effort)
                         for effort in (
                             str(item or "").strip()
                             for item in (entry.get("reasoning_levels") or [])

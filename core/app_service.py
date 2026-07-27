@@ -44,6 +44,8 @@ from core.state_models import HubAgentSnapshot, HubTask, JsonObject, WeixinConve
 from core.bridge_notifier import broadcast_bridge_notice_by_kind
 from core.codex_desktop_control import (
     CodexDesktopControlError,
+    CodexDesktopMessageResult,
+    CodexDesktopUnavailableError,
     control_codex_desktop_thread_goal,
     get_codex_desktop_thread_goal,
     interrupt_codex_desktop_thread,
@@ -403,6 +405,47 @@ def interrupt_codex_thread(thread_id: str, *, timeout_seconds: float = 15.0) -> 
     return ServiceResult(ok=True, message=f"已停止 Codex 历史会话：{cleaned_thread_id} | 轮次：{turn_id}")
 
 
+def _send_codex_thread_message_via_app_server(
+    thread_id: str,
+    prompt: str,
+    *,
+    images: list[str] | None,
+    model: str,
+    reasoning_effort: str,
+    timeout_seconds: float,
+) -> CodexDesktopMessageResult:
+    request_id = create_request(
+        "codex_thread_message",
+        {
+            "thread_id": thread_id,
+            "prompt": prompt,
+            "images": [str(item or "").strip() for item in (images or []) if str(item or "").strip()],
+            "model": model,
+            "reasoning_effort": reasoning_effort,
+            "timeout_seconds": timeout_seconds,
+        },
+    )
+    try:
+        response = wait_for_response(request_id, timeout_seconds=max(5.0, timeout_seconds + 2.0))
+    except TimeoutError as exc:
+        raise CodexDesktopControlError("Codex app-server 发送响应超时") from exc
+    if not response.ok:
+        raise CodexDesktopControlError(response.error or "Codex app-server 发送失败")
+    payload = response.payload
+    mode = str(payload.get("mode") or "").strip()
+    turn_id = str(payload.get("turn_id") or "").strip()
+    if mode not in {"steer", "start"}:
+        raise CodexDesktopControlError("Codex app-server 未返回有效发送模式")
+    if not turn_id:
+        raise CodexDesktopControlError("Codex app-server 未返回 turn_id")
+    return CodexDesktopMessageResult(
+        mode=mode,
+        turn_id=turn_id,
+        client_user_message_id=str(payload.get("client_user_message_id") or "").strip(),
+        reconciled=bool(payload.get("reconciled")),
+    )
+
+
 def send_codex_thread_message(
     thread_id: str,
     prompt: str,
@@ -423,14 +466,24 @@ def send_codex_thread_message(
     cleaned_model = str(model or "").strip()
     cleaned_reasoning_effort = str(reasoning_effort or "").strip()
     try:
-        result = send_codex_desktop_thread_message(
-            cleaned_thread_id,
-            cleaned_prompt,
-            images=images,
-            model=cleaned_model,
-            reasoning_effort=cleaned_reasoning_effort,
-            timeout_seconds=timeout_seconds,
-        )
+        try:
+            result = send_codex_desktop_thread_message(
+                cleaned_thread_id,
+                cleaned_prompt,
+                images=images,
+                model=cleaned_model,
+                reasoning_effort=cleaned_reasoning_effort,
+                timeout_seconds=timeout_seconds,
+            )
+        except CodexDesktopUnavailableError:
+            result = _send_codex_thread_message_via_app_server(
+                cleaned_thread_id,
+                cleaned_prompt,
+                images=images,
+                model=cleaned_model,
+                reasoning_effort=cleaned_reasoning_effort,
+                timeout_seconds=timeout_seconds,
+            )
     except CodexDesktopControlError as exc:
         error = str(exc)
         _append_codex_message_audit(

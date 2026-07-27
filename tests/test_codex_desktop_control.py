@@ -32,6 +32,8 @@ class CodexDesktopControlTests(unittest.TestCase):
             reasoning_effort="ultra",
         )
 
+        self.assertIn("thread/resume", expression)
+        self.assertIn("excludeTurns: true", expression)
         self.assertIn("thread/turns/list", expression)
         self.assertIn("turn/steer", expression)
         self.assertIn("expectedTurnId: activeTurnId", expression)
@@ -47,6 +49,8 @@ class CodexDesktopControlTests(unittest.TestCase):
         self.assertIn('"gpt-5.6-sol"', expression)
         self.assertIn('"ultra"', expression)
         self.assertNotIn("process.kill", expression)
+        self.assertLess(expression.index("thread/resume"), expression.index("thread/turns/list"))
+        self.assertLess(expression.index("thread/turns/list"), expression.index("turn/steer"))
 
     def test_goal_expression_uses_native_goal_protocol_and_interrupts_pause(self) -> None:
         expression = control._goal_expression(
@@ -100,7 +104,7 @@ class CodexDesktopControlTests(unittest.TestCase):
 
     def test_interrupt_codex_desktop_thread_refuses_when_no_safe_window_exists(self) -> None:
         with patch.object(control, "_codex_desktop_websocket_urls", return_value=[]):
-            with self.assertRaisesRegex(control.CodexDesktopControlError, "未发现可安全控制"):
+            with self.assertRaisesRegex(control.CodexDesktopUnavailableError, "未发现可安全控制"):
                 control.interrupt_codex_desktop_thread("thread-001")
 
     def test_interrupt_codex_desktop_thread_wraps_transport_failures(self) -> None:

@@ -3018,7 +3018,7 @@ class StreamComposerTests(unittest.TestCase):
         self.assertTrue(any("data-goal-action=delete" in item.props_text for item in goal_actions))
         self.assertEqual(1, len(model_indicators))
         self.assertEqual(["5.6 Sol"], model_labels)
-        self.assertEqual(["最高（自动调度子代理）"], effort_labels)
+        self.assertEqual(["Ultra"], effort_labels)
         self.assertEqual(1, len(composer_boxes))
         self.assertIn("cb-composer-box-has-goal", composer_boxes[0].class_text)
 
@@ -3069,9 +3069,9 @@ class StreamComposerTests(unittest.TestCase):
     def test_stream_model_labels_match_codex_composer_style(self) -> None:
         self.assertEqual("5.6 Sol", _stream_model_display_name("gpt-5.6-sol"))
         self.assertEqual("5 Codex", _stream_model_display_name("gpt-5-codex"))
-        self.assertEqual("极高", _stream_reasoning_effort_label("xhigh"))
-        self.assertEqual("最高", _stream_reasoning_effort_label("max"))
-        self.assertEqual("最高（自动调度子代理）", _stream_reasoning_effort_label("ultra"))
+        self.assertEqual("XHigh", _stream_reasoning_effort_label("xhigh"))
+        self.assertEqual("Max", _stream_reasoning_effort_label("max"))
+        self.assertEqual("Ultra", _stream_reasoning_effort_label("ultra"))
 
     def test_stream_model_preference_overrides_rollout_model(self) -> None:
         context = _prepare_stream_render_context(

@@ -1134,6 +1134,20 @@ class MultiCodexHub:
                 ok=True,
                 payload={"thread": self.read_codex_thread(str(payload.get("thread_id") or ""))},
             )
+        if action == "codex_thread_message":
+            return IpcResponseEnvelope(
+                ok=True,
+                payload=self.send_codex_thread_message(
+                    str(payload.get("thread_id") or ""),
+                    str(payload.get("prompt") or ""),
+                    images=[str(item or "") for item in payload.get("images", [])]
+                    if isinstance(payload.get("images"), list)
+                    else [],
+                    model=str(payload.get("model") or ""),
+                    reasoning_effort=str(payload.get("reasoning_effort") or ""),
+                    timeout_seconds=float(payload.get("timeout_seconds") or 15.0),
+                ),
+            )
         if action == "task_context_left":
             return IpcResponseEnvelope(
                 ok=True,
@@ -1209,6 +1223,29 @@ class MultiCodexHub:
         if backend is None or not hasattr(backend, "read_app_server_thread"):
             raise RuntimeError("codex app-server backend is not available")
         return backend.read_app_server_thread(self._codex_backend_context(), thread_id)
+
+    def send_codex_thread_message(
+        self,
+        thread_id: str,
+        prompt: str,
+        *,
+        images: list[str] | None = None,
+        model: str = "",
+        reasoning_effort: str = "",
+        timeout_seconds: float = 15.0,
+    ) -> dict[str, object]:
+        backend = self.backend_registry.get("codex")
+        if backend is None or not hasattr(backend, "send_app_server_thread_message"):
+            raise RuntimeError("codex app-server backend is not available")
+        return backend.send_app_server_thread_message(
+            self._codex_backend_context(),
+            thread_id,
+            prompt,
+            images=images,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            timeout_seconds=timeout_seconds,
+        )
 
     def render_codex_status(self, agent_id: str, session_name: str, workdir: str = "") -> str:
         agent = self._find_agent(agent_id)

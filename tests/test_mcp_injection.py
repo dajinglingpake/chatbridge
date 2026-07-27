@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import subprocess
 import tempfile
 import time
@@ -38,6 +39,8 @@ class RecordingCodexThreadBackend(RecordingBackend):
         super().__init__()
         self.last_list_context = None
         self.last_read_context = None
+        self.last_send_context = None
+        self.last_send_payload = None
         self.last_archived = None
 
     def list_app_server_threads(self, context, *, limit: int, cursor: str, search_term: str, cwd: str, archived: bool | None = False) -> dict[str, object]:
@@ -64,7 +67,116 @@ class RecordingCodexThreadBackend(RecordingBackend):
             "messages": [{"role": "reasoning", "text": "思考摘要"}],
         }
 
+    def send_app_server_thread_message(self, context, thread_id: str, prompt: str, **kwargs) -> dict[str, object]:
+        self.last_send_context = context
+        self.last_send_payload = {"thread_id": thread_id, "prompt": prompt, **kwargs}
+        return {
+            "thread_id": thread_id,
+            "turn_id": "turn-2",
+            "mode": "start",
+            "client_user_message_id": "chatbridge:message-2",
+            "reconciled": False,
+        }
+
 class McpServerInjectionTests(unittest.TestCase):
+    def test_codex_app_server_routes_responses_without_consuming_turn_events(self) -> None:
+        client = _CodexAppServerClient("codex", creationflags=0, start_new_session=False, slim_exec=True)
+        response_queue: queue.Queue[dict[str, object]] = queue.Queue(maxsize=1)
+        client._response_queues[7] = response_queue
+        turn_queue = client._subscribe_turn("thread-1", "turn-1")
+
+        client._dispatch_message({"id": 7, "result": {"ok": True}})
+        client._dispatch_message(
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turn": {"id": "turn-1", "status": "completed"},
+                },
+            }
+        )
+
+        self.assertEqual({"ok": True}, response_queue.get_nowait()["result"])
+        self.assertEqual("turn/completed", turn_queue.get_nowait()["method"])
+        self.assertTrue(client._messages.empty())
+
+    def test_codex_app_server_bounds_unclaimed_notifications(self) -> None:
+        client = _CodexAppServerClient("codex", creationflags=0, start_new_session=False, slim_exec=True)
+
+        for index in range(700):
+            client._dispatch_message(
+                {
+                    "method": "thread/status/changed",
+                    "params": {"threadId": f"thread-{index}", "status": "idle"},
+                }
+            )
+
+        self.assertEqual(512, client._messages.qsize())
+
+    def test_codex_app_server_history_message_starts_turn_and_preserves_options(self) -> None:
+        requests: list[tuple[str, dict[str, object], float]] = []
+
+        class FakeClient:
+            def request(self, method: str, params: dict[str, object], *, timeout: float) -> dict[str, object]:
+                requests.append((method, params, timeout))
+                if method == "thread/read":
+                    return {"thread": {"id": "thread-1", "path": "C:/tmp/rollout-thread-1.jsonl"}}
+                if method == "thread/resume":
+                    return {"thread": {"id": "thread-1"}}
+                if method == "thread/turns/list":
+                    return {"data": [{"id": "turn-old", "status": "completed"}]}
+                if method == "turn/start":
+                    return {"turn": {"id": "turn-new", "status": "inProgress"}}
+                raise AssertionError(method)
+
+        backend = CodexBackend()
+        context = BackendContext(
+            codex_command="codex.cmd",
+            claude_command="claude",
+            opencode_command="opencode",
+            session_dir=Path("sessions"),
+            creationflags=0,
+        )
+        with (
+            patch.object(backend, "_get_app_server", return_value=FakeClient()),
+            patch("agent_backends.codex_backend.threading.Thread") as thread,
+        ):
+            result = backend.send_app_server_thread_message(
+                context,
+                " thread-1 ",
+                " 继续检查 ",
+                images=[" C:/tmp/shot.png ", "C:/tmp/shot.png"],
+                model=" gpt-5.6-sol ",
+                reasoning_effort=" ultra ",
+                timeout_seconds=9,
+            )
+
+        self.assertEqual("start", result["mode"])
+        self.assertEqual("turn-new", result["turn_id"])
+        self.assertTrue(str(result["client_user_message_id"]).startswith("chatbridge:"))
+        turn_start = next(params for method, params, _ in requests if method == "turn/start")
+        self.assertEqual(
+            [
+                {"type": "text", "text": "继续检查"},
+                {"type": "localImage", "path": "C:/tmp/shot.png"},
+            ],
+            turn_start["input"],
+        )
+        self.assertEqual("gpt-5.6-sol", turn_start["model"])
+        self.assertEqual("ultra", turn_start["effort"])
+        self.assertEqual(
+            {
+                "threadId": "thread-1",
+                "path": "C:/tmp/rollout-thread-1.jsonl",
+                "excludeTurns": True,
+            },
+            next(params for method, params, _ in requests if method == "thread/resume"),
+        )
+        methods = [method for method, _, _ in requests]
+        self.assertLess(methods.index("thread/read"), methods.index("thread/resume"))
+        self.assertLess(methods.index("thread/resume"), methods.index("thread/turns/list"))
+        thread.return_value.start.assert_called_once_with()
+
     def test_codex_app_server_streams_reasoning_separately_from_final_answer(self) -> None:
         live_output: list[str] = []
         reasoning: list[str] = []
@@ -380,12 +492,26 @@ class McpServerInjectionTests(unittest.TestCase):
 
                 listed = hub.list_codex_threads(limit=10, archived=True)
                 read = hub.read_codex_thread("thread-1")
+                sent = hub.send_codex_thread_message(
+                    "thread-1",
+                    "继续",
+                    images=["C:/tmp/shot.png"],
+                    model="gpt-5.6-sol",
+                    reasoning_effort="ultra",
+                    timeout_seconds=9,
+                )
 
         self.assertEqual("thread-1", listed["threads"][0]["id"])
         self.assertEqual("thread-1", read["id"])
         self.assertEqual("app-server", backend.last_list_context.codex_transport)
         self.assertIs(True, backend.last_archived)
         self.assertEqual("codex.cmd", backend.last_read_context.codex_command)
+        self.assertEqual("turn-2", sent["turn_id"])
+        self.assertEqual("codex.cmd", backend.last_send_context.codex_command)
+        self.assertEqual("继续", backend.last_send_payload["prompt"])
+        self.assertEqual(["C:/tmp/shot.png"], backend.last_send_payload["images"])
+        self.assertEqual("gpt-5.6-sol", backend.last_send_payload["model"])
+        self.assertEqual("ultra", backend.last_send_payload["reasoning_effort"])
 
     def test_wechat_task_injects_mcp_server_into_backend_context(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

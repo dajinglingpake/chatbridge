@@ -62,10 +62,10 @@ class CodexModelCatalogTests(unittest.TestCase):
             errors="replace",
         )
 
-    def test_reasoning_effort_labels_keep_delegation_distinct(self) -> None:
-        self.assertEqual("Extra high", catalog.display_reasoning_effort("xhigh"))
-        self.assertEqual("Maximum", catalog.display_reasoning_effort("max"))
-        self.assertEqual("Maximum (automatic delegation)", catalog.display_reasoning_effort("ultra"))
+    def test_reasoning_effort_labels_preserve_codex_names(self) -> None:
+        self.assertEqual("XHigh", catalog.display_reasoning_effort("xhigh"))
+        self.assertEqual("Max", catalog.display_reasoning_effort("max"))
+        self.assertEqual("Ultra", catalog.display_reasoning_effort("ultra"))
 
     def test_cached_catalog_avoids_restarting_codex_for_each_client(self) -> None:
         entries = [

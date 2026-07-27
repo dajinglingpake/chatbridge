@@ -19,6 +19,10 @@ class CodexDesktopControlError(RuntimeError):
     pass
 
 
+class CodexDesktopUnavailableError(CodexDesktopControlError):
+    pass
+
+
 @dataclass(frozen=True)
 class CodexDesktopMessageResult:
     mode: str
@@ -196,6 +200,13 @@ def _message_expression(
     const clientUserMessageId = {encoded_message_id};
     const model = {encoded_model};
     const reasoningEffort = {encoded_reasoning_effort};
+    const resumeResponse = await request('thread/resume', {{
+        threadId,
+        excludeTurns: true,
+    }});
+    if (resumeResponse?.error) {{
+        return JSON.stringify({{ok: false, error: resumeResponse.error.message || String(resumeResponse.error)}});
+    }}
     const startTurn = async () => {{
         const params = {{threadId, input, clientUserMessageId}};
         if (model) params.model = model;
@@ -436,7 +447,7 @@ def _run_desktop_action(
 ) -> dict[str, object]:
     websocket_urls = _codex_desktop_websocket_urls(timeout_seconds=timeout_seconds)
     if not websocket_urls:
-        raise CodexDesktopControlError("未发现可安全控制的 Codex 桌面窗口")
+        raise CodexDesktopUnavailableError("未发现可安全控制的 Codex 桌面窗口")
 
     errors: list[str] = []
     for websocket_url in websocket_urls:
