@@ -55,28 +55,47 @@ class WeixinTextOutboxTests(unittest.TestCase):
                     text="hello",
                     account_id="bot-a",
                     account_file="/tmp/bot-a.json",
+                    progress_task_id="task-progress-001",
+                    progress_text="working",
                 )
                 queued = pop_text_messages(limit=10)
 
         self.assertEqual(1, len(queued))
         self.assertEqual("bot-a", queued[0]["account_id"])
         self.assertEqual("/tmp/bot-a.json", queued[0]["account_file"])
+        self.assertEqual("task-progress-001", queued[0]["progress_task_id"])
+        self.assertEqual("working", queued[0]["progress_text"])
 
 
-    def test_enqueue_text_message_drops_superseded_messages_for_same_recipient(self) -> None:
+    def test_enqueue_text_message_preserves_terminal_messages_when_progress_is_superseded(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             outbox_path = Path(temp_dir) / "weixin_text_outbox.jsonl"
             with patch("core.weixin_text_outbox.OUTBOX_PATH", outbox_path):
-                enqueue_text_message(to_user_id="sender-test", context_token="ctx", text="reply · - · 19:10:30\n\nold answer")
+                enqueue_text_message(
+                    to_user_id="sender-test",
+                    context_token="ctx",
+                    text="running · 3s · 19:10:30\n\nold progress",
+                    supersede_pending_progress=True,
+                )
                 enqueue_text_message(to_user_id="other-sender", context_token="ctx", text="done · 26s · ctx 47% · 19:10:35")
-                enqueue_text_message(to_user_id="sender-test", context_token="ctx", text="reply · - · 19:11:00\n\nnew work")
+                enqueue_text_message(to_user_id="sender-test", context_token="ctx", text="done · 4s · 19:10:31\n\nfinal answer")
+                enqueue_text_message(
+                    to_user_id="sender-test",
+                    context_token="ctx",
+                    text="running · 1s · 19:11:00\n\nnew progress",
+                    supersede_pending_progress=True,
+                )
                 queued = pop_text_messages(limit=10)
 
         self.assertEqual(
-            ["done · 26s · ctx 47% · 19:10:35", "reply · - · 19:11:00\n\nnew work"],
+            [
+                "done · 26s · ctx 47% · 19:10:35",
+                "done · 4s · 19:10:31\n\nfinal answer",
+                "running · 1s · 19:11:00\n\nnew progress",
+            ],
             [str(item["text"]) for item in queued],
         )
-        self.assertEqual(["other-sender", "sender-test"], [str(item["to_user_id"]) for item in queued])
+        self.assertEqual(["other-sender", "sender-test", "sender-test"], [str(item["to_user_id"]) for item in queued])
 
 if __name__ == "__main__":
     unittest.main()

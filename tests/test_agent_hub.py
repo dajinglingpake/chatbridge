@@ -518,6 +518,7 @@ class AgentHubCancellationTests(unittest.TestCase):
         with (
             patch("agent_hub.STATE_PATH", state_path),
             patch("agent_hub.discover_external_agent_processes", return_value=[]),
+            patch("agent_hub.create_bridge_request"),
         ):
             hub = MultiCodexHub(config)
             backend = ContextCapturingBackend()

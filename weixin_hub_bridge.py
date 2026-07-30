@@ -351,6 +351,8 @@ class WeixinBridge:
         self.duplicate_filter = BridgeDuplicateMessageFilter(now=time.monotonic)
         self._send_worker_started = False
         self._typing_worker_started = False
+        self._delivered_progress_texts: dict[str, str] = {}
+        self._delivered_progress_lock = threading.Lock()
         self._pending_tasks_save_lock = threading.Lock()
         self._runtime_config_lock = threading.Lock()
         self._pending_reconcile_last_at = 0.0
@@ -510,6 +512,7 @@ class WeixinBridge:
                         text,
                         log_failure=False,
                     )
+                    self._record_delivered_progress(message)
                 except Exception as exc:  # noqa: BLE001
                     attempt = int(message.get("attempt") or 0)
                     permanent = _is_permanent_delivery_error(exc)
@@ -526,6 +529,18 @@ class WeixinBridge:
                             flush=True,
                         )
                     self._handle_async_send_failure(message, exc)
+
+    def _record_delivered_progress(self, message: dict[str, object]) -> None:
+        task_id = str(message.get("progress_task_id") or "").strip()
+        progress_text = str(message.get("progress_text") or "").strip()
+        if not task_id or not progress_text:
+            return
+        with self._delivered_progress_lock:
+            self._delivered_progress_texts[task_id] = progress_text
+
+    def _consume_delivered_progress(self, task_id: str) -> str:
+        with self._delivered_progress_lock:
+            return self._delivered_progress_texts.pop(str(task_id or "").strip(), "")
 
     def _message_matches_active_account(self, message: dict[str, object]) -> bool:
         message_account_id = str(message.get("account_id") or "").strip()
@@ -944,6 +959,8 @@ class WeixinBridge:
                     progress_text=progress_reply_text,
                     context_left_percent=self._resolve_task_context_left_percent(task),
                 ),
+                progress_task_id=task.id,
+                progress_text=progress_reply_text,
             )
             tracked.last_progress_text = progress_reply_text
         self._append_event_log(
@@ -1126,7 +1143,7 @@ class WeixinBridge:
             return
         plan = build_terminal_task_delivery_plan(
             task,
-            last_progress_text=tracked.last_progress_text,
+            last_progress_text=self._consume_delivered_progress(task.id),
             context_left_percent=self._resolve_task_context_left_percent(task),
             translate=self._t,
             session_name=session_name,
@@ -1289,7 +1306,17 @@ class WeixinBridge:
         suffix = f" {rendered_fields}" if rendered_fields else ""
         print(f"[bridge-perf] {label} duration_ms={elapsed_ms}{suffix}", flush=True)
 
-    def _send_text(self, base_url: str, token: str, to_user_id: str, context_token: Any, text: str) -> None:
+    def _send_text(
+        self,
+        base_url: str,
+        token: str,
+        to_user_id: str,
+        context_token: Any,
+        text: str,
+        *,
+        progress_task_id: str = "",
+        progress_text: str = "",
+    ) -> None:
         text = format_bridge_reply(text)
         self._start_send_worker()
         enqueue_text_message(
@@ -1299,6 +1326,9 @@ class WeixinBridge:
             source="bridge",
             account_id=self.config.active_account_id,
             account_file=str(self.account_path),
+            supersede_pending_progress=_is_ephemeral_delivery_text(text),
+            progress_task_id=progress_task_id,
+            progress_text=progress_text,
         )
         preview = " ".join(text.split())[:160]
         print(f"[bridge] queued reply to={to_user_id} preview={preview}", flush=True)

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from bridge_config import BridgeConfig
-from core.state_models import IpcResponseEnvelope, WeixinPendingTaskState
+from core.state_models import HubTask, IpcResponseEnvelope, WeixinPendingTaskState
 from core.weixin_message_format import format_weixin_reply, prefix_weixin_output
 from weixin_hub_bridge import WeixinBridge
 
@@ -153,7 +153,17 @@ class FeedbackBridge(FakeBridge):
             return IpcResponseEnvelope(ok=True, payload={"task": self._task_states[index]})
         return super()._ipc_request(action, payload, timeout_seconds)
 
-    def _send_text(self, base_url: str, token: str, to_user_id: str, context_token, text: str) -> None:
+    def _send_text(
+        self,
+        base_url: str,
+        token: str,
+        to_user_id: str,
+        context_token,
+        text: str,
+        *,
+        progress_task_id: str = "",
+        progress_text: str = "",
+    ) -> None:
         self.sent_texts.append(text)
 
     def _deliver_text_now(self, base_url: str, token: str, to_user_id: str, context_token, text: str) -> None:
@@ -501,7 +511,10 @@ class WeixinBridgeCommandTests(unittest.TestCase):
 
         bridge._save_state = stop_after_clean_state  # type: ignore[method-assign]
 
-        with self.assertRaises(_StopLoop):
+        with (
+            patch.object(bridge, "_notify_service_started"),
+            self.assertRaises(_StopLoop),
+        ):
             bridge.run()
 
         self.assertEqual("", bridge.state.last_error)
@@ -1372,7 +1385,7 @@ class WeixinBridgeCommandTests(unittest.TestCase):
         self.assertEqual(1, len(bridge.submit_payloads))
         self.assertIn("Previous user request", bridge.submit_payloads[0]["prompt"])
 
-    def test_handle_message_sends_completion_notice_for_duplicate_final_result_after_progress(self) -> None:
+    def test_handle_message_deduplicates_final_result_after_delivered_matching_progress(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             event_log_path = Path(temp_dir) / "weixin_bridge_events.jsonl"
             bridge = FeedbackBridge(
@@ -1417,18 +1430,52 @@ class WeixinBridgeCommandTests(unittest.TestCase):
                     },
                 )
                 bridge.process_next_pushed_update()
+                bridge._record_delivered_progress(
+                    {"progress_task_id": "task-feedback-001", "progress_text": "最终回答"}
+                )
                 bridge.process_next_pushed_update()
             self.assertEqual(2, len(bridge.sent_texts))
             self.assertTrue(bridge.sent_texts[0].startswith("running · "))
             self.assertIn("\n\n最终回答", bridge.sent_texts[0])
             self.assertTrue(bridge.sent_texts[1].startswith("done · "))
-            self.assertNotIn("\n\n", bridge.sent_texts[1])
             self.assertNotIn("\n\n最终回答", bridge.sent_texts[1])
             entries = [json.loads(line) for line in event_log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
             self.assertEqual(
                 ["accepted", "running", "progress", "succeeded"],
                 [entry["event"] for entry in entries],
             )
+
+    def test_terminal_keeps_matching_result_when_progress_delivery_is_unconfirmed(self) -> None:
+        bridge = FeedbackBridge(BridgeConfig.load(), [])
+        tracked = WeixinPendingTaskState(
+            task_id="task-feedback-001",
+            sender_id="sender-test",
+            session_name="default",
+            backend="codex",
+            context_token="ctx",
+            last_progress_text="最终回答",
+        )
+        task = HubTask.from_dict(
+            {
+                "id": "task-feedback-001",
+                "sender_id": "sender-test",
+                "session_name": "default",
+                "status": "succeeded",
+                "backend": "codex",
+                "output": "最终回答",
+                "created_at": "2026-04-20T12:00:00",
+            },
+            default_backend="codex",
+        )
+        self.assertIsNotNone(task)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch("weixin_hub_bridge.EVENT_LOG_PATH", Path(temp_dir) / "weixin_bridge_events.jsonl"):
+                bridge._notify_task_terminal("https://example.com", "token", tracked, task)
+
+        self.assertEqual(1, len(bridge.sent_texts))
+        self.assertTrue(bridge.sent_texts[0].startswith("done · "))
+        self.assertIn("\n\n最终回答", bridge.sent_texts[0])
 
     def test_session_style_task_sends_incremental_progress_feedback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

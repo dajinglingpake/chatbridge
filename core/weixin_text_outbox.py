@@ -23,6 +23,9 @@ def enqueue_text_message(
     source: str = "",
     account_id: str = "",
     account_file: str = "",
+    supersede_pending_progress: bool = False,
+    progress_task_id: str = "",
+    progress_text: str = "",
 ) -> None:
     now_ms = int(time.time() * 1000)
     payload = {
@@ -33,12 +36,15 @@ def enqueue_text_message(
         "source": str(source or "").strip(),
         "account_id": str(account_id or "").strip(),
         "account_file": str(account_file or "").strip(),
+        "supersede_pending_progress": bool(supersede_pending_progress),
+        "progress_task_id": str(progress_task_id or "").strip(),
+        "progress_text": str(progress_text or "").strip(),
         "attempt": 0,
         "created_at": int(now_ms / 1000),
         "created_at_ms": now_ms,
         "retry_not_before": 0,
     }
-    _append_payload(payload, drop_superseded_recipient=True)
+    _append_payload(payload, supersede_pending_progress=supersede_pending_progress)
 
 
 def requeue_text_message(payload: dict[str, object]) -> None:
@@ -82,11 +88,11 @@ def pop_text_messages(*, limit: int = 20) -> list[dict[str, object]]:
         return messages
 
 
-def _append_payload(payload: dict[str, object], *, drop_superseded_recipient: bool = False) -> None:
+def _append_payload(payload: dict[str, object], *, supersede_pending_progress: bool = False) -> None:
     OUTBOX_PATH.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(payload, ensure_ascii=False) + "\n"
     with sender_send_lock("__weixin_text_outbox__", timeout_seconds=15.0):
-        if drop_superseded_recipient and OUTBOX_PATH.exists():
+        if supersede_pending_progress and OUTBOX_PATH.exists():
             to_user_id = str(payload.get("to_user_id") or "").strip()
             kept_lines: list[str] = []
             for raw_line in OUTBOX_PATH.read_text(encoding="utf-8").splitlines():
@@ -96,7 +102,11 @@ def _append_payload(payload: dict[str, object], *, drop_superseded_recipient: bo
                     existing = json.loads(raw_line)
                 except json.JSONDecodeError:
                     continue
-                if isinstance(existing, dict) and str(existing.get("to_user_id") or "").strip() == to_user_id:
+                if (
+                    isinstance(existing, dict)
+                    and str(existing.get("to_user_id") or "").strip() == to_user_id
+                    and bool(existing.get("supersede_pending_progress"))
+                ):
                     continue
                 kept_lines.append(raw_line)
             if kept_lines:
