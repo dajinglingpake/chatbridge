@@ -790,6 +790,12 @@ class MultiCodexHub:
             prompt_prefix=self._resolve_task_prompt_prefix(agent, task),
             enabled=agent.enabled,
         )
+
+        def on_reasoning(text: str) -> None:
+            if str(task.source or "").strip().lower() not in WEB_TASK_SOURCES:
+                return
+            self._update_task_stream_text(task.id, "reasoning_text", text)
+
         return backend.invoke(
             agent=effective_agent,
             prompt=task.prompt,
@@ -804,7 +810,7 @@ class MultiCodexHub:
                 on_process_started=lambda pid: self._register_running_task_pid(task.id, pid),
                 on_progress=lambda text: self._update_task_progress(task.id, text),
                 on_live_output=lambda text: self._update_task_stream_text(task.id, "live_output_text", text),
-                on_reasoning=lambda text: self._update_task_stream_text(task.id, "reasoning_text", text),
+                on_reasoning=on_reasoning,
                 on_activity=lambda item: self._update_task_activity(task.id, item),
                 on_context_left_percent=lambda percent: self._update_task_context_left_percent(task.id, percent),
                 is_cancel_requested=lambda: self._is_cancel_requested(task.id),

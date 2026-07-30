@@ -38,6 +38,17 @@ class SleepingBackend:
         return {"output": "done", "session_id": ""}
 
 
+class ContextCapturingBackend:
+    key = "codex"
+
+    def __init__(self) -> None:
+        self.contexts = []
+
+    def invoke(self, agent, prompt: str, session_name: str, context) -> dict[str, str]:
+        self.contexts.append(context)
+        return {"output": "done", "session_id": ""}
+
+
 class AgentHubTimeTests(unittest.TestCase):
     def test_now_iso_is_utc_zulu(self) -> None:
         rendered = now_iso()
@@ -465,6 +476,64 @@ class AgentHubCancellationTests(unittest.TestCase):
         self.assertEqual(2, task.progress_seq)
         self.assertEqual("先检查项目", saved_task["reasoning_text"])
         self.assertEqual("正在生成回答", saved_task["live_output_text"])
+
+    def test_reasoning_callback_is_limited_to_web_tasks(self) -> None:
+        workdir = self.temp_path / "workspace"
+        session_file = self.temp_path / "sessions" / "main.txt"
+        workdir.mkdir(parents=True, exist_ok=True)
+        session_file.parent.mkdir(parents=True, exist_ok=True)
+        config = HubConfig(
+            codex_command="codex",
+            claude_command="claude",
+            opencode_command="opencode",
+            agents=[AgentConfig("main", "Main", str(workdir), str(session_file), backend="codex")],
+        )
+        wechat_task = HubTask(
+            id="task-wechat-reasoning-001",
+            agent_id="main",
+            agent_name="Main",
+            backend="codex",
+            source="wechat",
+            sender_id="sender-test",
+            prompt="hello",
+            status="running",
+            created_at="2026-07-29T00:00:00",
+            session_name="default",
+            workdir=str(workdir),
+        )
+        web_task = HubTask(
+            id="task-web-reasoning-001",
+            agent_id="main",
+            agent_name="Main",
+            backend="codex",
+            source="stream-web",
+            sender_id="",
+            prompt="hello",
+            status="running",
+            created_at="2026-07-29T00:00:00",
+            session_name="default",
+            workdir=str(workdir),
+        )
+        state_path = self.temp_path / "state" / "agent_hub_state.json"
+        with (
+            patch("agent_hub.STATE_PATH", state_path),
+            patch("agent_hub.discover_external_agent_processes", return_value=[]),
+        ):
+            hub = MultiCodexHub(config)
+            backend = ContextCapturingBackend()
+            hub.backend_registry["codex"] = backend
+            hub.tasks.extend([wechat_task, web_task])
+
+            hub._invoke_backend(config.agents[0], wechat_task)
+            hub._invoke_backend(config.agents[0], web_task)
+
+            backend.contexts[0].on_reasoning("Inspecting repository")
+            backend.contexts[0].on_progress("正常回答分片")
+            backend.contexts[1].on_reasoning("Inspecting repository")
+
+        self.assertEqual("", wechat_task.reasoning_text)
+        self.assertEqual("正常回答分片", wechat_task.progress_text)
+        self.assertEqual("Inspecting repository", web_task.reasoning_text)
 
     def test_command_activity_updates_existing_item_and_persists(self) -> None:
         workdir = self.temp_path / "workspace"
