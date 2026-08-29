@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 import urllib.request
@@ -9,6 +10,7 @@ from unittest.mock import patch
 
 import env_tools
 import ui_main
+from core import platform_compat
 from core.http_json import decode_json_bytes, request_json
 from core.json_store import load_json
 
@@ -300,6 +302,34 @@ class InfraHelperTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual("psutil", result.key)
         self.assertIn("definitely_missing_chatbridge_package", result.detail)
+
+    def test_codex_app_server_prefers_latest_desktop_bundled_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bin_dir = Path(temp_dir) / "OpenAI" / "Codex" / "bin"
+            older = bin_dir / "older" / "codex.exe"
+            newer = bin_dir / "newer" / "codex.exe"
+            older.parent.mkdir(parents=True)
+            newer.parent.mkdir(parents=True)
+            older.touch()
+            newer.touch()
+            os.utime(older, (1, 1))
+            os.utime(newer, (2, 2))
+
+            with (
+                patch.object(platform_compat, "IS_WINDOWS", True),
+                patch.dict(platform_compat.os.environ, {"LOCALAPPDATA": temp_dir}),
+            ):
+                resolved = platform_compat.resolve_codex_app_server_command("codex.cmd")
+
+        self.assertEqual(str(newer), resolved)
+
+    def test_codex_app_server_preserves_explicit_command(self) -> None:
+        explicit = "C:/tools/codex-custom.exe"
+
+        with patch.object(platform_compat, "IS_WINDOWS", True):
+            resolved = platform_compat.resolve_codex_app_server_command(explicit)
+
+        self.assertEqual(explicit, resolved)
 
 
 if __name__ == "__main__":

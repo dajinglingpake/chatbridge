@@ -486,6 +486,7 @@ class McpServerInjectionTests(unittest.TestCase):
             with (
                 patch("agent_hub.STATE_PATH", temp_path / "state" / "agent_hub_state.json"),
                 patch("agent_hub.discover_external_agent_processes", return_value=[]),
+                patch("agent_hub.resolve_codex_app_server_command", return_value="codex.cmd"),
             ):
                 hub = MultiCodexHub(config)
                 hub.backend_registry["codex"] = backend

@@ -50,6 +50,27 @@ def resolve_command(name: str) -> str:
     return preferred
 
 
+def resolve_codex_app_server_command(command: str) -> str:
+    cleaned = command.strip() or default_command("codex")
+    if not IS_WINDOWS or cleaned.lower() not in {"codex", "codex.cmd"}:
+        return cleaned
+
+    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+    if local_app_data:
+        bin_dir = Path(local_app_data) / "OpenAI" / "Codex" / "bin"
+        candidates: list[tuple[int, str]] = []
+        try:
+            for path in bin_dir.glob("*/codex.exe"):
+                if path.is_file():
+                    candidates.append((path.stat().st_mtime_ns, str(path)))
+        except OSError:
+            candidates = []
+        if candidates:
+            return max(candidates)[1]
+
+    return resolve_command(cleaned)
+
+
 def command_candidates(name: str) -> list[str]:
     preferred = default_command(name)
     if preferred == name:

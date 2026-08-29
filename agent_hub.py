@@ -20,7 +20,7 @@ from core.state_models import AgentRuntimeState, HubTask, IpcRequestEnvelope, Ip
 from core.bridge_followup_hint import build_task_followup_hint
 from core.bridge_notifier import broadcast_bridge_notice_by_kind
 from local_ipc import REQUEST_DIR, cleanup_processed_requests, create_bridge_request, ensure_ipc_dirs, mark_processed, read_request, write_response
-from core.platform_compat import IS_WINDOWS, creationflags, resolve_command, terminate_process_tree
+from core.platform_compat import IS_WINDOWS, creationflags, resolve_codex_app_server_command, resolve_command, terminate_process_tree
 from runtime_stack import discover_external_agent_processes
 
 
@@ -796,12 +796,19 @@ class MultiCodexHub:
                 return
             self._update_task_stream_text(task.id, "reasoning_text", text)
 
+        codex_transport = self._codex_transport_for_task(task)
+        codex_command = (
+            resolve_codex_app_server_command(self.config.codex_command)
+            if codex_transport == "app-server"
+            else self.config.codex_command
+        )
+
         return backend.invoke(
             agent=effective_agent,
             prompt=task.prompt,
             session_name=task.session_name,
             context=BackendContext(
-                codex_command=self.config.codex_command,
+                codex_command=codex_command,
                 claude_command=self.config.claude_command,
                 opencode_command=self.config.opencode_command,
                 session_dir=SESSION_DIR,
@@ -821,7 +828,7 @@ class MultiCodexHub:
                 codex_search_enabled=bool(task.codex_search_enabled),
                 images=list(task.images),
                 codex_slim_exec=self.config.codex_slim_exec,
-                codex_transport=self._codex_transport_for_task(task),
+                codex_transport=codex_transport,
                 codex_thread_id=task.session_id.strip(),
                 hub_task_timeout_seconds=600,
             ),
@@ -1192,7 +1199,7 @@ class MultiCodexHub:
 
     def _codex_backend_context(self) -> BackendContext:
         return BackendContext(
-            codex_command=self.config.codex_command,
+            codex_command=resolve_codex_app_server_command(self.config.codex_command),
             claude_command=self.config.claude_command,
             opencode_command=self.config.opencode_command,
             session_dir=SESSION_DIR,
