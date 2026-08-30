@@ -9,7 +9,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from ui.app import _codex_rollout_runtime_hint, _codex_rollout_runtime_snapshot, _codex_rollout_runtime_started_at, _load_persisted_stream_session, _normalize_stream_session_name, _persist_stream_session, _stream_initial_history_limit, _update_codex_thread_runtime_statuses, group_codex_threads_by_workspace
+from ui.app import CODEX_THREAD_RUNTIME_STALE_SECONDS, CODEX_THREAD_RUNTIME_TERMINAL_GRACE_SECONDS, _codex_rollout_runtime_hint, _codex_rollout_runtime_snapshot, _codex_rollout_runtime_started_at, _load_persisted_stream_session, _normalize_stream_session_name, _persist_stream_session, _stream_initial_history_limit, _update_codex_thread_runtime_statuses, group_codex_threads_by_workspace
 from ui.sections import _prepare_stream_render_context, _stream_activity_render_window, _stream_client_time, _stream_display_time, _stream_image_is_previewable, _stream_markdown, _stream_model_display_name, _stream_reasoning_effort_label, _stream_task_sort_key, _stream_task_uses_utc_naive_time, _stream_text, _stream_time_delta_ms, _stream_timeline_items, render_mobile_stream_composer_section, render_mobile_stream_section
 
 
@@ -3927,6 +3927,133 @@ class StreamComposerTests(unittest.TestCase):
             unchanged = _update_codex_thread_runtime_statuses([thread], probes, now=now + 1)
 
             self.assertFalse(unchanged)
+            self.assertEqual("idle", thread["runtime_status"])
+
+    def test_codex_terminal_turn_clears_unterminated_rollout_after_grace_period(self) -> None:
+        for latest_turn_status in ("completed", "failed", "canceled", "interrupted"):
+            with self.subTest(latest_turn_status=latest_turn_status), TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "unterminated.jsonl"
+                path.write_text(
+                    "\n".join(
+                        [
+                            json.dumps({"type": "event_msg", "payload": {"type": "task_started"}}),
+                            json.dumps({"type": "event_msg", "payload": {"type": "exec_command_begin", "command": "pytest -q"}}),
+                            json.dumps({"type": "event_msg", "payload": {"type": "exec_command_end"}}),
+                        ]
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                now = time.time()
+                os.utime(path, (now, now))
+                thread = {
+                    "id": f"thread-{latest_turn_status}",
+                    "path": str(path),
+                    "status": "notLoaded",
+                    "latest_turn_status": latest_turn_status,
+                }
+                probes: dict[str, object] = {}
+
+                _update_codex_thread_runtime_statuses([thread], probes, now=now)
+                self.assertEqual("running", thread["runtime_status"])
+                self.assertEqual("completed", thread["runtime_activity"]["status"])
+
+                changed = _update_codex_thread_runtime_statuses(
+                    [thread],
+                    probes,
+                    now=now + CODEX_THREAD_RUNTIME_TERMINAL_GRACE_SECONDS + 1,
+                )
+
+                self.assertTrue(changed)
+                self.assertEqual("idle", thread["runtime_status"])
+                self.assertEqual({}, thread["runtime_activity"])
+
+    def test_codex_interrupted_turn_keeps_genuinely_running_activity_alive(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "active-command.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"type": "event_msg", "payload": {"type": "task_started"}}),
+                        json.dumps({"type": "event_msg", "payload": {"type": "exec_command_begin", "command": "long-task"}}),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            now = time.time()
+            os.utime(path, (now, now))
+            thread = {
+                "id": "thread-active-interrupted",
+                "path": str(path),
+                "status": "notLoaded",
+                "latest_turn_status": "interrupted",
+            }
+            probes: dict[str, object] = {}
+
+            _update_codex_thread_runtime_statuses([thread], probes, now=now)
+            changed = _update_codex_thread_runtime_statuses(
+                [thread],
+                probes,
+                now=now + CODEX_THREAD_RUNTIME_TERMINAL_GRACE_SECONDS + 1,
+            )
+
+            self.assertFalse(changed)
+            self.assertEqual("running", thread["runtime_status"])
+            self.assertEqual("running", thread["runtime_activity"]["status"])
+
+            stale = _update_codex_thread_runtime_statuses(
+                [thread],
+                probes,
+                now=now + CODEX_THREAD_RUNTIME_STALE_SECONDS + 1,
+            )
+
+            self.assertTrue(stale)
+            self.assertEqual("idle", thread["runtime_status"])
+
+    def test_codex_rollout_size_change_resets_terminal_silence_without_mtime_change(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "growing-rollout.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"type": "event_msg", "payload": {"type": "task_started"}}),
+                        json.dumps({"type": "event_msg", "payload": {"type": "exec_command_begin", "command": "step-one"}}),
+                        json.dumps({"type": "event_msg", "payload": {"type": "exec_command_end"}}),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            now = time.time()
+            os.utime(path, (now, now))
+            thread = {
+                "id": "thread-growing-rollout",
+                "path": str(path),
+                "status": "notLoaded",
+                "latest_turn_status": "interrupted",
+            }
+            probes: dict[str, object] = {}
+            _update_codex_thread_runtime_statuses([thread], probes, now=now)
+
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"type": "event_msg", "payload": {"type": "token_count"}}) + "\n")
+            os.utime(path, (now, now))
+            refreshed_at = now + CODEX_THREAD_RUNTIME_TERMINAL_GRACE_SECONDS + 1
+
+            changed = _update_codex_thread_runtime_statuses([thread], probes, now=refreshed_at)
+
+            self.assertFalse(changed)
+            self.assertEqual("running", thread["runtime_status"])
+            self.assertEqual(refreshed_at, probes["thread-growing-rollout"]["last_activity_at"])
+
+            finished = _update_codex_thread_runtime_statuses(
+                [thread],
+                probes,
+                now=refreshed_at + CODEX_THREAD_RUNTIME_TERMINAL_GRACE_SECONDS + 1,
+            )
+
+            self.assertTrue(finished)
             self.assertEqual("idle", thread["runtime_status"])
 
     def test_stream_composer_signature_tracks_codex_terminal_state(self) -> None:

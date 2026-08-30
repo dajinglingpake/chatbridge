@@ -44,6 +44,7 @@ STREAM_CODEX_HISTORY_PAGE_SIZE = 4
 STREAM_SIDEBAR_PAGE_SIZE = 40
 CODEX_THREAD_RUNTIME_STATUS_LIMIT = 100
 CODEX_THREAD_RUNTIME_RECENT_SECONDS = 5.0
+CODEX_THREAD_RUNTIME_TERMINAL_GRACE_SECONDS = 30.0
 CODEX_THREAD_RUNTIME_STALE_SECONDS = 300.0
 CODEX_THREAD_RUNTIME_TAIL_BYTES = 65536
 CODEX_THREAD_RUNTIME_START_TAIL_BYTES = 8388608
@@ -488,12 +489,15 @@ def _update_codex_thread_runtime_statuses(
     active_thread_ids: set[str] = set()
     now_value = time.time() if now is None else float(now)
     known_running_statuses = {"active", "inprogress", "in_progress", "running", "working"}
+    definitive_terminal_turn_statuses = {"canceled", "cancelled", "completed", "failed"}
+    ambiguous_terminal_turn_statuses = {"interrupted"}
     for thread in threads:
         thread_id = str(thread.get("id") or thread.get("session_id") or "").strip()
         if not thread_id:
             continue
         active_thread_ids.add(thread_id)
         raw_status = str(thread.get("status") or "").strip().lower()
+        latest_turn_status = str(thread.get("latest_turn_status") or "").strip().lower().replace("-", "_")
         runtime_status = "running" if raw_status in known_running_statuses else "idle"
         runtime_activity: dict[str, object] = {}
         if not bool(thread.get("archived")) and checked < CODEX_THREAD_RUNTIME_STATUS_LIMIT:
@@ -507,10 +511,21 @@ def _update_codex_thread_runtime_statuses(
                 signature = f"{file_stat.st_mtime_ns}:{file_stat.st_size}"
                 age_seconds = max(0.0, now_value - file_stat.st_mtime)
                 cached = probes.get(thread_id) if isinstance(probes.get(thread_id), dict) else {}
-                running_hint = cached.get("running_hint") if str(cached.get("signature") or "") == signature else None
+                cached_signature = str(cached.get("signature") or "")
+                signature_matches = cached_signature == signature
+                signature_changed = bool(cached_signature) and not signature_matches
+                running_hint = cached.get("running_hint") if signature_matches else None
                 runtime_started_at = str(cached.get("runtime_started_at") or "").strip()
                 runtime_activity = _codex_runtime_activity_copy(cached.get("runtime_activity"))
-                if str(cached.get("signature") or "") != signature and age_seconds <= CODEX_THREAD_RUNTIME_STALE_SECONDS:
+                try:
+                    last_activity_at = float(cached.get("last_activity_at") or 0.0) if signature_matches else 0.0
+                except (TypeError, ValueError):
+                    last_activity_at = 0.0
+                if not signature_matches and (
+                    age_seconds <= CODEX_THREAD_RUNTIME_STALE_SECONDS
+                    or signature_changed
+                    or bool(latest_turn_status)
+                ):
                     runtime_snapshot = _codex_rollout_runtime_snapshot(path_text)
                     running_hint = runtime_snapshot.get("running_hint")
                     runtime_activity = _codex_runtime_activity_copy(runtime_snapshot.get("activity"))
@@ -518,7 +533,28 @@ def _update_codex_thread_runtime_statuses(
                         runtime_started_at = _codex_rollout_runtime_started_at(path_text)
                         if not runtime_started_at:
                             runtime_started_at = datetime.fromtimestamp(now_value).astimezone().isoformat(timespec="seconds")
-                if age_seconds > CODEX_THREAD_RUNTIME_STALE_SECONDS:
+                if signature_changed:
+                    last_activity_at = now_value
+                elif last_activity_at <= 0:
+                    last_activity_at = file_stat.st_mtime
+                    if running_hint is True and latest_turn_status:
+                        last_activity_at = now_value
+                silence_seconds = max(0.0, now_value - last_activity_at)
+                activity_status = str(runtime_activity.get("status") or "").strip().lower()
+                terminal_turn_is_quiet = (
+                    latest_turn_status in definitive_terminal_turn_statuses
+                    or (
+                        latest_turn_status in ambiguous_terminal_turn_statuses
+                        and activity_status != "running"
+                    )
+                )
+                if (
+                    running_hint is True
+                    and terminal_turn_is_quiet
+                    and silence_seconds > CODEX_THREAD_RUNTIME_TERMINAL_GRACE_SECONDS
+                ):
+                    running_hint = False
+                elif silence_seconds > CODEX_THREAD_RUNTIME_STALE_SECONDS:
                     running_hint = False
                 if running_hint is not True:
                     runtime_started_at = ""
@@ -526,12 +562,17 @@ def _update_codex_thread_runtime_statuses(
                 probes[thread_id] = {
                     "signature": signature,
                     "running_hint": running_hint,
+                    "last_activity_at": last_activity_at,
                     "runtime_started_at": runtime_started_at,
                     "runtime_activity": _codex_runtime_activity_copy(runtime_activity),
                 }
                 if running_hint is False:
                     runtime_status = "idle"
-                elif running_hint is True or (running_hint is None and age_seconds <= CODEX_THREAD_RUNTIME_RECENT_SECONDS):
+                elif (
+                    running_hint is True
+                    or latest_turn_status in known_running_statuses
+                    or (running_hint is None and silence_seconds <= CODEX_THREAD_RUNTIME_RECENT_SECONDS)
+                ):
                     runtime_status = "running"
                 thread_runtime_started_at = runtime_started_at if runtime_status == "running" else ""
                 if str(thread.get("runtime_started_at") or "") != thread_runtime_started_at:
@@ -3750,6 +3791,9 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         path_text = str(selected_payload.get("path") or "").strip()
         raw_status = str(selected_payload.get("status") or "").strip()
         archived = bool(selected_payload.get("archived"))
+        latest_turn_status = str(selected_payload.get("latest_turn_status") or "").strip()
+        latest_turn_started_at = str(selected_payload.get("latest_turn_started_at") or "").strip()
+        latest_turn_completed_at = str(selected_payload.get("latest_turn_completed_at") or "").strip()
         sidebar_value = state.get("stream_sidebar_codex_threads")
         if isinstance(sidebar_value, list):
             sidebar_thread = next(
@@ -3770,17 +3814,28 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             str(current.get("id") or "").strip() != selected_id
             or str(current.get("path") or "").strip() != path_text
         )
+        runtime_metadata = {
+            "path": path_text,
+            "status": raw_status,
+            "archived": archived,
+            "latest_turn_status": latest_turn_status,
+            "latest_turn_started_at": latest_turn_started_at,
+            "latest_turn_completed_at": latest_turn_completed_at,
+        }
         if identity_changed:
             state["stream_selected_codex_runtime_thread"] = {
                 "id": selected_id,
-                "path": path_text,
-                "status": raw_status,
-                "archived": archived,
+                **runtime_metadata,
                 "runtime_status": "idle",
                 "runtime_started_at": "",
                 "runtime_activity": {},
             }
             _refresh_codex_runtime_statuses()
+        else:
+            metadata_changed = any(current.get(key) != value for key, value in runtime_metadata.items())
+            if metadata_changed:
+                current.update(runtime_metadata)
+                _refresh_codex_runtime_statuses()
         runtime_thread = _stream_selected_codex_runtime_thread()
         selected_payload["runtime_status"] = str(runtime_thread.get("runtime_status") or "idle")
         selected_payload["runtime_started_at"] = str(runtime_thread.get("runtime_started_at") or "")

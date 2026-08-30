@@ -1178,6 +1178,14 @@ class CodexBackend(AgentBackend):
         cwd = str(thread.get("cwd") or "").strip()
         git_info = thread.get("gitInfo") if isinstance(thread.get("gitInfo"), dict) else {}
         status = thread.get("status") if isinstance(thread.get("status"), dict) else {}
+        turns = thread.get("turns") if isinstance(thread.get("turns"), list) else []
+        latest_turn = next((turn for turn in reversed(turns) if isinstance(turn, dict)), {})
+        latest_turn_status_value = latest_turn.get("status")
+        latest_turn_status = (
+            str(latest_turn_status_value.get("type") or latest_turn_status_value.get("status") or "").strip()
+            if isinstance(latest_turn_status_value, dict)
+            else str(latest_turn_status_value or "").strip()
+        )
         preview = str(thread.get("preview") or "").strip()
         name = str(thread.get("name") or "").strip()
         title = name or preview or (Path(cwd).name if cwd else thread_id)
@@ -1193,6 +1201,11 @@ class CodexBackend(AgentBackend):
             "updated_at": cls._format_app_server_timestamp(thread.get("updatedAt")),
             "recency_at": cls._format_app_server_timestamp(thread.get("recencyAt")),
             "status": str(status.get("type") or thread.get("status") or "").strip(),
+            "latest_turn_status": latest_turn_status,
+            "latest_turn_started_at": cls._format_app_server_timestamp(
+                latest_turn.get("startedAt") or latest_turn.get("createdAt")
+            ),
+            "latest_turn_completed_at": cls._format_app_server_timestamp(latest_turn.get("completedAt")),
             "branch": str(git_info.get("branch") or "").strip(),
             "sha": str(git_info.get("sha") or "").strip(),
             "path": str(thread.get("path") or "").strip(),

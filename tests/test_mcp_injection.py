@@ -344,6 +344,9 @@ class McpServerInjectionTests(unittest.TestCase):
                 {
                     "id": "turn-1",
                     "createdAt": 1783161500,
+                    "startedAt": 1783161501,
+                    "completedAt": 1783161562,
+                    "status": "completed",
                     "items": [
                         {"type": "userMessage", "id": "item-user", "content": [{"type": "text", "text": "用户问题"}]},
                         {"type": "reasoning", "id": "item-reasoning", "summary": ["先检查状态"]},
@@ -383,6 +386,9 @@ class McpServerInjectionTests(unittest.TestCase):
         self.assertEqual("继续真实任务", normalized["title"])
         self.assertEqual("I:/AI/chatbridge", normalized["cwd"])
         self.assertEqual("main", normalized["branch"])
+        self.assertEqual("completed", normalized["latest_turn_status"])
+        self.assertEqual(backend._format_app_server_timestamp(1783161501), normalized["latest_turn_started_at"])
+        self.assertEqual(backend._format_app_server_timestamp(1783161562), normalized["latest_turn_completed_at"])
         self.assertEqual(["user", "reasoning", "activity", "activity", "activity", "assistant"], [message["role"] for message in messages])
         self.assertEqual(["用户问题", "先检查状态", "shell: pytest", "[x] 修复滚动", "completed", "最终回答"], [message["text"] for message in messages])
         self.assertEqual([1, 1, 1, 1, 1, 1], [message["turn_order"] for message in messages])

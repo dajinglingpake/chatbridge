@@ -331,12 +331,14 @@ def build_stream_signature_snapshot(
         session_task_limit=session_task_limit,
     )
     task_parts = [_raw_hub_task_signature_part(task) for task in window.tasks]
+    codex_runtime_signature: tuple[str, ...] = ()
     goal_signature: tuple[str, ...] = ()
     model_signature: tuple[str, ...] = ()
     selected_codex_thread_id = codex_thread_id_from_session_name(selected_session_name)
     if selected_codex_thread_id:
         selected_limit = _safe_limit(session_task_limit, MOBILE_SESSION_TASK_LIMIT)
         codex_task_parts, codex_turn_count = _codex_thread_signature_parts_cached(selected_codex_thread_id, limit=selected_limit)
+        codex_runtime_signature = _codex_thread_runtime_signature_cached(selected_codex_thread_id)
         window.session_task_counts[codex_thread_session_name(selected_codex_thread_id)] = codex_turn_count
         raw_tasks = raw_state.get("tasks") if isinstance(raw_state.get("tasks"), list) else []
         window_task_ids = {_raw_clean_text(task, "id") for task in window.tasks}
@@ -373,6 +375,7 @@ def build_stream_signature_snapshot(
         counts_part,
         session_counts_part,
         tuple(task_parts),
+        codex_runtime_signature,
         goal_signature,
         model_signature,
     )
@@ -3518,6 +3521,21 @@ def _codex_thread_signature_parts_cached(
                 cached["signature_parts_by_limit"] = signatures
             signatures[safe_limit] = signature
     return signature
+
+
+def _codex_thread_runtime_signature_cached(thread_id: str) -> tuple[str, ...]:
+    cleaned_thread_id = thread_id.strip()
+    if not cleaned_thread_id:
+        return ()
+    with _CODEX_THREAD_DETAIL_LOCK:
+        cached = _CODEX_THREAD_DETAIL_CACHE.get(cleaned_thread_id)
+        thread = cached.get("thread") if isinstance(cached, dict) else None
+        if not isinstance(thread, dict):
+            return ()
+        return tuple(
+            str(thread.get(key) or "").strip()
+            for key in ("latest_turn_status", "latest_turn_started_at", "latest_turn_completed_at")
+        )
 
 
 def _mobile_codex_thread_payload(thread: dict[str, object]) -> dict[str, object]:

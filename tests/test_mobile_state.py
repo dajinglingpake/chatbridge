@@ -2063,6 +2063,46 @@ class MobileStateTests(unittest.TestCase):
         self.assertEqual(1, payloads.call_count)
         self.assertIn(("codex:thread-1", "1"), first[1])
 
+    def test_stream_signature_tracks_latest_codex_turn_status(self) -> None:
+        thread = {
+            "id": "thread-runtime",
+            "messages": [],
+            "latest_turn_status": "interrupted",
+            "latest_turn_started_at": "2026-08-30T04:00:00",
+            "latest_turn_completed_at": "",
+        }
+        try:
+            mobile._CODEX_THREAD_DETAIL_CACHE["thread-runtime"] = {
+                "loaded_at": mobile.time.monotonic(),
+                "thread": thread,
+                "signature_parts_by_limit": {},
+                "task_payloads_by_limit": {},
+                "turn_count": 0,
+            }
+            with (
+                patch("ui.mobile._load_raw_hub_state", return_value={"tasks": [], "agents": []}),
+                patch("ui.mobile._codex_cached_rollout_payload", return_value={}),
+            ):
+                interrupted = build_stream_signature_snapshot(
+                    selected_session_name="codex:thread-runtime",
+                    task_limit=1,
+                    session_task_limit=30,
+                )
+                thread["latest_turn_status"] = "completed"
+                thread["latest_turn_completed_at"] = "2026-08-30T04:02:00"
+                completed = build_stream_signature_snapshot(
+                    selected_session_name="codex:thread-runtime",
+                    task_limit=1,
+                    session_task_limit=30,
+                )
+        finally:
+            mobile._CODEX_THREAD_DETAIL_CACHE.clear()
+            mobile._CODEX_THREAD_DETAIL_INFLIGHT.clear()
+
+        self.assertEqual(("interrupted", "2026-08-30T04:00:00", ""), interrupted[-3])
+        self.assertEqual(("completed", "2026-08-30T04:00:00", "2026-08-30T04:02:00"), completed[-3])
+        self.assertNotEqual(interrupted, completed)
+
     def test_stream_signature_tracks_active_goal_updates(self) -> None:
         with (
             patch("ui.mobile._load_raw_hub_state", return_value={"tasks": [], "agents": []}),
