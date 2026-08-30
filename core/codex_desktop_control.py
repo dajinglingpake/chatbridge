@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
+import queue
 import re
+import struct
+import threading
 import time
 import uuid
 from dataclasses import dataclass
+from typing import BinaryIO
 from urllib.request import ProxyHandler, Request, build_opener
 
 import psutil
@@ -12,7 +17,11 @@ import psutil
 
 CODEX_DESKTOP_PAGE_URL = "app://-/index.html"
 DEBUGGER_RESPONSE_LIMIT = 1024 * 1024
+APP_TOOLS_FRAME_LIMIT = 8 * 1024 * 1024
+APP_TOOLS_PIPE_ENV_VAR = "CODEX_APP_TOOLS_PIPE_PATH"
 REMOTE_DEBUGGING_PORT_RE = re.compile(r"^--remote-debugging-port(?:=(\d+))?$")
+APP_TOOLS_PIPE_RE = re.compile(r"^\\\\\.\\pipe\\codex-[A-Za-z0-9._-]+$")
+ACTIVE_TURN_STATUSES = {"inprogress", "in_progress", "running"}
 
 
 class CodexDesktopControlError(RuntimeError):
@@ -75,6 +84,229 @@ def _codex_desktop_debugging_ports() -> list[int]:
         if port is not None and port not in ports:
             ports.append(port)
     return ports
+
+
+def _normalized_app_tools_pipe_path(value: object) -> str:
+    path = str(value or "").strip().strip('"')
+    return path if APP_TOOLS_PIPE_RE.fullmatch(path) else ""
+
+
+def _codex_desktop_app_tools_pipe_paths() -> list[str]:
+    paths: list[str] = []
+    for process in psutil.process_iter(("name", "exe", "cmdline")):
+        try:
+            info = process.info
+            cmdline = info.get("cmdline") or []
+            location = " ".join(
+                [str(info.get("exe") or ""), *(str(item or "") for item in cmdline)]
+            ).replace("\\", "/").lower()
+            if (
+                "openai.codex_" not in location
+                and "/openai/codex/" not in location
+                and "codex-app-tools" not in location
+            ):
+                continue
+            environment = process.environ()
+        except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess, OSError):
+            continue
+        path = _normalized_app_tools_pipe_path(environment.get(APP_TOOLS_PIPE_ENV_VAR))
+        if path and path not in paths:
+            paths.append(path)
+
+    inherited_path = _normalized_app_tools_pipe_path(os.environ.get(APP_TOOLS_PIPE_ENV_VAR))
+    if inherited_path and inherited_path not in paths:
+        paths.append(inherited_path)
+    return paths
+
+
+def _read_exact(stream: BinaryIO, size: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining:
+        chunk = stream.read(remaining)
+        if not chunk:
+            raise CodexDesktopUnavailableError("Codex app-tools 管道已关闭")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _native_pipe_request_sync(
+    pipe_path: str,
+    method: str,
+    params: dict[str, object],
+) -> object:
+    request_id = uuid.uuid4().int & 0x7FFFFFFF
+    request_payload = json.dumps(
+        {
+            "id": request_id,
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(request_payload) > APP_TOOLS_FRAME_LIMIT:
+        raise CodexDesktopControlError("Codex app-tools 请求过大")
+
+    try:
+        with open(pipe_path, "r+b", buffering=0) as stream:
+            stream.write(struct.pack("<I", len(request_payload)) + request_payload)
+            frame_size = struct.unpack("<I", _read_exact(stream, 4))[0]
+            if frame_size > APP_TOOLS_FRAME_LIMIT:
+                raise CodexDesktopControlError("Codex app-tools 响应过大")
+            response = json.loads(_read_exact(stream, frame_size).decode("utf-8"))
+    except CodexDesktopControlError:
+        raise
+    except (OSError, ValueError, json.JSONDecodeError, struct.error) as exc:
+        raise CodexDesktopUnavailableError(f"无法连接 Codex app-tools 管道：{exc}") from exc
+
+    if not isinstance(response, dict) or response.get("id") != request_id:
+        raise CodexDesktopControlError("Codex app-tools 返回了无效响应")
+    error = response.get("error")
+    if isinstance(error, dict):
+        raise CodexDesktopControlError(str(error.get("message") or error))
+    if "result" not in response:
+        raise CodexDesktopControlError("Codex app-tools 响应缺少 result")
+    return response["result"]
+
+
+def _native_pipe_request(
+    pipe_path: str,
+    method: str,
+    params: dict[str, object],
+    *,
+    timeout_seconds: float,
+) -> object:
+    results: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
+
+    def worker() -> None:
+        try:
+            results.put((True, _native_pipe_request_sync(pipe_path, method, params)))
+        except Exception as exc:
+            results.put((False, exc))
+
+    threading.Thread(target=worker, name="codex-app-tools", daemon=True).start()
+    try:
+        succeeded, result = results.get(timeout=max(0.2, timeout_seconds))
+    except queue.Empty as exc:
+        raise CodexDesktopControlError("Codex app-tools 请求超时") from exc
+    if succeeded:
+        return result
+    if isinstance(result, Exception):
+        raise result
+    raise CodexDesktopControlError("Codex app-tools 请求失败")
+
+
+def _run_codex_app_tools_request(
+    method: str,
+    params: dict[str, object],
+    *,
+    timeout_seconds: float,
+) -> object:
+    pipe_paths = _codex_desktop_app_tools_pipe_paths()
+    if not pipe_paths:
+        raise CodexDesktopUnavailableError("未发现 Codex Desktop app-tools 管道")
+
+    unavailable_errors: list[str] = []
+    for pipe_path in pipe_paths:
+        try:
+            return _native_pipe_request(
+                pipe_path,
+                method,
+                params,
+                timeout_seconds=timeout_seconds,
+            )
+        except CodexDesktopUnavailableError as exc:
+            unavailable_errors.append(str(exc))
+    detail = " | ".join(dict.fromkeys(unavailable_errors)) or "未知错误"
+    raise CodexDesktopUnavailableError(f"Codex Desktop app-tools 不可用：{detail}")
+
+
+def _app_tool_content_text(payload: dict[str, object]) -> str:
+    content_items = payload.get("contentItems")
+    if not isinstance(content_items, list):
+        return ""
+    return "\n".join(
+        str(item.get("text") or "").strip()
+        for item in content_items
+        if isinstance(item, dict) and str(item.get("text") or "").strip()
+    )
+
+
+def _call_codex_app_tool(
+    tool: str,
+    arguments: dict[str, object],
+    *,
+    caller_thread_id: str,
+    timeout_seconds: float,
+    call_id: str = "",
+) -> dict[str, object]:
+    cleaned_call_id = call_id or f"chatbridge:{uuid.uuid4()}"
+    payload = _run_codex_app_tools_request(
+        "tools/call",
+        {
+            "arguments": arguments,
+            "callId": cleaned_call_id,
+            "namespace": "codex_app",
+            "threadId": caller_thread_id,
+            "tool": tool,
+            "turnId": f"chatbridge:{uuid.uuid4()}",
+        },
+        timeout_seconds=timeout_seconds,
+    )
+    if not isinstance(payload, dict):
+        raise CodexDesktopControlError("Codex app-tools 返回了无效工具响应")
+    if not bool(payload.get("success")):
+        raise CodexDesktopControlError(_app_tool_content_text(payload) or f"Codex 工具调用失败：{tool}")
+    return payload
+
+
+def _app_tool_json_content(payload: dict[str, object]) -> dict[str, object]:
+    text = _app_tool_content_text(payload)
+    if not text:
+        return {}
+    try:
+        decoded = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _read_codex_app_thread_state(thread_id: str, *, timeout_seconds: float) -> dict[str, object]:
+    payload = _call_codex_app_tool(
+        "read_thread",
+        {
+            "threadId": thread_id,
+            "turnLimit": 2,
+            "includeOutputs": False,
+        },
+        caller_thread_id=thread_id,
+        timeout_seconds=timeout_seconds,
+    )
+    state = _app_tool_json_content(payload)
+    if not state:
+        raise CodexDesktopControlError("Codex read_thread 未返回会话状态")
+    return state
+
+
+def _thread_turns(state: dict[str, object]) -> list[dict[str, object]]:
+    turns = state.get("turns")
+    return [item for item in turns if isinstance(item, dict)] if isinstance(turns, list) else []
+
+
+def _active_turn_id(state: dict[str, object]) -> str:
+    for turn in _thread_turns(state):
+        status = str(turn.get("status") or "").replace(" ", "").lower()
+        if status in ACTIVE_TURN_STATUSES:
+            return str(turn.get("id") or "").strip()
+    return ""
+
+
+def _latest_turn_id(state: dict[str, object]) -> str:
+    turns = _thread_turns(state)
+    return str(turns[0].get("id") or "").strip() if turns else ""
 
 
 def _debugger_pages(port: int, *, timeout_seconds: float) -> list[dict[str, object]]:
@@ -482,6 +714,65 @@ def interrupt_codex_desktop_thread(thread_id: str, *, timeout_seconds: float = 1
     return turn_id
 
 
+def _send_codex_app_tools_thread_message(
+    thread_id: str,
+    text: str,
+    *,
+    images: list[str],
+    model: str,
+    reasoning_effort: str,
+    timeout_seconds: float,
+) -> CodexDesktopMessageResult:
+    if images:
+        raise CodexDesktopControlError("新版 Codex Desktop app-tools 暂不支持跨任务图片附件")
+
+    probe_timeout = min(max(1.0, timeout_seconds), 4.0)
+    before_state = _read_codex_app_thread_state(thread_id, timeout_seconds=probe_timeout)
+    before_active_turn_id = _active_turn_id(before_state)
+    before_latest_turn_id = _latest_turn_id(before_state)
+    client_user_message_id = f"chatbridge:{uuid.uuid4()}"
+    arguments: dict[str, object] = {
+        "threadId": thread_id,
+        "prompt": text,
+    }
+    if model:
+        arguments["model"] = model
+    if reasoning_effort:
+        arguments["thinking"] = reasoning_effort
+    send_payload = _call_codex_app_tool(
+        "send_message_to_thread",
+        arguments,
+        caller_thread_id=thread_id,
+        timeout_seconds=timeout_seconds,
+        call_id=client_user_message_id,
+    )
+
+    send_result = _app_tool_json_content(send_payload)
+    returned_turn_id = str(send_result.get("turnId") or send_result.get("turn_id") or "").strip()
+    after_state = _read_codex_app_thread_state(thread_id, timeout_seconds=probe_timeout)
+    after_active_turn_id = _active_turn_id(after_state)
+    after_latest_turn_id = _latest_turn_id(after_state)
+
+    if before_active_turn_id and after_active_turn_id in {"", before_active_turn_id}:
+        mode = "steer"
+        turn_id = returned_turn_id or before_active_turn_id
+    elif before_active_turn_id and after_active_turn_id:
+        mode = "start"
+        turn_id = returned_turn_id or after_active_turn_id
+    else:
+        mode = "start"
+        changed_turn_id = after_latest_turn_id if after_latest_turn_id != before_latest_turn_id else ""
+        turn_id = returned_turn_id or after_active_turn_id or changed_turn_id
+    if not turn_id:
+        raise CodexDesktopControlError("Codex app-tools 已接收消息，但未能确认目标轮次")
+    return CodexDesktopMessageResult(
+        mode=mode,
+        turn_id=turn_id,
+        client_user_message_id=client_user_message_id,
+        reconciled=True,
+    )
+
+
 def send_codex_desktop_thread_message(
     thread_id: str,
     text: str,
@@ -510,11 +801,35 @@ def send_codex_desktop_thread_message(
         model=str(model or "").strip(),
         reasoning_effort=str(reasoning_effort or "").strip(),
     )
-    payload = _run_desktop_action(
-        expression,
-        timeout_seconds=timeout_seconds,
-        failure_message="无法向 Codex 历史会话发送消息",
-    )
+    cdp_error: CodexDesktopControlError | None = None
+    try:
+        payload = _run_desktop_action(
+            expression,
+            timeout_seconds=timeout_seconds,
+            failure_message="无法向 Codex 历史会话发送消息",
+        )
+    except CodexDesktopUnavailableError:
+        return _send_codex_app_tools_thread_message(
+            cleaned_thread_id,
+            cleaned_text,
+            images=cleaned_images,
+            model=str(model or "").strip(),
+            reasoning_effort=str(reasoning_effort or "").strip(),
+            timeout_seconds=timeout_seconds,
+        )
+    except CodexDesktopControlError as exc:
+        cdp_error = exc
+        try:
+            return _send_codex_app_tools_thread_message(
+                cleaned_thread_id,
+                cleaned_text,
+                images=cleaned_images,
+                model=str(model or "").strip(),
+                reasoning_effort=str(reasoning_effort or "").strip(),
+                timeout_seconds=timeout_seconds,
+            )
+        except CodexDesktopUnavailableError:
+            raise cdp_error
     mode = str(payload.get("mode") or "").strip()
     turn_id = str(payload.get("turnId") or "").strip()
     if mode not in {"steer", "start"}:

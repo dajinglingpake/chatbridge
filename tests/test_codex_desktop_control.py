@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from core import codex_desktop_control as control
@@ -12,6 +13,63 @@ class CodexDesktopControlTests(unittest.TestCase):
         self.assertEqual(9335, control._remote_debugging_port(["ChatGPT.exe", "--remote-debugging-port=9335"]))
         self.assertEqual(9444, control._remote_debugging_port(["ChatGPT.exe", "--remote-debugging-port", "9444"]))
         self.assertIsNone(control._remote_debugging_port(["ChatGPT.exe", "--remote-debugging-port=0"]))
+
+    def test_app_tools_pipe_discovery_reads_new_desktop_process_environment(self) -> None:
+        process = SimpleNamespace(
+            info={
+                "name": "codex.exe",
+                "exe": "C:/Users/test/AppData/Local/OpenAI/Codex/bin/codex.exe",
+                "cmdline": ["codex.exe", "app-server"],
+            },
+            environ=lambda: {
+                "CODEX_APP_TOOLS_PIPE_PATH": r"\\.\pipe\codex-browser-use-test-001",
+            },
+        )
+        with (
+            patch.object(control.psutil, "process_iter", return_value=[process]),
+            patch.dict(control.os.environ, {}, clear=True),
+        ):
+            paths = control._codex_desktop_app_tools_pipe_paths()
+
+        self.assertEqual([r"\\.\pipe\codex-browser-use-test-001"], paths)
+
+    def test_call_codex_app_tool_uses_native_desktop_namespace(self) -> None:
+        with patch.object(
+            control,
+            "_run_codex_app_tools_request",
+            return_value={"success": True, "contentItems": []},
+        ) as request:
+            payload = control._call_codex_app_tool(
+                "read_thread",
+                {"threadId": "thread-001"},
+                caller_thread_id="thread-001",
+                timeout_seconds=7,
+                call_id="chatbridge:call-001",
+            )
+
+        self.assertTrue(payload["success"])
+        params = request.call_args.args[1]
+        self.assertEqual("codex_app", params["namespace"])
+        self.assertEqual("read_thread", params["tool"])
+        self.assertEqual("thread-001", params["threadId"])
+        self.assertEqual("chatbridge:call-001", params["callId"])
+
+    def test_call_codex_app_tool_reports_host_tool_failure(self) -> None:
+        with patch.object(
+            control,
+            "_run_codex_app_tools_request",
+            return_value={
+                "success": False,
+                "contentItems": [{"type": "inputText", "text": "thread not found"}],
+            },
+        ):
+            with self.assertRaisesRegex(control.CodexDesktopControlError, "thread not found"):
+                control._call_codex_app_tool(
+                    "send_message_to_thread",
+                    {"threadId": "missing", "prompt": "continue"},
+                    caller_thread_id="missing",
+                    timeout_seconds=7,
+                )
 
     def test_interrupt_expression_queries_latest_turn_before_interrupting(self) -> None:
         expression = control._interrupt_expression("thread-001", timeout_seconds=5)
@@ -171,6 +229,99 @@ class CodexDesktopControlTests(unittest.TestCase):
 
         self.assertEqual("start", result.mode)
         self.assertEqual("turn-002", result.turn_id)
+
+    def test_app_tools_message_steers_the_existing_active_turn(self) -> None:
+        active_state = {
+            "turns": [
+                {"id": "turn-active", "status": "inProgress"},
+                {"id": "turn-old", "status": "completed"},
+            ]
+        }
+        with (
+            patch.object(control, "_read_codex_app_thread_state", side_effect=[active_state, active_state]),
+            patch.object(
+                control,
+                "_call_codex_app_tool",
+                return_value={
+                    "success": True,
+                    "contentItems": [{"type": "inputText", "text": '{"threadId":"thread-001"}'}],
+                },
+            ) as call_tool,
+        ):
+            result = control._send_codex_app_tools_thread_message(
+                "thread-001",
+                "continue",
+                images=[],
+                model="gpt-5.6-sol",
+                reasoning_effort="ultra",
+                timeout_seconds=7,
+            )
+
+        self.assertEqual("steer", result.mode)
+        self.assertEqual("turn-active", result.turn_id)
+        arguments = call_tool.call_args.args[1]
+        self.assertEqual("continue", arguments["prompt"])
+        self.assertEqual("gpt-5.6-sol", arguments["model"])
+        self.assertEqual("ultra", arguments["thinking"])
+
+    def test_app_tools_message_starts_a_new_idle_turn(self) -> None:
+        before_state = {"turns": [{"id": "turn-old", "status": "completed"}]}
+        after_state = {
+            "turns": [
+                {"id": "turn-new", "status": "inProgress"},
+                {"id": "turn-old", "status": "completed"},
+            ]
+        }
+        with (
+            patch.object(control, "_read_codex_app_thread_state", side_effect=[before_state, after_state]),
+            patch.object(
+                control,
+                "_call_codex_app_tool",
+                return_value={"success": True, "contentItems": []},
+            ),
+        ):
+            result = control._send_codex_app_tools_thread_message(
+                "thread-001",
+                "continue",
+                images=[],
+                model="",
+                reasoning_effort="",
+                timeout_seconds=7,
+            )
+
+        self.assertEqual("start", result.mode)
+        self.assertEqual("turn-new", result.turn_id)
+
+    def test_send_codex_desktop_thread_message_uses_app_tools_without_cdp(self) -> None:
+        app_tools_result = control.CodexDesktopMessageResult(
+            mode="steer",
+            turn_id="turn-active",
+            client_user_message_id="chatbridge:message-001",
+            reconciled=True,
+        )
+        with (
+            patch.object(
+                control,
+                "_run_desktop_action",
+                side_effect=control.CodexDesktopUnavailableError("no cdp"),
+            ),
+            patch.object(
+                control,
+                "_send_codex_app_tools_thread_message",
+                return_value=app_tools_result,
+            ) as send,
+        ):
+            result = control.send_codex_desktop_thread_message("thread-001", "continue", timeout_seconds=7)
+
+        self.assertEqual(app_tools_result, result)
+        send.assert_called_once_with(
+            "thread-001",
+            "continue",
+            images=[],
+            model="",
+            reasoning_effort="",
+            timeout_seconds=7,
+        )
 
     def test_send_codex_desktop_thread_message_refuses_empty_text(self) -> None:
         with self.assertRaisesRegex(control.CodexDesktopControlError, "消息内容不能为空"):
