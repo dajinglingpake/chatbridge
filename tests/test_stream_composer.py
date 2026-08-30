@@ -8,8 +8,9 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
+from urllib.parse import quote
 
-from ui.app import CODEX_THREAD_RUNTIME_STALE_SECONDS, CODEX_THREAD_RUNTIME_TERMINAL_GRACE_SECONDS, _codex_rollout_runtime_hint, _codex_rollout_runtime_snapshot, _codex_rollout_runtime_started_at, _load_persisted_stream_session, _normalize_stream_session_name, _persist_stream_session, _stream_initial_history_limit, _update_codex_thread_runtime_statuses, group_codex_threads_by_workspace
+from ui.app import CODEX_THREAD_RUNTIME_STALE_SECONDS, CODEX_THREAD_RUNTIME_TERMINAL_GRACE_SECONDS, _codex_rollout_runtime_hint, _codex_rollout_runtime_snapshot, _codex_rollout_runtime_started_at, _load_persisted_stream_session, _normalize_stream_session_name, _persist_stream_session, _resolve_stream_request_session, _stream_initial_history_limit, _update_codex_thread_runtime_statuses, group_codex_threads_by_workspace
 from ui.sections import _prepare_stream_render_context, _stream_activity_render_window, _stream_client_time, _stream_display_time, _stream_image_is_previewable, _stream_markdown, _stream_model_display_name, _stream_reasoning_effort_label, _stream_task_sort_key, _stream_task_uses_utc_naive_time, _stream_text, _stream_time_delta_ms, _stream_timeline_items, render_mobile_stream_composer_section, render_mobile_stream_section
 
 
@@ -159,6 +160,63 @@ class StreamComposerTests(unittest.TestCase):
             self.assertEqual("", _normalize_stream_session_name("codex:transition"))
             self.assertEqual("", _load_persisted_stream_session(path))
             self.assertIn('"session_name": ""', path.read_text(encoding="utf-8"))
+
+    def test_stream_request_selection_prefers_url_then_browser_cookie(self) -> None:
+        url_session = "codex:019f6b52-f3a5-7d40-9660-0bd9dcbc37db"
+        cookie_session = "codex:019f6b53-1ecb-78d6-bb5a-da21d249f208"
+
+        self.assertEqual(
+            url_session,
+            _resolve_stream_request_session(
+                has_session_query=True,
+                query_session=url_session,
+                cookie_session=quote(cookie_session, safe=""),
+                client_session="client-session",
+            ),
+        )
+        self.assertEqual(
+            cookie_session,
+            _resolve_stream_request_session(
+                has_session_query=False,
+                cookie_session=quote(cookie_session, safe=""),
+                client_session="client-session",
+            ),
+        )
+        self.assertEqual(
+            "",
+            _resolve_stream_request_session(
+                has_session_query=True,
+                query_session="",
+                cookie_session=quote(cookie_session, safe=""),
+                client_session="client-session",
+            ),
+        )
+
+    def test_stream_request_selection_keeps_browser_clients_isolated(self) -> None:
+        browser_a = "codex:019f6b52-f3a5-7d40-9660-0bd9dcbc37db"
+        browser_b = "codex:019f6b53-1ecb-78d6-bb5a-da21d249f208"
+
+        resolved_a = _resolve_stream_request_session(
+            has_session_query=False,
+            cookie_session=quote(browser_a, safe=""),
+        )
+        resolved_b = _resolve_stream_request_session(
+            has_session_query=False,
+            cookie_session=quote(browser_b, safe=""),
+        )
+
+        self.assertEqual(browser_a, resolved_a)
+        self.assertEqual(browser_b, resolved_b)
+
+    def test_stream_request_selection_does_not_inherit_global_legacy_session(self) -> None:
+        self.assertEqual(
+            "",
+            _resolve_stream_request_session(
+                has_session_query=False,
+                cookie_session="",
+                client_session="",
+            ),
+        )
 
     def test_stream_text_preserves_leading_indented_code_block(self) -> None:
         self.assertEqual("    first\n    second", _stream_text("    first\n    second"))
@@ -3438,18 +3496,20 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("z-index: 2200;", source)
         self.assertIn("pointer-events: none;", source)
 
-    def test_stream_page_without_session_query_preserves_selected_session(self) -> None:
+    def test_stream_page_restores_browser_scoped_session_selection(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")
 
         self.assertIn('has_session_query = "session" in request.query_params', source)
-        self.assertIn('elif has_session_query and state["active_page"] == "stream":', source)
-        self.assertIn('state["selected_session_name"] = ""', source)
-        self.assertIn('_persist_stream_session(requested_session)', source)
-        self.assertIn('_persist_stream_session("")', source)
-        self.assertIn('_load_persisted_stream_session() or _normalize_stream_session_name(state.get("selected_session_name"))', source)
-        self.assertIn('state["selected_session_name"] = preserved_session', source)
-        self.assertIn('state["stream_force_bottom_session"] = preserved_session', source)
+        self.assertIn('cookie_session=request.cookies.get(STREAM_UI_SESSION_COOKIE)', source)
+        self.assertIn('client_session=state.get("selected_session_name")', source)
+        self.assertNotIn('persisted_session=_load_persisted_stream_session()', source)
+        self.assertIn('if has_session_query and requested_session:', source)
+        self.assertIn('state["selected_session_name"] = requested_session', source)
         self.assertIn('state["stream_force_bottom_session"] = requested_session', source)
+        self.assertIn('_persist_stream_session(requested_session)', source)
+        self.assertIn('sync_stream_session_browser(str(state.get("selected_session_name") or ""))', source)
+        self.assertIn('document.cookie = `${{cookieName}}=${{encodeURIComponent(session)}};', source)
+        self.assertIn('session_name=str(state.get("selected_session_name") or "")', source)
 
     def test_stream_refresh_timer_never_persists_session_selection(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")

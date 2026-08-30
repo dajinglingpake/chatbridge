@@ -206,10 +206,11 @@ def _stored_activity_items(value: object) -> list[dict[str, object]]:
         return []
     return [dict(item) for item in value if isinstance(item, dict)]
 
-def build_mobile_access_url(*, host: str, port: int) -> str:
-    token = _load_or_create_access_token()
+def build_mobile_access_url(*, host: str, port: int, session_name: str = "") -> str:
+    cleaned_session_name = str(session_name or "").strip()
     access_host = host if host not in {"", "0.0.0.0", "127.0.0.1", "localhost", "::1"} else _detect_lan_ip()
-    return f"http://{access_host}:{port}/mobile-ui?token={token}"
+    session_query = f"?session={quote(cleaned_session_name, safe='')}" if cleaned_session_name else ""
+    return f"http://{access_host}:{port}/mobile-ui{session_query}"
 
 
 def build_mobile_qr_data_url(value: str) -> str:
@@ -504,8 +505,13 @@ def install_mobile_routes(app: Any, *, host: str, port: int) -> None:
 
     @app.get("/mobile-link")
     async def mobile_link(request: Request) -> HTMLResponse:
-        token = _load_or_create_access_token()
-        mobile_url = _mobile_url(request, host=host, port=port, token=token)
+        session_name = str(request.query_params.get("session") or "").strip()
+        mobile_url = _mobile_url(
+            request,
+            host=host,
+            port=port,
+            session_name=session_name,
+        )
         qr_data_url = build_mobile_qr_data_url(mobile_url)
         return HTMLResponse(_mobile_link_html(mobile_url, qr_data_url))
 
@@ -514,7 +520,9 @@ def install_mobile_routes(app: Any, *, host: str, port: int) -> None:
         token = str(request.query_params.get("token") or "").strip()
         if not _is_authorized_token(token):
             return HTMLResponse(_mobile_denied_html(), status_code=401)
-        return RedirectResponse(url=f"/mobile-ui?token={token}", status_code=307)
+        session_name = str(request.query_params.get("session") or "").strip()
+        session_query = f"?session={quote(session_name, safe='')}" if session_name else ""
+        return RedirectResponse(url=f"/mobile-ui{session_query}", status_code=307)
 
     @app.get("/api/mobile/state")
     async def mobile_state(request: Request) -> JSONResponse:
@@ -651,8 +659,18 @@ def install_mobile_routes(app: Any, *, host: str, port: int) -> None:
     async def mobile_access(request: Request) -> JSONResponse:
         if not _is_local_request(request):
             return JSONResponse({"ok": False, "error": "local only"}, status_code=403)
-        token = _load_or_create_access_token()
-        return JSONResponse({"ok": True, "url": _mobile_url(request, host=host, port=port, token=token)})
+        session_name = str(request.query_params.get("session") or "").strip()
+        return JSONResponse(
+            {
+                "ok": True,
+                "url": _mobile_url(
+                    request,
+                    host=host,
+                    port=port,
+                    session_name=session_name,
+                ),
+            }
+        )
 
 
 def _load_or_create_access_token() -> str:
@@ -715,12 +733,14 @@ def _detect_lan_ip() -> str:
         sock.close()
 
 
-def _mobile_url(request: Request, *, host: str, port: int, token: str) -> str:
+def _mobile_url(request: Request, *, host: str, port: int, session_name: str = "") -> str:
     request_host = request.url.hostname or ""
     request_port = request.url.port or port
     if request_host in {"", "0.0.0.0", "127.0.0.1", "localhost", "::1"}:
         request_host = _detect_lan_ip()
-    return f"http://{request_host}:{request_port}/mobile-ui?token={token}"
+    cleaned_session_name = str(session_name or "").strip()
+    session_query = f"?session={quote(cleaned_session_name, safe='')}" if cleaned_session_name else ""
+    return f"http://{request_host}:{request_port}/mobile-ui{session_query}"
 
 
 def _qr_data_url(value: str) -> str:
@@ -1533,6 +1553,58 @@ def _copy_codex_rollout_payload(value: object) -> dict[str, object]:
     }
 
 
+def _copy_codex_rollout_thread(value: object) -> dict[str, object]:
+    return copy.deepcopy(value) if isinstance(value, dict) else {}
+
+
+def _cached_codex_rollout_thread(thread_id: str) -> dict[str, object]:
+    cleaned_thread_id = str(thread_id or "").strip()
+    cached = _CODEX_VIEW_IMAGE_PREVIEW_CACHE.get(cleaned_thread_id)
+    if not isinstance(cached, dict) or not str(cached.get("path") or "").strip():
+        return {}
+    return _copy_codex_rollout_thread(cached.get("thread"))
+
+
+def _append_codex_rollout_message(
+    messages: list[dict[str, object]],
+    message_ids: set[str],
+    turn_order_by_id: dict[str, int],
+    next_item_order_by_turn: dict[str, int],
+    *,
+    turn_id: str,
+    role: str,
+    text: str,
+    at: str,
+    message_id: str,
+    phase: str = "",
+) -> None:
+    cleaned_turn_id = str(turn_id or "").strip()
+    cleaned_text = str(text or "").strip()
+    if not cleaned_turn_id or not cleaned_text:
+        return
+    cleaned_message_id = str(message_id or "").strip()
+    if cleaned_message_id and cleaned_message_id in message_ids:
+        return
+    turn_order = turn_order_by_id.setdefault(cleaned_turn_id, len(turn_order_by_id) + 1)
+    item_order = next_item_order_by_turn.get(cleaned_turn_id, 0) + 1
+    next_item_order_by_turn[cleaned_turn_id] = item_order
+    if not cleaned_message_id:
+        cleaned_message_id = f"rollout-{cleaned_turn_id}-{item_order}"
+    message_ids.add(cleaned_message_id)
+    messages.append(
+        {
+            "id": cleaned_message_id,
+            "turn_id": cleaned_turn_id,
+            "role": role,
+            "phase": str(phase or "").strip(),
+            "at": str(at or "").strip(),
+            "turn_order": turn_order,
+            "item_order": item_order,
+            "text": cleaned_text,
+        }
+    )
+
+
 def _codex_rollout_parse_lock(thread_id: str) -> threading.Lock:
     with _CODEX_THREAD_DETAIL_LOCK:
         lock = _CODEX_ROLLOUT_PARSE_LOCKS.get(thread_id)
@@ -1604,6 +1676,13 @@ def _codex_raw_view_image_payload_unlocked(thread_id: str) -> dict[str, object]:
         goal_state = parser_state.get("goal_state")
         goal_native_seen = parser_state.get("goal_native_seen")
         model_state = parser_state.get("model_state")
+        messages = parser_state.get("messages")
+        message_ids = parser_state.get("message_ids")
+        turn_order_by_id = parser_state.get("turn_order_by_id")
+        next_item_order_by_turn = parser_state.get("next_item_order_by_turn")
+        thread_metadata = parser_state.get("thread_metadata")
+        latest_turn_id = parser_state.get("latest_turn_id")
+        last_record_at = parser_state.get("last_record_at")
         can_resume = all(
             (
                 isinstance(previews_by_turn, dict),
@@ -1618,6 +1697,13 @@ def _codex_raw_view_image_payload_unlocked(thread_id: str) -> dict[str, object]:
                 isinstance(goal_state, dict),
                 isinstance(goal_native_seen, bool),
                 isinstance(model_state, dict),
+                isinstance(messages, list),
+                isinstance(message_ids, set),
+                isinstance(turn_order_by_id, dict),
+                isinstance(next_item_order_by_turn, dict),
+                isinstance(thread_metadata, dict),
+                isinstance(latest_turn_id, str),
+                isinstance(last_record_at, str),
             )
         )
     if not can_resume:
@@ -1634,6 +1720,13 @@ def _codex_raw_view_image_payload_unlocked(thread_id: str) -> dict[str, object]:
         goal_state: dict[str, str] = {}
         goal_native_seen = False
         model_state: dict[str, str] = {}
+        messages: list[dict[str, object]] = []
+        message_ids: set[str] = set()
+        turn_order_by_id: dict[str, int] = {}
+        next_item_order_by_turn: dict[str, int] = {}
+        thread_metadata: dict[str, str] = {}
+        latest_turn_id = ""
+        last_record_at = ""
     processed_offset = cached_offset
     if path is not None:
         try:
@@ -1662,6 +1755,43 @@ def _codex_raw_view_image_payload_unlocked(thread_id: str) -> dict[str, object]:
                     ).strip()
                     event_type = str(payload.get("type") or "")
                     record_at = str(item.get("timestamp") or "").strip() if isinstance(item, dict) else ""
+                    if record_at:
+                        last_record_at = record_at
+                    if record_type == "session_meta":
+                        git_info = payload.get("git") if isinstance(payload.get("git"), dict) else {}
+                        thread_metadata.update(
+                            {
+                                "id": str(payload.get("id") or payload.get("session_id") or cleaned).strip(),
+                                "session_id": str(payload.get("session_id") or payload.get("id") or cleaned).strip(),
+                                "cwd": str(payload.get("cwd") or "").strip(),
+                                "source": str(payload.get("source") or payload.get("thread_source") or "").strip(),
+                                "model_provider": str(payload.get("model_provider") or "").strip(),
+                                "created_at": str(payload.get("timestamp") or record_at).strip(),
+                                "branch": str(git_info.get("branch") or "").strip(),
+                                "sha": str(git_info.get("sha") or git_info.get("commit_hash") or "").strip(),
+                            }
+                        )
+                    elif record_type == "turn_context":
+                        context_cwd = str(payload.get("cwd") or "").strip()
+                        if context_cwd:
+                            thread_metadata["cwd"] = context_cwd
+                    if turn_id:
+                        turn_order_by_id.setdefault(turn_id, len(turn_order_by_id) + 1)
+                    if record_type == "event_msg" and turn_id:
+                        latest_turn_id = turn_id
+                        if event_type == "task_started":
+                            thread_metadata["latest_turn_status"] = "inProgress"
+                            thread_metadata["latest_turn_started_at"] = record_at
+                            thread_metadata["latest_turn_completed_at"] = ""
+                        elif event_type in {"task_complete", "turn_completed"}:
+                            thread_metadata["latest_turn_status"] = "completed"
+                            thread_metadata["latest_turn_completed_at"] = record_at
+                        elif event_type in {"task_cancelled", "task_canceled"}:
+                            thread_metadata["latest_turn_status"] = "canceled"
+                            thread_metadata["latest_turn_completed_at"] = record_at
+                        elif event_type == "turn_aborted":
+                            thread_metadata["latest_turn_status"] = str(payload.get("reason") or "interrupted").strip()
+                            thread_metadata["latest_turn_completed_at"] = record_at
                     turn_context_model = _codex_turn_context_model_state(record_type, payload, record_at=record_at)
                     if turn_context_model:
                         model_state = turn_context_model
@@ -1712,6 +1842,46 @@ def _codex_raw_view_image_payload_unlocked(thread_id: str) -> dict[str, object]:
                     if native_goal_state:
                         goal_state = native_goal_state
                         goal_native_seen = True
+                    if record_type == "response_item" and turn_id:
+                        item_id = str(payload.get("id") or f"rollout-{line_offset}").strip()
+                        if event_type == "message":
+                            role = str(payload.get("role") or "").strip()
+                            text = _codex_raw_message_text(payload)
+                            content_kinds = (
+                                metadata.get("content_item_kinds")
+                                if isinstance(metadata, dict) and isinstance(metadata.get("content_item_kinds"), list)
+                                else []
+                            )
+                            hidden_user_message = role == "user" and (
+                                (content_kinds and "user.text" not in content_kinds)
+                                or text.startswith("<environment_context>")
+                                or text.startswith("<codex_internal_context")
+                            )
+                            if role in {"user", "assistant"} and not hidden_user_message:
+                                _append_codex_rollout_message(
+                                    messages,
+                                    message_ids,
+                                    turn_order_by_id,
+                                    next_item_order_by_turn,
+                                    turn_id=turn_id,
+                                    role=role,
+                                    text=text,
+                                    at=record_at,
+                                    message_id=item_id,
+                                    phase=str(payload.get("phase") or "").strip(),
+                                )
+                        elif event_type == "reasoning":
+                            _append_codex_rollout_message(
+                                messages,
+                                message_ids,
+                                turn_order_by_id,
+                                next_item_order_by_turn,
+                                turn_id=turn_id,
+                                role="reasoning",
+                                text=_codex_raw_reasoning_text(payload),
+                                at=record_at,
+                                message_id=item_id,
+                            )
                     if (
                         isinstance(item, dict)
                         and str(item.get("type") or "") == "response_item"
@@ -1930,6 +2100,36 @@ def _codex_raw_view_image_payload_unlocked(thread_id: str) -> dict[str, object]:
     ):
         goal_state = latest_goal_state
         goal_native_seen = goal_native_seen or latest_goal_state.get("native") == "1"
+    cwd = str(thread_metadata.get("cwd") or "").strip()
+    preview = next(
+        (
+            str(message.get("text") or "").strip()
+            for message in reversed(messages)
+            if str(message.get("role") or "") == "user" and str(message.get("text") or "").strip()
+        ),
+        "",
+    )
+    latest_turn_status = str(thread_metadata.get("latest_turn_status") or "").strip()
+    thread_payload = {
+        "id": str(thread_metadata.get("id") or cleaned).strip(),
+        "session_id": str(thread_metadata.get("session_id") or cleaned).strip(),
+        "title": Path(cwd).name if cwd else cleaned,
+        "preview": preview[:500],
+        "cwd": cwd,
+        "source": str(thread_metadata.get("source") or "").strip(),
+        "model_provider": str(thread_metadata.get("model_provider") or "").strip(),
+        "created_at": str(thread_metadata.get("created_at") or "").strip(),
+        "updated_at": last_record_at,
+        "recency_at": last_record_at,
+        "status": "active" if latest_turn_status.lower() in {"inprogress", "running", "active"} else "idle",
+        "latest_turn_status": latest_turn_status,
+        "latest_turn_started_at": str(thread_metadata.get("latest_turn_started_at") or "").strip(),
+        "latest_turn_completed_at": str(thread_metadata.get("latest_turn_completed_at") or "").strip(),
+        "branch": str(thread_metadata.get("branch") or "").strip(),
+        "sha": str(thread_metadata.get("sha") or "").strip(),
+        "path": str(path or ""),
+        "messages": [dict(message) for message in messages],
+    }
     _CODEX_VIEW_IMAGE_PREVIEW_CACHE[cleaned] = {
         "signature": cached_signature,
         "path": str(path or ""),
@@ -1948,7 +2148,15 @@ def _codex_raw_view_image_payload_unlocked(thread_id: str) -> dict[str, object]:
             "goal_state": goal_state,
             "goal_native_seen": goal_native_seen,
             "model_state": model_state,
+            "messages": messages,
+            "message_ids": message_ids,
+            "turn_order_by_id": turn_order_by_id,
+            "next_item_order_by_turn": next_item_order_by_turn,
+            "thread_metadata": thread_metadata,
+            "latest_turn_id": latest_turn_id,
+            "last_record_at": last_record_at,
         },
+        "thread": thread_payload,
         "previews": {
             turn_id: [dict(preview) for preview in previews]
             for turn_id, previews in previews_by_turn.items()
@@ -2002,6 +2210,36 @@ def _codex_rollout_refresh_needed(thread_id: str) -> bool:
     return not isinstance(cached, dict) or cached.get("signature") != path_signature
 
 
+def _cache_codex_thread_detail(thread_id: str, thread: dict[str, object]) -> dict[str, object]:
+    next_thread = dict(thread)
+    with _CODEX_THREAD_DETAIL_LOCK:
+        previous = _CODEX_THREAD_DETAIL_CACHE.get(thread_id)
+        previous_thread = previous.get("thread") if isinstance(previous, dict) else None
+        merged_thread = {**previous_thread, **next_thread} if isinstance(previous_thread, dict) else next_thread
+        previous_messages = previous_thread.get("messages") if isinstance(previous_thread, dict) else None
+        next_messages = next_thread.get("messages") if isinstance(next_thread.get("messages"), list) else []
+        if isinstance(previous_messages, list) and previous_messages and not next_messages:
+            refresh_error = str(next_thread.get("error") or "").strip()
+            merged_thread["messages"] = list(previous_messages)
+            merged_thread.pop("error", None)
+            merged_thread.pop("loading", None)
+            if refresh_error:
+                merged_thread["refresh_error"] = refresh_error
+        elif next_messages:
+            merged_thread.pop("error", None)
+            merged_thread.pop("refresh_error", None)
+            merged_thread.pop("loading", None)
+        _CODEX_THREAD_DETAIL_CACHE[thread_id] = {
+            "loaded_at": time.monotonic(),
+            "thread": merged_thread,
+            "signature_parts_by_limit": {},
+            "task_payloads_by_limit": {},
+            "turn_count": None,
+            "rollout_revision": int(previous.get("rollout_revision") or 0) if isinstance(previous, dict) else 0,
+        }
+    return dict(merged_thread)
+
+
 def _invalidate_codex_thread_rollout_cache(thread_id: str) -> None:
     with _CODEX_THREAD_DETAIL_LOCK:
         cached = _CODEX_THREAD_DETAIL_CACHE.get(thread_id)
@@ -2033,6 +2271,9 @@ def _refresh_codex_rollout_cache_now(thread_id: str, *, claimed: bool = False) -
         cached_after = _CODEX_VIEW_IMAGE_PREVIEW_CACHE.get(cleaned_thread_id)
         signature_after = cached_after.get("signature") if isinstance(cached_after, dict) else None
         if signature_after != signature_before:
+            rollout_thread = _cached_codex_rollout_thread(cleaned_thread_id)
+            if rollout_thread:
+                _cache_codex_thread_detail(cleaned_thread_id, rollout_thread)
             _invalidate_codex_thread_rollout_cache(cleaned_thread_id)
         return payload
     finally:
@@ -3434,6 +3675,8 @@ def _load_codex_thread_cached(thread_id: str, *, blocking: bool = False) -> dict
     if not cleaned_thread_id:
         return {}
     now = time.monotonic()
+    stale_thread: dict[str, object] = {}
+    retry_failed_detail = False
     with _CODEX_THREAD_DETAIL_LOCK:
         cached = _CODEX_THREAD_DETAIL_CACHE.get(cleaned_thread_id)
         if cached:
@@ -3441,8 +3684,11 @@ def _load_codex_thread_cached(thread_id: str, *, blocking: bool = False) -> dict
             if now - float(cached.get("loaded_at") or 0.0) <= CODEX_THREAD_CACHE_SECONDS:
                 return dict(thread) if isinstance(thread, dict) else {}
             stale_thread = dict(thread) if isinstance(thread, dict) else {}
-        else:
-            stale_thread = {}
+            retry_failed_detail = bool(stale_thread.get("error"))
+    if stale_thread and not retry_failed_detail:
+        if _codex_rollout_refresh_needed(cleaned_thread_id):
+            _start_codex_rollout_refresh(cleaned_thread_id)
+        return stale_thread
     if blocking:
         return _load_codex_thread_now(cleaned_thread_id)
     _start_codex_thread_detail_load(cleaned_thread_id)
@@ -3451,26 +3697,21 @@ def _load_codex_thread_cached(thread_id: str, *, blocking: bool = False) -> dict
 
 def _load_codex_thread_now(cleaned_thread_id: str) -> dict[str, object]:
     try:
-        thread = read_codex_thread(cleaned_thread_id, timeout_seconds=8)
-    except Exception as exc:  # noqa: BLE001
-        thread = {"id": cleaned_thread_id, "messages": [], "error": str(exc)}
-    with _CODEX_THREAD_DETAIL_LOCK:
-        previous = _CODEX_THREAD_DETAIL_CACHE.get(cleaned_thread_id)
-        _CODEX_THREAD_DETAIL_CACHE[cleaned_thread_id] = {
-            "loaded_at": time.monotonic(),
-            "thread": thread,
-            "signature_parts_by_limit": {},
-            "task_payloads_by_limit": {},
-            "turn_count": None,
-            "rollout_revision": int(previous.get("rollout_revision") or 0) if isinstance(previous, dict) else 0,
-        }
-    _prime_codex_rollout_path(cleaned_thread_id, thread.get("path"))
-    try:
-        _refresh_codex_rollout_cache_now(cleaned_thread_id)
+        _codex_raw_view_image_payload(cleaned_thread_id)
+        rollout_thread = _cached_codex_rollout_thread(cleaned_thread_id)
+        if rollout_thread:
+            return _cache_codex_thread_detail(cleaned_thread_id, rollout_thread)
+        return _cache_codex_thread_detail(
+            cleaned_thread_id,
+            {
+                "id": cleaned_thread_id,
+                "messages": [],
+                "error": "Local Codex rollout is unavailable",
+            },
+        )
     finally:
         with _CODEX_THREAD_DETAIL_LOCK:
             _CODEX_THREAD_DETAIL_INFLIGHT.discard(cleaned_thread_id)
-    return dict(thread)
 
 
 def _start_codex_thread_detail_load(cleaned_thread_id: str) -> None:

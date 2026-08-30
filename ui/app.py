@@ -9,7 +9,7 @@ import time
 import traceback
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 import uuid
 
 from starlette.requests import Request
@@ -24,7 +24,7 @@ from core.json_store import load_json, save_json
 from core.view_models import build_web_console_view_model
 from localization import Localizer, normalize_language
 from runtime_stack import get_system_resource_usage
-from ui.mobile import MOBILE_UPLOAD_ROOT, _codex_custom_tool_exec_commands, _codex_custom_tool_names, build_mobile_access_url, build_mobile_qr_data_url, build_stream_sidebar_state_snapshot, build_stream_signature_snapshot, build_stream_state_snapshot, codex_thread_id_from_session_name, install_mobile_routes, is_mobile_access_authorized, load_codex_threads_page, stream_hub_state_file_signature, stream_qq_current_session_name, update_codex_goal_cache
+from ui.mobile import MOBILE_UPLOAD_ROOT, _codex_custom_tool_exec_commands, _codex_custom_tool_names, build_mobile_access_url, build_mobile_qr_data_url, build_stream_sidebar_state_snapshot, build_stream_signature_snapshot, build_stream_state_snapshot, codex_thread_id_from_session_name, install_mobile_routes, load_codex_threads_page, stream_hub_state_file_signature, stream_qq_current_session_name, update_codex_goal_cache
 from ui.qr_login import install_qr_login_dialog
 from ui.qq_login import install_qq_login_dialog
 from ui.sections import STREAM_CODEX_INITIAL_HISTORY_LIMIT, STREAM_MANUAL_HISTORY_LIMIT, _prepare_stream_render_context, _stream_runtime_activity_text, render_diagnostics_section, render_home_section, render_mobile_section, render_mobile_stream_composer_section, render_mobile_stream_messages_section, render_mobile_stream_shell, render_sessions_section
@@ -51,6 +51,7 @@ CODEX_THREAD_RUNTIME_START_TAIL_BYTES = 8388608
 WEB_THEME_OPTIONS = ("dark", "light", "forest")
 STREAM_UI_LOG_PATH = APP_DIR / ".runtime" / "logs" / "ui_stream_refresh.jsonl"
 STREAM_UI_SELECTION_PATH = APP_DIR / ".runtime" / "state" / "ui_stream_selection.json"
+STREAM_UI_SESSION_COOKIE = "cb_stream_session"
 STREAM_UI_DEBUG_LOG_ENABLED = os.environ.get("CHATBRIDGE_UI_DEBUG_LOG", "").strip().lower() in {"1", "true", "yes", "on"}
 STREAM_UI_ALWAYS_LOG_EVENTS = {"refresh_timer_cancel", "client_disconnect"}
 NICEGUI_RECONNECT_TIMEOUT_SECONDS = 30.0
@@ -130,6 +131,22 @@ def _persist_stream_session(session_name: str, path: Path = STREAM_UI_SELECTION_
         save_json(path, {"session_name": _normalize_stream_session_name(session_name)})
     except OSError:
         pass
+
+
+def _resolve_stream_request_session(
+    *,
+    has_session_query: bool,
+    query_session: object = "",
+    cookie_session: object = "",
+    client_session: object = "",
+) -> str:
+    if has_session_query:
+        return _normalize_stream_session_name(query_session)
+    decoded_cookie_session = unquote(str(cookie_session or ""))
+    return (
+        _normalize_stream_session_name(decoded_cookie_session)
+        or _normalize_stream_session_name(client_session)
+    )
 
 
 def _append_stream_ui_log(event: str, **fields: object) -> None:
@@ -3644,25 +3661,48 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         if page is not None:
             state["active_page"] = page.key
 
+    def sync_stream_session_browser(session_name: str) -> None:
+        normalized_session = _normalize_stream_session_name(session_name)
+        session_json = json.dumps(normalized_session, ensure_ascii=False)
+        cookie_name_json = json.dumps(STREAM_UI_SESSION_COOKIE)
+        ui.run_javascript(
+            f"""
+            (() => {{
+                const session = {session_json};
+                const cookieName = {cookie_name_json};
+                if (session) {{
+                    document.cookie = `${{cookieName}}=${{encodeURIComponent(session)}}; path=/; max-age=31536000; SameSite=Lax`;
+                }} else {{
+                    document.cookie = `${{cookieName}}=; path=/; max-age=0; SameSite=Lax`;
+                }}
+                const url = new URL(window.location.href);
+                if (session) {{
+                    url.searchParams.set('session', session);
+                }} else {{
+                    url.searchParams.delete('session');
+                }}
+                window.history.replaceState(null, '', url.toString());
+            }})();
+            """
+        )
+
     def apply_request_session(request) -> None:
         has_session_query = "session" in request.query_params
-        requested_session = _normalize_stream_session_name(request.query_params.get("session"))
-        if requested_session:
+        requested_session = _resolve_stream_request_session(
+            has_session_query=has_session_query,
+            query_session=request.query_params.get("session"),
+            cookie_session=request.cookies.get(STREAM_UI_SESSION_COOKIE),
+            client_session=state.get("selected_session_name"),
+        )
+        if has_session_query and requested_session:
             state["active_page"] = "stream"
-            state["selected_session_name"] = requested_session
-            state["stream_force_bottom_session"] = requested_session
-            state["stream_force_bottom_next"] = True
+        if state["active_page"] != "stream":
+            return
+        state["selected_session_name"] = requested_session
+        state["stream_force_bottom_session"] = requested_session
+        state["stream_force_bottom_next"] = True
+        if has_session_query:
             _persist_stream_session(requested_session)
-        elif has_session_query and state["active_page"] == "stream":
-            state["selected_session_name"] = ""
-            state["stream_force_bottom_next"] = True
-            _persist_stream_session("")
-        elif state["active_page"] == "stream":
-            preserved_session = _load_persisted_stream_session() or _normalize_stream_session_name(state.get("selected_session_name"))
-            state["selected_session_name"] = preserved_session
-            if preserved_session:
-                state["stream_force_bottom_session"] = preserved_session
-            state["stream_force_bottom_next"] = True
 
     def mark_qr_login_open() -> None:
         state["qr_login_open"] = True
@@ -4231,7 +4271,11 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     _reset_weixin_binding,
                 )
             elif state["active_page"] == "mobile":
-                mobile_url = build_mobile_access_url(host=host, port=port)
+                mobile_url = build_mobile_access_url(
+                    host=host,
+                    port=port,
+                    session_name=str(state.get("selected_session_name") or ""),
+                )
                 render_mobile_section(
                     ui,
                     translate,
@@ -5251,6 +5295,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         was_stream_page = state["active_page"] == "stream"
         current_session_name = str(state.get("selected_session_name") or "").strip()
         if was_stream_page and current_session_name == cleaned_session_name:
+            sync_stream_session_browser(cleaned_session_name)
             ui.run_javascript(
                 f"window.__cbSelectSidebarStreamSession?.({encoded_session_name!r}); "
                 "document.body.classList.remove('cb-sidebar-open')"
@@ -5271,12 +5316,10 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         state["stream_force_bottom_session"] = cleaned_session_name
         state["stream_force_bottom_next"] = True
         _persist_stream_session(cleaned_session_name)
+        sync_stream_session_browser(cleaned_session_name)
         ui.run_javascript(
             f"""
             (() => {{
-                const url = new URL(window.location.href);
-                url.searchParams.set('session', {cleaned_session_name!r});
-                window.history.replaceState(null, '', url.toString());
                 const panel = document.querySelector('.cb-agent-panel');
                 if (panel) panel.dataset.streamKey = {encoded_session_name!r};
                 window.__cbSelectSidebarStreamSession?.({encoded_session_name!r});
@@ -6805,18 +6848,14 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         _refresh_runtime_status_on_ui_entry()
         shell_view()
         content_view()
+        if state["active_page"] == "stream":
+            sync_stream_session_browser(str(state.get("selected_session_name") or ""))
         ui.run_javascript(f"window.__cbApplyTheme && window.__cbApplyTheme({state['theme']!r})")
         install_ui_error_logger()
         install_stream_refresh_timer()
 
     @ui.page("/mobile-ui")
     def mobile_ui_page(request: Request) -> None:
-        token = str(request.query_params.get("token") or "").strip()
-        if not is_mobile_access_authorized(token):
-            with ui.column().classes("w-full max-w-md mx-auto gap-3 p-5"):
-                ui.label(t("ui.web.mobile.unauthorized_title", "未授权")).classes("text-xl font-bold cb-ink")
-                ui.label(t("ui.web.mobile.unauthorized_body", "请从桌面 UI 的“手机入口”扫码打开。")).classes("text-sm cb-muted")
-            return
         apply_request_language(request)
         state["active_page"] = "stream"
         state["bridge_mode_selected"] = False
@@ -6826,6 +6865,8 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             state["stream_model_catalog_loading"] = False
         shell_view()
         content_view()
+        if state["active_page"] == "stream":
+            sync_stream_session_browser(str(state.get("selected_session_name") or ""))
         ui.run_javascript(f"window.__cbApplyTheme && window.__cbApplyTheme({state['theme']!r})")
         install_ui_error_logger()
         install_stream_refresh_timer()

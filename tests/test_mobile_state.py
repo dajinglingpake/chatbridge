@@ -100,6 +100,20 @@ class MobileStateTests(unittest.TestCase):
         self.assertEqual("no-cache", response.headers["Pragma"])
         self.assertEqual("0", response.headers["Expires"])
 
+    def test_mobile_access_url_carries_selected_browser_session(self) -> None:
+        session_name = "codex:01a04cec-a6e5-76f1-ba7a-fefb741f223a"
+        with patch("ui.mobile._detect_lan_ip", return_value="192.168.1.2"):
+            url = mobile.build_mobile_access_url(
+                host="0.0.0.0",
+                port=8765,
+                session_name=session_name,
+            )
+
+        self.assertEqual(
+            "http://192.168.1.2:8765/mobile-ui?session=codex%3A01a04cec-a6e5-76f1-ba7a-fefb741f223a",
+            url,
+        )
+
     def test_selected_session_tasks_are_kept_beyond_global_limit(self) -> None:
         tasks = [
             _task("recent-1", "default"),
@@ -806,6 +820,126 @@ class MobileStateTests(unittest.TestCase):
 
         mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
         mobile._CODEX_ROLLOUT_PATH_CACHE.clear()
+
+    def test_codex_thread_detail_uses_rollout_history_and_tracks_appends(self) -> None:
+        thread_id = "thread-rollout-history"
+        mobile._CODEX_THREAD_DETAIL_CACHE.clear()
+        mobile._CODEX_THREAD_DETAIL_INFLIGHT.clear()
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+        mobile._CODEX_ROLLOUT_PATH_CACHE.clear()
+        mobile._CODEX_ROLLOUT_REFRESH_INFLIGHT.clear()
+        with TemporaryDirectory() as temp_dir:
+            sessions_root = Path(temp_dir) / "codex" / "sessions"
+            sessions_root.mkdir(parents=True)
+            jsonl_path = sessions_root / f"rollout-{thread_id}.jsonl"
+            initial_events = [
+                {
+                    "type": "session_meta",
+                    "timestamp": "2026-08-30T10:00:00Z",
+                    "payload": {
+                        "id": thread_id,
+                        "session_id": thread_id,
+                        "cwd": "I:/AI/chatbridge",
+                        "source": "vscode",
+                        "model_provider": "openai",
+                        "git": {"branch": "main", "commit_hash": "abc123"},
+                    },
+                },
+                {
+                    "type": "event_msg",
+                    "timestamp": "2026-08-30T10:00:01Z",
+                    "payload": {"type": "task_started", "turn_id": "turn-1"},
+                },
+                {
+                    "type": "response_item",
+                    "timestamp": "2026-08-30T10:00:02Z",
+                    "payload": {
+                        "type": "message",
+                        "id": "internal-context",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "<environment_context>hidden</environment_context>"}],
+                        "internal_chat_message_metadata_passthrough": {
+                            "turn_id": "turn-1",
+                            "content_item_kinds": ["environments.environment_context"],
+                        },
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "timestamp": "2026-08-30T10:00:03Z",
+                    "payload": {
+                        "type": "message",
+                        "id": "user-1",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "保留这段历史"}],
+                        "internal_chat_message_metadata_passthrough": {
+                            "turn_id": "turn-1",
+                            "content_item_kinds": ["user.text"],
+                        },
+                    },
+                },
+            ]
+            jsonl_path.write_text(
+                "\n".join(json.dumps(event, ensure_ascii=False) for event in initial_events) + "\n",
+                encoding="utf-8",
+            )
+
+            try:
+                with (
+                    patch("ui.mobile._codex_sessions_root", return_value=sessions_root),
+                    patch("ui.mobile.read_codex_thread") as read_thread,
+                ):
+                    initial_thread = mobile._load_codex_thread_now(thread_id)
+                    appended_events = [
+                        {
+                            "type": "response_item",
+                            "timestamp": "2026-08-30T10:00:04Z",
+                            "payload": {
+                                "type": "reasoning",
+                                "id": "reasoning-1",
+                                "summary": [{"type": "summary_text", "text": "正在处理"}],
+                                "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
+                            },
+                        },
+                        {
+                            "type": "response_item",
+                            "timestamp": "2026-08-30T10:00:05Z",
+                            "payload": {
+                                "type": "message",
+                                "id": "assistant-1",
+                                "role": "assistant",
+                                "phase": "final_answer",
+                                "content": [{"type": "output_text", "text": "历史不会再清空"}],
+                                "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
+                            },
+                        },
+                        {
+                            "type": "event_msg",
+                            "timestamp": "2026-08-30T10:00:06Z",
+                            "payload": {"type": "task_complete", "turn_id": "turn-1"},
+                        },
+                    ]
+                    with jsonl_path.open("a", encoding="utf-8") as handle:
+                        handle.write("\n".join(json.dumps(event, ensure_ascii=False) for event in appended_events) + "\n")
+                    mobile._refresh_codex_rollout_cache_now(thread_id)
+                refreshed_thread = mobile._CODEX_THREAD_DETAIL_CACHE[thread_id]["thread"]
+            finally:
+                mobile._CODEX_THREAD_DETAIL_CACHE.clear()
+                mobile._CODEX_THREAD_DETAIL_INFLIGHT.clear()
+                mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+                mobile._CODEX_ROLLOUT_PATH_CACHE.clear()
+                mobile._CODEX_ROLLOUT_REFRESH_INFLIGHT.clear()
+
+        read_thread.assert_not_called()
+        self.assertEqual(["保留这段历史"], [message["text"] for message in initial_thread["messages"]])
+        self.assertEqual(
+            ["user", "reasoning", "assistant"],
+            [message["role"] for message in refreshed_thread["messages"]],
+        )
+        self.assertEqual("历史不会再清空", refreshed_thread["messages"][-1]["text"])
+        self.assertEqual("completed", refreshed_thread["latest_turn_status"])
+        self.assertEqual("2026-08-30T10:00:06Z", refreshed_thread["latest_turn_completed_at"])
+        self.assertEqual(str(jsonl_path), refreshed_thread["path"])
 
     def test_codex_rollout_tracks_active_goal_across_completion_and_recreation(self) -> None:
         mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
@@ -1686,26 +1820,25 @@ class MobileStateTests(unittest.TestCase):
     def test_codex_thread_default_page_limit_stays_sidebar_sized(self) -> None:
         self.assertLessEqual(CODEX_THREAD_PAGE_LIMIT, 50)
 
-    def test_codex_thread_detail_load_uses_ipc_timeout_matching_page_reads(self) -> None:
+    def test_codex_thread_detail_does_not_touch_ipc_when_rollout_is_missing(self) -> None:
         import ui.mobile as mobile
 
         mobile._CODEX_THREAD_DETAIL_CACHE.clear()
         mobile._CODEX_THREAD_DETAIL_INFLIGHT.clear()
-        calls: list[dict[str, object]] = []
-
-        def fake_read_codex_thread(thread_id: str, **kwargs: object) -> dict[str, object]:
-            calls.append({"thread_id": thread_id, **kwargs})
-            return {"id": thread_id, "messages": []}
-
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+        mobile._CODEX_ROLLOUT_PATH_CACHE.clear()
         with (
-            patch("ui.mobile.read_codex_thread", side_effect=fake_read_codex_thread),
-            patch("ui.mobile._refresh_codex_rollout_cache_now") as refresh_rollout,
+            patch("ui.mobile._find_codex_rollout_jsonl", return_value=None),
+            patch("ui.mobile.read_codex_thread") as read_thread,
         ):
             thread = mobile._load_codex_thread_now("thread-1")
 
-        self.assertEqual({"id": "thread-1", "messages": []}, thread)
-        self.assertEqual([{"thread_id": "thread-1", "timeout_seconds": 8}], calls)
-        refresh_rollout.assert_called_once_with("thread-1")
+        self.assertEqual([], thread["messages"])
+        self.assertEqual("Local Codex rollout is unavailable", thread["error"])
+        read_thread.assert_not_called()
+        mobile._CODEX_THREAD_DETAIL_CACHE.clear()
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+        mobile._CODEX_ROLLOUT_PATH_CACHE.clear()
 
     def test_mobile_state_defaults_to_lightweight_payload(self) -> None:
         with (
@@ -2374,7 +2507,7 @@ class MobileStateTests(unittest.TestCase):
         self.assertEqual({}, cached["signature_parts_by_limit"])
         self.assertEqual({}, cached["task_payloads_by_limit"])
 
-    def test_stream_signature_keeps_stale_codex_thread_while_refreshing(self) -> None:
+    def test_stream_signature_keeps_stale_codex_thread_without_reloading_app_server(self) -> None:
         mobile._CODEX_THREAD_DETAIL_CACHE.clear()
         mobile._CODEX_THREAD_DETAIL_INFLIGHT.clear()
         thread = {
@@ -2400,8 +2533,38 @@ class MobileStateTests(unittest.TestCase):
             mobile._CODEX_THREAD_DETAIL_CACHE.clear()
             mobile._CODEX_THREAD_DETAIL_INFLIGHT.clear()
 
-        start_load.assert_called_once_with("thread-stale")
+        start_load.assert_not_called()
         self.assertEqual(["old prompt"], [task["prompt"] for task in state["tasks"]])
+
+    def test_codex_thread_detail_refresh_keeps_previous_messages_when_rollout_is_missing(self) -> None:
+        mobile._CODEX_THREAD_DETAIL_CACHE.clear()
+        mobile._CODEX_THREAD_DETAIL_INFLIGHT.clear()
+        previous_messages = [
+            {"turn_id": "turn-1", "role": "user", "text": "old prompt"},
+            {"turn_id": "turn-1", "role": "assistant", "text": "old answer"},
+        ]
+        mobile._CODEX_THREAD_DETAIL_CACHE["thread-stale"] = {
+            "loaded_at": mobile.time.monotonic() - mobile.CODEX_THREAD_CACHE_SECONDS - 1,
+            "thread": {"id": "thread-stale", "messages": previous_messages, "cwd": "I:/AI/chatbridge"},
+            "signature_parts_by_limit": {},
+            "task_payloads_by_limit": {},
+            "rollout_revision": 1,
+        }
+        try:
+            with (
+                patch("ui.mobile._codex_raw_view_image_payload"),
+                patch("ui.mobile._cached_codex_rollout_thread", return_value={}),
+                patch("ui.mobile.read_codex_thread") as read_thread,
+            ):
+                refreshed = mobile._load_codex_thread_now("thread-stale")
+        finally:
+            mobile._CODEX_THREAD_DETAIL_CACHE.clear()
+            mobile._CODEX_THREAD_DETAIL_INFLIGHT.clear()
+
+        self.assertEqual(previous_messages, refreshed["messages"])
+        self.assertEqual("I:/AI/chatbridge", refreshed["cwd"])
+        self.assertEqual("Local Codex rollout is unavailable", refreshed["refresh_error"])
+        read_thread.assert_not_called()
 
     def test_stream_hub_state_file_signature_uses_stat_only(self) -> None:
         with TemporaryDirectory() as temp_dir:
