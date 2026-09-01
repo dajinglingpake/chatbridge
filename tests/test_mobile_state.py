@@ -1055,6 +1055,58 @@ class MobileStateTests(unittest.TestCase):
         mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
         mobile._CODEX_ROLLOUT_PATH_CACHE.clear()
 
+    def test_codex_rollout_applies_goal_completion_after_native_active_event(self) -> None:
+        thread_id = "thread-native-goal-complete"
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+        mobile._CODEX_ROLLOUT_PATH_CACHE.clear()
+        with TemporaryDirectory() as temp_dir:
+            sessions_root = Path(temp_dir) / "codex" / "sessions"
+            sessions_root.mkdir(parents=True)
+            jsonl_path = sessions_root / f"rollout-{thread_id}.jsonl"
+            events = [
+                {
+                    "type": "event_msg",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "payload": {
+                        "type": "thread_goal_updated",
+                        "threadId": thread_id,
+                        "goal": {
+                            "threadId": thread_id,
+                            "objective": "完成后不再展示",
+                            "status": "active",
+                            "createdAt": 1767225600,
+                            "updatedAt": 1767225600,
+                        },
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "timestamp": "2026-01-01T00:05:00Z",
+                    "payload": {
+                        "type": "custom_tool_call",
+                        "name": "exec",
+                        "call_id": "call-complete-native-goal",
+                        "input": 'const result = await tools.update_goal({ status: "complete" }); text(result);',
+                        "internal_chat_message_metadata_passthrough": {"turn_id": "turn-goal"},
+                    },
+                },
+            ]
+            jsonl_path.write_text(
+                "\n".join(json.dumps(event, ensure_ascii=False) for event in events) + "\n",
+                encoding="utf-8",
+            )
+
+            with patch("ui.mobile._codex_sessions_root", return_value=sessions_root):
+                payload = mobile._codex_raw_view_image_payload(thread_id)
+                thread = {"active_goal": {"status": "active"}}
+                mobile._apply_codex_rollout_state(thread_id, thread)
+
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+        mobile._CODEX_ROLLOUT_PATH_CACHE.clear()
+        self.assertEqual("complete", payload["goal"]["status"])
+        self.assertEqual("2026-01-01T00:05:00Z", payload["goal"]["finished_at"])
+        self.assertNotIn("active_goal", thread)
+
     def test_codex_rollout_keeps_newer_goal_control_cache_during_parse(self) -> None:
         thread_id = "thread-newer-goal-cache"
         mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()

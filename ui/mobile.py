@@ -1819,25 +1819,26 @@ def _codex_raw_view_image_payload_unlocked(thread_id: str) -> dict[str, object]:
                                 "updated_at": record_at,
                                 "finished_at": "",
                             }
-                        goal_tool_event = _codex_goal_tool_event(payload)
-                        goal_action = str(goal_tool_event.get("action") or "")
-                        if goal_action == "create":
+                    goal_tool_event = _codex_goal_tool_event(payload)
+                    goal_action = str(goal_tool_event.get("action") or "")
+                    if goal_action == "create":
+                        goal_state = {
+                            "objective": str(goal_tool_event.get("objective") or "").strip(),
+                            "status": "active",
+                            "started_at": record_at,
+                            "updated_at": record_at,
+                            "finished_at": "",
+                        }
+                        goal_native_seen = False
+                    elif goal_action == "update":
+                        goal_status = str(goal_tool_event.get("status") or "").strip().lower()
+                        if goal_status in {"complete", "blocked"}:
                             goal_state = {
-                                "objective": str(goal_tool_event.get("objective") or "").strip(),
-                                "status": "active",
-                                "started_at": record_at,
+                                **goal_state,
+                                "status": goal_status,
                                 "updated_at": record_at,
-                                "finished_at": "",
+                                "finished_at": record_at,
                             }
-                        elif goal_action == "update":
-                            goal_status = str(goal_tool_event.get("status") or "").strip().lower()
-                            if goal_status in {"complete", "blocked"}:
-                                goal_state = {
-                                    **goal_state,
-                                    "status": goal_status,
-                                    "updated_at": record_at,
-                                    "finished_at": record_at,
-                                }
                     native_goal_state = _codex_native_goal_event(payload, thread_id=cleaned, record_at=record_at)
                     if native_goal_state:
                         goal_state = native_goal_state
