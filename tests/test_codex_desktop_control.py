@@ -119,6 +119,7 @@ class CodexDesktopControlTests(unittest.TestCase):
         )
 
         self.assertIn("thread/resume", expression)
+        self.assertIn("excludeTurns: true", expression)
         self.assertIn("thread/goal/get", expression)
         self.assertIn("thread/goal/set", expression)
         self.assertIn("status = action === 'pause' ? 'paused' : 'active'", expression)

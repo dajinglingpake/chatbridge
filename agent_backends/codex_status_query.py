@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import shlex
 import sqlite3
 import subprocess
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -66,6 +69,12 @@ class _AppServerClient:
         if self._proc.stdin is None or self._proc.stdout is None:
             raise RuntimeError("failed to start codex app-server")
         self._next_id = 1
+        self._messages: queue.Queue[dict | None] = queue.Queue()
+        self._stderr_lines: list[str] = []
+        self._stdout_thread = threading.Thread(target=self._read_stdout, daemon=True, name="codex-status-stdout")
+        self._stderr_thread = threading.Thread(target=self._read_stderr, daemon=True, name="codex-status-stderr")
+        self._stdout_thread.start()
+        self._stderr_thread.start()
 
     def close(self) -> None:
         if self._proc.poll() is None:
@@ -96,12 +105,20 @@ class _AppServerClient:
         }
         self._proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
         self._proc.stdin.flush()
+        deadline = time.monotonic() + 30.0
         while True:
-            line = self._proc.stdout.readline()
-            if not line:
-                stderr = self._proc.stderr.read().strip() if self._proc.stderr is not None else ""
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                stderr = "\n".join(self._stderr_lines[-8:])
+                raise RuntimeError(stderr or f"codex app-server timed out waiting for {method}")
+            try:
+                message = self._messages.get(timeout=remaining)
+            except queue.Empty as exc:
+                stderr = "\n".join(self._stderr_lines[-8:])
+                raise RuntimeError(stderr or f"codex app-server timed out waiting for {method}") from exc
+            if message is None:
+                stderr = "\n".join(self._stderr_lines[-8:])
                 raise RuntimeError(stderr or f"codex app-server closed while waiting for {method}")
-            message = json.loads(line)
             if message.get("id") != request_id:
                 continue
             if "error" in message:
@@ -110,6 +127,33 @@ class _AppServerClient:
             if not isinstance(result, dict):
                 raise RuntimeError(f"codex app-server {method} returned invalid result")
             return result
+
+    def _read_stdout(self) -> None:
+        stdout = self._proc.stdout
+        if stdout is None:
+            self._messages.put(None)
+            return
+        for raw_line in stdout:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(message, dict):
+                self._messages.put(message)
+        self._messages.put(None)
+
+    def _read_stderr(self) -> None:
+        stderr = self._proc.stderr
+        if stderr is None:
+            return
+        for raw_line in stderr:
+            line = raw_line.strip()
+            if line:
+                self._stderr_lines.append(line)
+                del self._stderr_lines[:-30]
 
 
 def query_codex_status_panel(codex_command: str, session_file: Path, workdir: Path) -> str | None:
@@ -123,10 +167,23 @@ def query_codex_status_panel(codex_command: str, session_file: Path, workdir: Pa
         client.initialize()
         account_payload = _request_optional(client, "account/read", {"refresh": False})
         limits_payload = _request_optional(client, "account/rateLimits/read", None)
-        resume_payload = client.request("thread/resume", {"threadId": session_id})
+        # Reading metadata avoids hydrating the full paginated thread history.
+        thread_payload = _request_optional(
+            client,
+            "thread/read",
+            {"threadId": session_id, "includeTurns": False},
+        )
+        if not isinstance(thread_payload.get("thread"), dict):
+            thread_payload = _request_optional(
+                client,
+                "thread/resume",
+                {"threadId": session_id, "excludeTurns": True},
+            )
     finally:
         client.close()
-    snapshot = _build_snapshot(session_id, account_payload, limits_payload, resume_payload, current_cli_version=current_cli_version)
+    if not isinstance(thread_payload.get("thread"), dict):
+        return None
+    snapshot = _build_snapshot(session_id, account_payload, limits_payload, thread_payload, current_cli_version=current_cli_version)
     return _render_status_panel(snapshot)
 
 
@@ -215,20 +272,26 @@ def _build_snapshot(
     thread = dict(resume_payload.get("thread") or {})
     session_cli_version = str(thread.get("cliVersion") or "").strip()
     token_usage = _load_latest_token_usage(Path(str(thread.get("path") or "")))
+    # `thread/read` keeps metadata under `thread`, while `thread/resume` also
+    # exposes some fields at the response root. Accept both shapes.
+    def field(name: str) -> object:
+        value = resume_payload.get(name)
+        return thread.get(name) if value is None else value
+
     account_label = _format_account_label(dict(account_payload.get("account") or {}))
     primary_bucket, extra_buckets = _parse_rate_limit_buckets(dict(limits_payload))
     return _StatusSnapshot(
         cli_version=current_cli_version.strip() or session_cli_version or "unknown",
         session_cli_version=session_cli_version,
-        model=str(resume_payload.get("model") or "-"),
-        reasoning_effort=str(resume_payload.get("reasoningEffort") or "").strip(),
-        service_tier=str(resume_payload.get("serviceTier") or "").strip(),
-        directory=_abbreviate_path(str(resume_payload.get("cwd") or thread.get("cwd") or "-")),
+        model=str(field("model") or "-"),
+        reasoning_effort=str(field("reasoningEffort") or "").strip(),
+        service_tier=str(field("serviceTier") or "").strip(),
+        directory=_abbreviate_path(str(field("cwd") or "-")),
         permissions=_format_permissions(
-            approval_policy=resume_payload.get("approvalPolicy"),
-            sandbox=resume_payload.get("sandbox"),
+            approval_policy=field("approvalPolicy"),
+            sandbox=field("sandbox"),
         ),
-        agents_path=_abbreviate_path(_pick_agents_path(list(resume_payload.get("instructionSources") or []))),
+        agents_path=_abbreviate_path(_pick_agents_path(list(field("instructionSources") or []))),
         account_label=account_label,
         collaboration_mode="Default",
         session_id=session_id,

@@ -597,7 +597,11 @@ class CodexBackend(AgentBackend):
         client = self._get_app_server(context)
         thread_params = self._app_server_thread_params(agent, workdir, context)
         if existing_session:
-            thread_payload = client.request("thread/resume", {**thread_params, "threadId": existing_session}, timeout=90)
+            thread_payload = client.request(
+                "thread/resume",
+                {**thread_params, "threadId": existing_session, "excludeTurns": True},
+                timeout=90,
+            )
         else:
             thread_payload = client.request("thread/start", thread_params, timeout=90)
         thread = thread_payload.get("thread") if isinstance(thread_payload.get("thread"), dict) else {}

@@ -552,7 +552,7 @@ def _goal_expression(
     const threadId = {encoded_thread_id};
     const action = {encoded_action};
     const objective = {encoded_objective};
-    const resumeResponse = await request('thread/resume', {{threadId}});
+    const resumeResponse = await request('thread/resume', {{threadId, excludeTurns: true}});
     if (resumeResponse?.error) {{
         return JSON.stringify({{ok: false, error: resumeResponse.error.message || String(resumeResponse.error)}});
     }}

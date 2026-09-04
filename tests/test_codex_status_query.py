@@ -16,11 +16,95 @@ from agent_backends.codex_status_query import (
     _load_latest_token_usage,
     _render_status_panel,
     query_codex_context_left_percent,
+    query_codex_status_panel,
 )
 from unittest.mock import patch
 
 
 class CodexStatusQueryTests(unittest.TestCase):
+    def test_query_status_reads_thread_metadata_without_full_history(self) -> None:
+        class FakeClient:
+            calls: list[tuple[str, object]] = []
+
+            def __init__(self, command: str) -> None:
+                self.calls = []
+
+            def initialize(self) -> None:
+                self.calls.append(("initialize", None))
+
+            def request(self, method: str, params: object) -> dict:
+                self.calls.append((method, params))
+                if method == "account/read":
+                    return {"account": {"type": "chatgpt", "email": "user@example.test", "planType": "plus"}}
+                if method == "account/rateLimits/read":
+                    return {}
+                if method == "thread/read":
+                    return {
+                        "thread": {
+                            "id": "thread-1",
+                            "model": "gpt-5.5",
+                            "cwd": "C:/work",
+                            "cliVersion": "0.144.6",
+                            "path": "C:/missing.jsonl",
+                        }
+                    }
+                raise AssertionError(f"unexpected request: {method}")
+
+            def close(self) -> None:
+                self.calls.append(("close", None))
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            session_file = Path(tempdir) / "session.txt"
+            session_file.write_text("thread-1", encoding="utf-8")
+            with (
+                patch("agent_backends.codex_status_query._AppServerClient", FakeClient),
+                patch("agent_backends.codex_status_query._detect_current_cli_version", return_value="0.144.6"),
+            ):
+                panel = query_codex_status_panel("codex", session_file, Path(tempdir))
+
+        self.assertIsNotNone(panel)
+        assert panel is not None
+        self.assertIn("Model: gpt-5.5", panel)
+        self.assertIn("Directory: C:/work", panel)
+
+    def test_query_status_falls_back_to_resume_with_excluded_turns(self) -> None:
+        class FakeClient:
+            def __init__(self, command: str) -> None:
+                self.calls: list[tuple[str, object]] = []
+
+            def initialize(self) -> None:
+                pass
+
+            def request(self, method: str, params: object) -> dict:
+                self.calls.append((method, params))
+                if method in {"account/read", "account/rateLimits/read"}:
+                    return {}
+                if method == "thread/read":
+                    return {}
+                if method == "thread/resume":
+                    self.resume_params = params
+                    return {"thread": {"id": "thread-1", "model": "gpt-5.5", "path": "C:/missing.jsonl"}}
+                raise AssertionError(f"unexpected request: {method}")
+
+            def close(self) -> None:
+                pass
+
+        fake_client = FakeClient("codex")
+        with tempfile.TemporaryDirectory() as tempdir:
+            session_file = Path(tempdir) / "session.txt"
+            session_file.write_text("thread-1", encoding="utf-8")
+            with (
+                patch("agent_backends.codex_status_query._AppServerClient", return_value=fake_client),
+                patch("agent_backends.codex_status_query._detect_current_cli_version", return_value="0.144.6"),
+            ):
+                panel = query_codex_status_panel("codex", session_file, Path(tempdir))
+
+        self.assertIsNotNone(panel)
+        self.assertEqual(
+            {"threadId": "thread-1", "excludeTurns": True},
+            fake_client.resume_params,
+        )
+
     def test_load_latest_token_usage_reads_last_token_count_event(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             log_path = Path(tempdir) / "session.jsonl"
