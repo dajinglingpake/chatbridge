@@ -1619,18 +1619,38 @@ def _find_codex_rollout_jsonl(thread_id: str) -> Path | None:
     if not cleaned:
         return None
     cached_path = _CODEX_ROLLOUT_PATH_CACHE.get(cleaned)
-    if isinstance(cached_path, Path) and cached_path.is_file():
-        return cached_path
+    cached_candidates: list[Path] = []
+    if isinstance(cached_path, Path):
+        try:
+            if cached_path.is_file():
+                cached_candidates.append(cached_path)
+        except OSError:
+            pass
     root = _codex_sessions_root()
-    if not root.is_dir():
-        return None
-    try:
-        matches = [path for path in root.rglob(f"*{cleaned}.jsonl") if path.is_file()]
-    except OSError:
-        return None
+    matches = list(cached_candidates)
+    if root.is_dir():
+        try:
+            matches.extend(
+                path
+                for path in root.rglob("*.jsonl")
+                if path.is_file()
+                and re.search(rf"(?:^|[-_]){re.escape(cleaned)}(?:_|\.jsonl$)", path.name)
+            )
+        except OSError:
+            pass
+    if matches:
+        matches = list(dict.fromkeys(matches))
     if not matches:
         return None
-    latest = max(matches, key=lambda path: path.stat().st_mtime_ns)
+    scored_matches: list[tuple[int, str, Path]] = []
+    for path in matches:
+        try:
+            scored_matches.append((path.stat().st_mtime_ns, path.name, path))
+        except OSError:
+            continue
+    if not scored_matches:
+        return cached_path if cached_candidates else None
+    latest = max(scored_matches)[2]
     _CODEX_ROLLOUT_PATH_CACHE[cleaned] = latest
     return latest
 
@@ -1895,6 +1915,23 @@ def _codex_raw_view_image_payload_unlocked(thread_id: str) -> dict[str, object]:
                             reasoning_times_by_turn.setdefault(turn_id, []).append(
                                 {"text": reasoning_text, "at": record_at}
                             )
+                    if record_type == "event_msg" and event_type == "item_completed":
+                        completed_item = payload.get("item")
+                        if (
+                            turn_id
+                            and isinstance(completed_item, dict)
+                            and str(completed_item.get("type") or "").replace("-", "").replace("_", "").lower()
+                            in {"commandexecution", "commandexec"}
+                        ):
+                            _codex_merge_command_execution_item(
+                                commands_by_turn,
+                                pending_exec_commands,
+                                turn_id=turn_id,
+                                item=completed_item,
+                                record_at=record_at,
+                                line_offset=line_offset,
+                            )
+                        continue
                     if event_type == "message" and payload.get("role") == "assistant":
                         if not turn_id:
                             continue
@@ -1961,6 +1998,7 @@ def _codex_raw_view_image_payload_unlocked(thread_id: str) -> dict[str, object]:
                                     "event": "codex_command",
                                     "type": "info",
                                     "at": record_at,
+                                    "turn_id": turn_id,
                                     "detail": command,
                                     "metadata": metadata,
                                 }
@@ -2199,10 +2237,13 @@ def _codex_rollout_refresh_needed(thread_id: str) -> bool:
         return False
     cached = _CODEX_VIEW_IMAGE_PREVIEW_CACHE.get(cleaned_thread_id)
     cached_path = str(cached.get("path") or "").strip() if isinstance(cached, dict) else ""
-    path = Path(cached_path) if cached_path else _CODEX_ROLLOUT_PATH_CACHE.get(cleaned_thread_id)
+    discovered_path = _find_codex_rollout_jsonl(cleaned_thread_id)
+    path = discovered_path or (Path(cached_path) if cached_path else _CODEX_ROLLOUT_PATH_CACHE.get(cleaned_thread_id))
     if not isinstance(path, Path):
         checked_at = float(cached.get("checked_at") or 0.0) if isinstance(cached, dict) else 0.0
         return not cached or time.monotonic() - checked_at > CODEX_THREAD_CACHE_SECONDS
+    if discovered_path is not None and cached_path and str(discovered_path) != cached_path:
+        return True
     try:
         path_signature = (str(path), path.stat().st_mtime_ns, path.stat().st_size)
     except OSError:
@@ -2711,6 +2752,146 @@ def _codex_custom_tool_exec_status(output: str) -> str:
     return "completed"
 
 
+def _codex_command_execution_command(item: dict[str, object]) -> str:
+    parsed_cmd = item.get("parsed_cmd")
+    if isinstance(parsed_cmd, list):
+        for parsed in parsed_cmd:
+            if isinstance(parsed, dict):
+                command = str(parsed.get("cmd") or "").strip()
+                if command:
+                    return command
+    raw_command = item.get("command")
+    if isinstance(raw_command, list):
+        values = [str(value or "").strip() for value in raw_command if str(value or "").strip()]
+        for marker in ("-Command", "--command", "-c"):
+            if marker in values:
+                index = values.index(marker)
+                if index + 1 < len(values):
+                    return " ".join(values[index + 1 :]).strip()
+        return " ".join(values).strip()
+    return str(raw_command or item.get("cmd") or "").strip()
+
+
+def _codex_command_execution_cwd(item: dict[str, object]) -> str:
+    cwd = str(item.get("cwd") or item.get("workdir") or "").strip()
+    if cwd.startswith("file://"):
+        parsed = urlsplit(cwd)
+        cwd = unquote(parsed.path or "")
+        if re.match(r"^/[A-Za-z]:", cwd):
+            cwd = cwd[1:]
+    return cwd
+
+
+def _codex_command_execution_output(item: dict[str, object]) -> str:
+    for key in ("aggregated_output", "aggregatedOutput", "stdout", "stderr", "output", "error"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _codex_command_execution_status(value: object) -> str:
+    normalized = str(value or "").strip().replace("_", "").replace("-", "").lower()
+    if normalized in {"completed", "complete", "success", "succeeded", "done"}:
+        return "completed"
+    if normalized in {"failed", "failure", "error"}:
+        return "failed"
+    if normalized in {"canceled", "cancelled", "aborted", "interrupted"}:
+        return "interrupted"
+    return "inProgress"
+
+
+def _codex_command_execution_duration_ms(item: dict[str, object]) -> str:
+    direct = item.get("duration_ms") or item.get("durationMs")
+    if direct is not None and str(direct).strip():
+        return str(direct).strip()
+    duration = item.get("duration")
+    if isinstance(duration, dict):
+        try:
+            seconds = float(duration.get("secs") or 0)
+            nanos = float(duration.get("nanos") or 0)
+            total_ms = int(seconds * 1000 + nanos / 1_000_000)
+        except (TypeError, ValueError):
+            total_ms = 0
+        return str(total_ms) if total_ms > 0 else ""
+    try:
+        started = float(item.get("started_at_ms") or item.get("startedAtMs") or 0)
+        completed = float(item.get("completed_at_ms") or item.get("completedAtMs") or 0)
+    except (TypeError, ValueError):
+        return ""
+    return str(max(0, int(completed - started))) if completed >= started > 0 else ""
+
+
+def _codex_merge_command_execution_item(
+    commands_by_turn: dict[str, list[dict[str, object]]],
+    pending_exec_commands: dict[str, list[dict[str, object]]],
+    *,
+    turn_id: str,
+    item: dict[str, object],
+    record_at: str,
+    line_offset: int,
+) -> None:
+    command = _codex_command_execution_command(item)
+    if not command:
+        return
+    candidates = [
+        entry
+        for entries in pending_exec_commands.values()
+        for entry in entries
+        if str(entry.get("turn_id") or turn_id) == turn_id
+        and isinstance(entry.get("metadata"), dict)
+        and str(entry["metadata"].get("status") or "").strip().lower() in {"inprogress", "running"}
+    ]
+    target = next(
+        (
+            entry
+            for entry in candidates
+            if isinstance(entry.get("metadata"), dict)
+            and str(entry["metadata"].get("command") or "").strip() == command
+        ),
+        candidates[0] if len(candidates) == 1 else None,
+    )
+    if target is None:
+        execution_id = str(item.get("id") or f"rollout-command-{line_offset}").strip()
+        metadata: dict[str, object] = {
+            "item_type": "commandExecution",
+            "item_id": execution_id,
+            "execution_id": execution_id,
+            "command": command,
+            "status": _codex_command_execution_status(item.get("status")),
+        }
+        cwd = _codex_command_execution_cwd(item)
+        if cwd:
+            metadata["cwd"] = cwd
+        target = {
+            "id": execution_id,
+            "event": "codex_command",
+            "type": "error" if metadata["status"] == "failed" else "success" if metadata["status"] == "completed" else "info",
+            "at": record_at,
+            "detail": command,
+            "metadata": metadata,
+        }
+        commands_by_turn.setdefault(turn_id, []).append(target)
+    metadata = target.get("metadata") if isinstance(target.get("metadata"), dict) else {}
+    metadata["status"] = _codex_command_execution_status(item.get("status"))
+    metadata["execution_id"] = str(item.get("id") or metadata.get("execution_id") or "").strip()
+    metadata["command"] = command
+    cwd = _codex_command_execution_cwd(item)
+    if cwd:
+        metadata["cwd"] = cwd
+    output = _codex_command_execution_output(item)
+    if output:
+        metadata["output"] = output[-12000:]
+    exit_code = item.get("exit_code") if "exit_code" in item else item.get("exitCode")
+    if exit_code is not None and str(exit_code).strip():
+        metadata["exit_code"] = str(exit_code).strip()
+    duration_ms = _codex_command_execution_duration_ms(item)
+    if duration_ms:
+        metadata["duration_ms"] = duration_ms
+    target["metadata"] = metadata
+    target["type"] = "error" if metadata["status"] == "failed" else "success" if metadata["status"] == "completed" else "info"
+    if record_at:
+        target["at"] = record_at
 def _codex_time_delta_ms(start: object, end: object) -> int:
     start_at = _parse_mobile_time(start)
     end_at = _parse_mobile_time(end)

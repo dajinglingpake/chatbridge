@@ -4247,6 +4247,43 @@ class StreamComposerTests(unittest.TestCase):
                 snapshot["activity"],
             )
 
+    def test_codex_runtime_snapshot_reads_new_command_execution_completion_event(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "new-rollout.jsonl"
+            path.write_text(
+                json.dumps(
+                    {
+                        "timestamp": "2026-08-30T10:00:03Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "item_completed",
+                            "item": {
+                                "type": "CommandExecution",
+                                "command": ["pwsh.exe", "-Command", "pytest -q"],
+                                "parsed_cmd": [{"type": "unknown", "cmd": "pytest -q"}],
+                                "status": "completed",
+                            },
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = _codex_rollout_runtime_snapshot(path)
+
+        self.assertTrue(snapshot["running_hint"])
+        self.assertEqual(
+            {
+                "kind": "command",
+                "text": "pytest -q",
+                "status": "completed",
+                "at": "2026-08-30T10:00:03Z",
+                "count": 1,
+            },
+            snapshot["activity"],
+        )
+
     def test_codex_runtime_status_uses_stable_detection_time_when_start_is_outside_probe(self) -> None:
         with TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "active-without-start.jsonl"

@@ -275,6 +275,13 @@ def _codex_rollout_runtime_hint_from_lines(lines: list[bytes]) -> bool | None:
         payload_type = str(payload.get("type") or "").strip()
         phase = str(payload.get("phase") or "").strip()
         if record_type == "event_msg":
+            if payload_type == "item_completed":
+                completed_item = payload.get("item")
+                if isinstance(completed_item, dict) and str(completed_item.get("type") or "").replace("-", "").replace("_", "").lower() in {
+                    "commandexecution",
+                    "commandexec",
+                }:
+                    return True
             if payload_type in {"task_complete", "task_cancelled", "task_canceled", "turn_aborted", "turn_completed"}:
                 return False
             if payload_type == "task_started":
@@ -390,6 +397,40 @@ def _codex_rollout_response_activity(payload: dict[str, object], *, at: str) -> 
     } if display else {}
 
 
+def _codex_rollout_command_execution_activity(item: dict[str, object], *, at: str) -> dict[str, object]:
+    parsed_cmd = item.get("parsed_cmd")
+    command = ""
+    if isinstance(parsed_cmd, list):
+        for parsed in parsed_cmd:
+            if isinstance(parsed, dict) and str(parsed.get("cmd") or "").strip():
+                command = str(parsed.get("cmd") or "").strip()
+                break
+    if not command:
+        raw_command = item.get("command")
+        if isinstance(raw_command, list):
+            values = [str(value or "").strip() for value in raw_command if str(value or "").strip()]
+            for marker in ("-Command", "--command", "-c"):
+                if marker in values:
+                    command = " ".join(values[values.index(marker) + 1 :]).strip()
+                    break
+            command = command or " ".join(values).strip()
+        else:
+            command = str(raw_command or item.get("cmd") or "").strip()
+    if not command:
+        return {}
+    normalized_status = str(item.get("status") or "").strip().replace("_", "").replace("-", "").lower()
+    status = (
+        "completed"
+        if normalized_status in {"completed", "complete", "success", "succeeded", "done"}
+        else "failed"
+        if normalized_status in {"failed", "failure", "error"}
+        else "interrupted"
+        if normalized_status in {"canceled", "cancelled", "aborted", "interrupted"}
+        else "running"
+    )
+    return {"kind": "command", "text": command, "status": status, "at": at, "count": 1}
+
+
 def _codex_rollout_runtime_activity_from_lines(lines: list[bytes]) -> dict[str, object]:
     activity: dict[str, object] = {}
     pending_calls: dict[str, dict[str, object]] = {}
@@ -415,6 +456,16 @@ def _codex_rollout_runtime_activity_from_lines(lines: list[bytes]) -> dict[str, 
             pending_calls.clear()
             continue
         if record_type == "event_msg":
+            if payload_type == "item_completed":
+                completed_item = payload.get("item")
+                if isinstance(completed_item, dict) and str(completed_item.get("type") or "").replace("-", "").replace("_", "").lower() in {
+                    "commandexecution",
+                    "commandexec",
+                }:
+                    completed_activity = _codex_rollout_command_execution_activity(completed_item, at=at)
+                    if completed_activity:
+                        activity = completed_activity
+                continue
             if payload_type == "agent_reasoning":
                 text = _codex_rollout_reasoning_text(payload)
                 if text:

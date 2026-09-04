@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 import asyncio
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -2527,6 +2528,76 @@ class MobileStateTests(unittest.TestCase):
             mobile._prime_codex_rollout_path(thread_id, second_path)
 
             self.assertEqual(first_path, mobile._CODEX_ROLLOUT_PATH_CACHE[thread_id])
+        mobile._CODEX_ROLLOUT_PATH_CACHE.clear()
+
+    def test_rollout_path_discovers_new_turn_files_and_switches_cached_path(self) -> None:
+        thread_id = "thread-new-rollout-format"
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+        mobile._CODEX_ROLLOUT_PATH_CACHE.clear()
+        with TemporaryDirectory() as temp_dir:
+            sessions_root = Path(temp_dir) / "codex" / "sessions"
+            sessions_root.mkdir(parents=True)
+            old_path = sessions_root / f"rollout-2026-08-30T10-00-00-{thread_id}.jsonl"
+            new_path = sessions_root / f"rollout-2026-08-30T10-01-00-{thread_id}_turn-2.jsonl"
+            old_path.write_text("{}\n", encoding="utf-8")
+            os.utime(old_path, ns=(1_000_000_000, 1_000_000_000))
+
+            with patch("ui.mobile._codex_sessions_root", return_value=sessions_root):
+                self.assertEqual(old_path, mobile._find_codex_rollout_jsonl(thread_id))
+                mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE[thread_id] = {
+                    "path": str(old_path),
+                    "signature": (str(old_path), old_path.stat().st_mtime_ns, old_path.stat().st_size),
+                    "checked_at": mobile.time.monotonic(),
+                }
+                new_path.write_text("{}\n", encoding="utf-8")
+                os.utime(new_path, ns=(2_000_000_000, 2_000_000_000))
+                self.assertEqual(new_path, mobile._find_codex_rollout_jsonl(thread_id))
+                self.assertTrue(mobile._codex_rollout_refresh_needed(thread_id))
+
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+        mobile._CODEX_ROLLOUT_PATH_CACHE.clear()
+
+    def test_rollout_parses_command_execution_item_completed_event(self) -> None:
+        thread_id = "thread-command-execution-item"
+        turn_id = "turn-command-execution"
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
+        mobile._CODEX_ROLLOUT_PATH_CACHE.clear()
+        with TemporaryDirectory() as temp_dir:
+            sessions_root = Path(temp_dir) / "codex" / "sessions"
+            sessions_root.mkdir(parents=True)
+            jsonl_path = sessions_root / f"rollout-2026-08-30T10-00-00-{thread_id}_{turn_id}.jsonl"
+            event = {
+                "type": "event_msg",
+                "timestamp": "2026-08-30T10:00:03Z",
+                "payload": {
+                    "type": "item_completed",
+                    "turn_id": turn_id,
+                    "item": {
+                        "type": "CommandExecution",
+                        "id": "exec-command-execution",
+                        "command": ["pwsh.exe", "-Command", "pytest -q"],
+                        "parsed_cmd": [{"type": "unknown", "cmd": "pytest -q"}],
+                        "cwd": "file:///I:/AI/chatbridge",
+                        "status": "completed",
+                        "aggregated_output": "31 passed",
+                        "exit_code": 0,
+                        "started_at_ms": 1000,
+                        "completed_at_ms": 1125,
+                    },
+                },
+            }
+            jsonl_path.write_text(json.dumps(event) + "\n", encoding="utf-8")
+            with patch("ui.mobile._codex_sessions_root", return_value=sessions_root):
+                payload = mobile._codex_raw_view_image_payload(thread_id)
+
+        command = payload["commands"][turn_id][0]
+        self.assertEqual("pytest -q", command["detail"])
+        self.assertEqual("completed", command["metadata"]["status"])
+        self.assertEqual("I:/AI/chatbridge", command["metadata"]["cwd"])
+        self.assertEqual("31 passed", command["metadata"]["output"])
+        self.assertEqual("0", command["metadata"]["exit_code"])
+        self.assertEqual("125", command["metadata"]["duration_ms"])
+        mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
         mobile._CODEX_ROLLOUT_PATH_CACHE.clear()
 
     def test_rollout_refresh_invalidates_cached_thread_payloads(self) -> None:
