@@ -27,6 +27,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response, StreamingResponse
 
 from bridge_config import APP_DIR
+from agent_hub import HubConfig
 from core.app_service import (
     list_codex_threads,
     read_codex_thread,
@@ -255,6 +256,48 @@ def _load_raw_hub_state() -> dict[str, object]:
         return payload if isinstance(payload, dict) else {}
     payload = read_json(HUB_STATE_PATH)
     cached_payload = dict(payload) if isinstance(payload, dict) else {}
+    configured_agents = {agent.id: agent for agent in HubConfig.load().agents}
+    state_agents = cached_payload.get("agents") if isinstance(cached_payload.get("agents"), list) else []
+    normalized_agents: list[dict[str, object]] = []
+    seen_agent_ids: set[str] = set()
+    for raw_agent in state_agents:
+        if not isinstance(raw_agent, dict):
+            continue
+        agent_id = str(raw_agent.get("id") or "").strip()
+        configured = configured_agents.get(agent_id)
+        if configured is None:
+            continue
+        normalized = dict(raw_agent)
+        normalized.update(
+            {
+                "name": configured.name,
+                "workdir": configured.workdir,
+                "session_file": configured.session_file,
+                "backend": configured.backend,
+                "model": configured.model,
+                "prompt_prefix": configured.prompt_prefix,
+                "enabled": configured.enabled,
+            }
+        )
+        normalized_agents.append(normalized)
+        seen_agent_ids.add(agent_id)
+    for agent_id, configured in configured_agents.items():
+        if agent_id in seen_agent_ids:
+            continue
+        normalized_agents.append(
+            {
+                "id": configured.id,
+                "name": configured.name,
+                "workdir": configured.workdir,
+                "session_file": configured.session_file,
+                "backend": configured.backend,
+                "model": configured.model,
+                "prompt_prefix": configured.prompt_prefix,
+                "enabled": configured.enabled,
+                "runtime": {},
+            }
+        )
+    cached_payload["agents"] = normalized_agents
     _RAW_HUB_STATE_CACHE["signature"] = signature
     _RAW_HUB_STATE_CACHE["payload"] = cached_payload
     _RAW_STREAM_WINDOW_CACHE["key"] = None
@@ -3879,17 +3922,22 @@ def _load_codex_thread_cached(thread_id: str, *, blocking: bool = False) -> dict
 
 def _load_codex_thread_now(cleaned_thread_id: str) -> dict[str, object]:
     try:
-        _codex_raw_view_image_payload(cleaned_thread_id)
-        rollout_thread = _cached_codex_rollout_thread(cleaned_thread_id)
-        if rollout_thread:
-            return _cache_codex_thread_detail(cleaned_thread_id, rollout_thread)
+        app_server_thread = read_codex_thread(cleaned_thread_id, timeout_seconds=8)
+        if isinstance(app_server_thread, dict) and app_server_thread.get("id"):
+            app_server_thread.setdefault("source", "codex-app-server")
+            return _cache_codex_thread_detail(cleaned_thread_id, app_server_thread)
         return _cache_codex_thread_detail(
             cleaned_thread_id,
             {
                 "id": cleaned_thread_id,
                 "messages": [],
-                "error": "Local Codex rollout is unavailable",
+                "error": "Codex app-server thread is unavailable",
             },
+        )
+    except Exception as exc:
+        return _cache_codex_thread_detail(
+            cleaned_thread_id,
+            {"id": cleaned_thread_id, "messages": [], "error": str(exc)},
         )
     finally:
         with _CODEX_THREAD_DETAIL_LOCK:

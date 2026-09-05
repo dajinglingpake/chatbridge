@@ -888,7 +888,15 @@ class MobileStateTests(unittest.TestCase):
             try:
                 with (
                     patch("ui.mobile._codex_sessions_root", return_value=sessions_root),
-                    patch("ui.mobile.read_codex_thread") as read_thread,
+                    patch(
+                        "ui.mobile.read_codex_thread",
+                        return_value={
+                            "id": thread_id,
+                            "messages": [{"role": "user", "text": "保留这段历史"}],
+                            "latest_turn_status": "completed",
+                            "path": str(jsonl_path),
+                        },
+                    ) as read_thread,
                 ):
                     initial_thread = mobile._load_codex_thread_now(thread_id)
                     appended_events = [
@@ -931,7 +939,7 @@ class MobileStateTests(unittest.TestCase):
                 mobile._CODEX_ROLLOUT_PATH_CACHE.clear()
                 mobile._CODEX_ROLLOUT_REFRESH_INFLIGHT.clear()
 
-        read_thread.assert_not_called()
+        read_thread.assert_called_once_with(thread_id, timeout_seconds=8)
         self.assertEqual(["保留这段历史"], [message["text"] for message in initial_thread["messages"]])
         self.assertEqual(
             ["user", "reasoning", "assistant"],
@@ -1873,7 +1881,7 @@ class MobileStateTests(unittest.TestCase):
     def test_codex_thread_default_page_limit_stays_sidebar_sized(self) -> None:
         self.assertLessEqual(CODEX_THREAD_PAGE_LIMIT, 50)
 
-    def test_codex_thread_detail_does_not_touch_ipc_when_rollout_is_missing(self) -> None:
+    def test_codex_thread_detail_reads_app_server_thread(self) -> None:
         import ui.mobile as mobile
 
         mobile._CODEX_THREAD_DETAIL_CACHE.clear()
@@ -1881,14 +1889,21 @@ class MobileStateTests(unittest.TestCase):
         mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
         mobile._CODEX_ROLLOUT_PATH_CACHE.clear()
         with (
-            patch("ui.mobile._find_codex_rollout_jsonl", return_value=None),
-            patch("ui.mobile.read_codex_thread") as read_thread,
+            patch(
+                "ui.mobile.read_codex_thread",
+                return_value={
+                    "id": "thread-1",
+                    "messages": [{"role": "user", "text": "hello"}],
+                    "path": "C:/archived/rollout-thread-1.jsonl",
+                },
+            ) as read_thread,
         ):
             thread = mobile._load_codex_thread_now("thread-1")
 
-        self.assertEqual([], thread["messages"])
-        self.assertEqual("Local Codex rollout is unavailable", thread["error"])
-        read_thread.assert_not_called()
+        self.assertEqual("thread-1", thread["id"])
+        self.assertEqual("hello", thread["messages"][0]["text"])
+        self.assertEqual("codex-app-server", thread["source"])
+        read_thread.assert_called_once_with("thread-1", timeout_seconds=8)
         mobile._CODEX_THREAD_DETAIL_CACHE.clear()
         mobile._CODEX_VIEW_IMAGE_PREVIEW_CACHE.clear()
         mobile._CODEX_ROLLOUT_PATH_CACHE.clear()
@@ -2426,7 +2441,7 @@ class MobileStateTests(unittest.TestCase):
         try:
             with (
                 patch("ui.mobile._load_raw_hub_state", return_value={"tasks": [], "agents": []}),
-                patch("ui.mobile.read_codex_thread") as read_thread,
+                patch("ui.mobile.read_codex_thread", return_value={}) as read_thread,
                 patch("ui.mobile._start_codex_thread_detail_load") as start_load,
                 patch("ui.mobile._start_codex_rollout_refresh") as start_rollout,
             ):
@@ -2674,11 +2689,7 @@ class MobileStateTests(unittest.TestCase):
             "rollout_revision": 1,
         }
         try:
-            with (
-                patch("ui.mobile._codex_raw_view_image_payload"),
-                patch("ui.mobile._cached_codex_rollout_thread", return_value={}),
-                patch("ui.mobile.read_codex_thread") as read_thread,
-            ):
+            with patch("ui.mobile.read_codex_thread", return_value={} ) as read_thread:
                 refreshed = mobile._load_codex_thread_now("thread-stale")
         finally:
             mobile._CODEX_THREAD_DETAIL_CACHE.clear()
@@ -2686,8 +2697,8 @@ class MobileStateTests(unittest.TestCase):
 
         self.assertEqual(previous_messages, refreshed["messages"])
         self.assertEqual("I:/AI/chatbridge", refreshed["cwd"])
-        self.assertEqual("Local Codex rollout is unavailable", refreshed["refresh_error"])
-        read_thread.assert_not_called()
+        self.assertEqual("Codex app-server thread is unavailable", refreshed["refresh_error"])
+        read_thread.assert_called_once_with("thread-stale", timeout_seconds=8)
 
     def test_stream_hub_state_file_signature_uses_stat_only(self) -> None:
         with TemporaryDirectory() as temp_dir:
