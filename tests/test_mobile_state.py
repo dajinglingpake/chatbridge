@@ -1329,6 +1329,22 @@ class MobileStateTests(unittest.TestCase):
         self.assertEqual("2026-07-05T21:52:20", tasks[0]["created_at"])
         self.assertEqual("2026-07-05T21:53:28", tasks[1]["created_at"])
 
+    def test_active_app_server_turn_is_rendered_as_running(self) -> None:
+        thread = {
+            "id": "thread-active",
+            "status": "active",
+            "latest_turn_status": "inProgress",
+            "messages": [
+                {"turn_id": "turn-active", "role": "user", "text": "正在执行"},
+            ],
+        }
+
+        tasks = _codex_thread_task_payloads(thread)
+
+        self.assertEqual("running", tasks[-1]["status"])
+        self.assertFalse(tasks[-1]["final_answer"])
+        self.assertEqual("", tasks[-1]["finished_at"])
+
     def test_non_failed_terminal_activity_is_not_error_red(self) -> None:
         canceled_items = _task_activity_items(_activity_task(status="canceled", error="用户取消"))
         unknown_items = _task_activity_items(_activity_task(status="unknown_after_restart", error="重启中断"))

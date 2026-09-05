@@ -4550,6 +4550,13 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
     tasks: list[dict[str, object]] = []
     cwd = str(thread.get("cwd") or "").strip()
     thread_error = str(thread.get("error") or "").strip()
+    latest_turn_status = str(thread.get("latest_turn_status") or "").strip().lower()
+    thread_is_running = str(thread.get("status") or "").strip().lower() in {"active", "running"} or latest_turn_status in {
+        "inprogress",
+        "in_progress",
+        "running",
+        "active",
+    }
     for turn_id in selected_turns:
         display_turns = display_turns_by_turn[turn_id]
         if not display_turns:
@@ -4640,6 +4647,7 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
             if not summary and output_image_previews:
                 summary = str(output_image_previews[-1].get("label") or "image")
             message_id = str(parts["message_id"] or display_index).strip() or str(display_index)
+            is_running = thread_is_running and turn_id == selected_turns[-1] and not final_answer_at
             tasks.append(
                 {
                     "id": f"codex-{thread_id}-{turn_id}-{message_id}",
@@ -4652,7 +4660,7 @@ def _codex_thread_task_payloads(thread: dict[str, object], *, limit: int | None 
                     "session_name": session_name,
                     "workdir": cwd,
                     "model": "",
-                    "status": "succeeded",
+                    "status": "running" if is_running else "succeeded",
                     "final_answer": bool(final_answer_at),
                     "final_answer_at": final_answer_at,
                     "stream_order": turn_order_lookup.get(turn_id, 0) * 1000 + display_index,
