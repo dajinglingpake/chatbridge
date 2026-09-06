@@ -1923,6 +1923,32 @@ class StreamComposerTests(unittest.TestCase):
         self.assertEqual([], runtime_turns)
         self.assertEqual(1, len(working_loaders))
 
+    def test_existing_codex_running_task_uses_thread_interrupt_target(self) -> None:
+        session_name = "codex:thread-live"
+        context = _prepare_stream_render_context(
+            {
+                "tasks": [
+                    {
+                        "id": "hub-task-id",
+                        "session_name": session_name,
+                        "status": "running",
+                        "created_at": "2026-07-19T10:20:00Z",
+                    }
+                ],
+                "selected_codex_thread": {
+                    "id": "thread-live",
+                    "runtime_status": "running",
+                    "runtime_started_at": "2026-07-19T10:20:00Z",
+                },
+            },
+            session_name,
+        )
+
+        self.assertTrue(context["codex_runtime_running"])
+        self.assertEqual("hub-task-id", context["latest_cancelable_task_id"])
+        self.assertEqual("codex_thread", context["latest_cancel_target_kind"])
+        self.assertEqual("thread-live", context["latest_cancel_target_id"])
+
     def test_external_codex_runtime_shows_the_latest_reasoning_instead_of_generic_working_text(self) -> None:
         ui = FakeUI()
         mobile_state = {
@@ -3929,6 +3955,23 @@ class StreamComposerTests(unittest.TestCase):
             self.assertEqual("idle", threads[0]["runtime_status"])
             self.assertEqual("", threads[0]["runtime_started_at"])
             self.assertEqual({}, threads[0]["runtime_activity"])
+
+    def test_app_server_active_status_is_authoritative_without_rollout_probe(self) -> None:
+        thread = {
+            "id": "thread-app-server-active",
+            "status": "active",
+            "source": "codex-app-server",
+            "latest_turn_status": "inProgress",
+            "latest_turn_started_at": "2026-09-06T06:50:10Z",
+            "path": "C:/missing/latest-rollout.jsonl",
+        }
+
+        changed = _update_codex_thread_runtime_statuses([thread], {}, now=0)
+
+        self.assertTrue(changed)
+        self.assertEqual("running", thread["runtime_status"])
+        self.assertEqual("2026-09-06T06:50:10Z", thread["runtime_started_at"])
+        self.assertEqual({}, thread.get("runtime_activity", {}))
 
     def test_codex_terminal_rollout_overrides_stale_running_thread_status(self) -> None:
         with TemporaryDirectory() as temp_dir:

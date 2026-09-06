@@ -1161,6 +1161,14 @@ class MultiCodexHub:
                     timeout_seconds=float(payload.get("timeout_seconds") or 15.0),
                 ),
             )
+        if action == "codex_thread_interrupt":
+            return IpcResponseEnvelope(
+                ok=True,
+                payload=self.interrupt_codex_thread(
+                    str(payload.get("thread_id") or ""),
+                    timeout_seconds=float(payload.get("timeout_seconds") or 15.0),
+                ),
+            )
         if action == "task_context_left":
             return IpcResponseEnvelope(
                 ok=True,
@@ -1258,6 +1266,15 @@ class MultiCodexHub:
             model=model,
             reasoning_effort=reasoning_effort,
             timeout_seconds=timeout_seconds,
+        )
+
+    def interrupt_codex_thread(self, thread_id: str, *, timeout_seconds: float = 15.0) -> dict[str, object]:
+        backend = self.backend_registry.get("codex")
+        if backend is None or not hasattr(backend, "interrupt_app_server_thread"):
+            raise RuntimeError("codex app-server backend is not available")
+        return backend.interrupt_app_server_thread(
+            self._codex_backend_context(),
+            thread_id,
         )
 
     def render_codex_status(self, agent_id: str, session_name: str, workdir: str = "") -> str:

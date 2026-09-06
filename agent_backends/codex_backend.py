@@ -1057,6 +1057,42 @@ class CodexBackend(AgentBackend):
         normalized["messages"] = self._normalize_app_server_thread_messages(thread)
         return normalized
 
+    def interrupt_app_server_thread(self, context: BackendContext, thread_id: str) -> dict[str, object]:
+        cleaned_thread_id = str(thread_id or "").strip()
+        if not cleaned_thread_id:
+            raise ValueError("thread_id is required")
+        with self._app_server_lock:
+            client = self._get_app_server(context)
+            turns_payload = client.request(
+                "thread/turns/list",
+                {
+                    "threadId": cleaned_thread_id,
+                    "limit": 20,
+                    "sortDirection": "desc",
+                    "itemsView": "notLoaded",
+                },
+                timeout=15,
+            )
+            turns = turns_payload.get("data") if isinstance(turns_payload.get("data"), list) else []
+            active_turn = next(
+                (
+                    turn
+                    for turn in turns
+                    if isinstance(turn, dict)
+                    and str(turn.get("status") or "").replace("_", "").lower() in {"inprogress", "running", "active"}
+                ),
+                None,
+            )
+            active_turn_id = str(active_turn.get("id") or "").strip() if isinstance(active_turn, dict) else ""
+            if not active_turn_id:
+                raise RuntimeError("Codex app-server thread has no active turn")
+            client.request(
+                "turn/interrupt",
+                {"threadId": cleaned_thread_id, "turnId": active_turn_id},
+                timeout=15,
+            )
+        return {"thread_id": cleaned_thread_id, "turn_id": active_turn_id}
+
     def send_app_server_thread_message(
         self,
         context: BackendContext,
@@ -1094,14 +1130,9 @@ class CodexBackend(AgentBackend):
             {"threadId": cleaned_thread_id, "includeTurns": False},
         )
         thread = thread_payload.get("thread") if isinstance(thread_payload.get("thread"), dict) else {}
-        resume_params: dict[str, object] = {
-            "threadId": cleaned_thread_id,
-            "excludeTurns": True,
-        }
-        rollout_path = str(thread.get("path") or "").strip()
-        if rollout_path:
-            resume_params["path"] = rollout_path
-        request("thread/resume", resume_params)
+        # The current app-server resume contract accepts the persisted thread id;
+        # rollout paths and legacy excludeTurns fields are not part of this call.
+        request("thread/resume", {"threadId": cleaned_thread_id})
         turns_payload = request(
             "thread/turns/list",
             {

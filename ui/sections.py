@@ -2027,6 +2027,17 @@ def _prepare_stream_render_context(mobile_state: dict[str, object], selected_ses
         and str(selected_codex_thread.get("runtime_status") or "").strip() == "running"
         and not runtime_covered_by_terminal_task
     )
+    codex_runtime_thread_id = str(
+        selected_codex_thread.get("id") or active_session[6:]
+    ).strip()
+    if codex_runtime_running and codex_runtime_thread_id:
+        # A local timeline task can represent the active Codex turn; its stop
+        # target must still be the app-server thread, never a Hub task id.
+        for task in render_session_tasks:
+            if str(task.get("status") or "").strip() == "running":
+                task["cancelable"] = True
+                task["cancel_target_kind"] = "codex_thread"
+                task["cancel_target_id"] = codex_runtime_thread_id
     selected_runtime_activity = (
         dict(selected_codex_thread.get("runtime_activity"))
         if isinstance(selected_codex_thread.get("runtime_activity"), dict)
@@ -2076,7 +2087,7 @@ def _prepare_stream_render_context(mobile_state: dict[str, object], selected_ses
                 "runtime_key": runtime_key,
                 "cancelable": True,
                 "cancel_target_kind": "codex_thread",
-                "cancel_target_id": str(selected_codex_thread.get("id") or active_session[6:]).strip(),
+                "cancel_target_id": codex_runtime_thread_id,
                 "runtime_activity": selected_runtime_activity,
             }
         )

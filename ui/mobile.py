@@ -3911,8 +3911,10 @@ def _load_codex_thread_cached(thread_id: str, *, blocking: bool = False) -> dict
             stale_thread = dict(thread) if isinstance(thread, dict) else {}
             retry_failed_detail = bool(stale_thread.get("error"))
     if stale_thread and not retry_failed_detail:
-        if _codex_rollout_refresh_needed(cleaned_thread_id):
-            _start_codex_rollout_refresh(cleaned_thread_id)
+        # App-server is the authoritative source for Codex thread state.
+        # Refresh its runtime snapshot directly once the short cache expires.
+        if bool(stale_thread.get("_app_server_authoritative")) or str(stale_thread.get("source") or "").strip().lower() == "codex-app-server":
+            _start_codex_thread_detail_load(cleaned_thread_id)
         return stale_thread
     if blocking:
         return _load_codex_thread_now(cleaned_thread_id)
@@ -3924,6 +3926,7 @@ def _load_codex_thread_now(cleaned_thread_id: str) -> dict[str, object]:
     try:
         app_server_thread = read_codex_thread(cleaned_thread_id, timeout_seconds=8)
         if isinstance(app_server_thread, dict) and app_server_thread.get("id"):
+            app_server_thread["_app_server_authoritative"] = True
             app_server_thread.setdefault("source", "codex-app-server")
             return _cache_codex_thread_detail(cleaned_thread_id, app_server_thread)
         return _cache_codex_thread_detail(

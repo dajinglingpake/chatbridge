@@ -45,11 +45,8 @@ from core.bridge_notifier import broadcast_bridge_notice_by_kind
 from core.codex_desktop_control import (
     CodexDesktopControlError,
     CodexDesktopMessageResult,
-    CodexDesktopUnavailableError,
     control_codex_desktop_thread_goal,
     get_codex_desktop_thread_goal,
-    interrupt_codex_desktop_thread,
-    send_codex_desktop_thread_message,
 )
 
 
@@ -398,11 +395,18 @@ def interrupt_codex_thread(thread_id: str, *, timeout_seconds: float = 15.0) -> 
     cleaned_thread_id = str(thread_id or "").strip()
     if not cleaned_thread_id:
         return ServiceResult(ok=False, message="停止失败：thread_id 不能为空")
+    request_id = create_request(
+        "codex_thread_interrupt",
+        {"thread_id": cleaned_thread_id, "timeout_seconds": timeout_seconds},
+    )
     try:
-        turn_id = interrupt_codex_desktop_thread(cleaned_thread_id, timeout_seconds=timeout_seconds)
-    except CodexDesktopControlError as exc:
-        return ServiceResult(ok=False, message=f"停止失败：{exc}")
-    return ServiceResult(ok=True, message=f"已停止 Codex 历史会话：{cleaned_thread_id} | 轮次：{turn_id}")
+        response = wait_for_response(request_id, timeout_seconds=max(5.0, timeout_seconds + 2.0))
+    except TimeoutError as exc:
+        return ServiceResult(ok=False, message=f"停止失败：Codex app-server 响应超时", payload={"error": str(exc)})
+    if not response.ok:
+        return ServiceResult(ok=False, message=f"停止失败：{response.error or 'Codex app-server 停止失败'}", payload={"error": response.error or ""})
+    turn_id = str(response.payload.get("turn_id") or "").strip()
+    return ServiceResult(ok=True, message=f"已停止 Codex 历史会话：{cleaned_thread_id} | 轮次：{turn_id}", payload={"turn_id": turn_id})
 
 
 def _send_codex_thread_message_via_app_server(
@@ -466,24 +470,14 @@ def send_codex_thread_message(
     cleaned_model = str(model or "").strip()
     cleaned_reasoning_effort = str(reasoning_effort or "").strip()
     try:
-        try:
-            result = send_codex_desktop_thread_message(
-                cleaned_thread_id,
-                cleaned_prompt,
-                images=images,
-                model=cleaned_model,
-                reasoning_effort=cleaned_reasoning_effort,
-                timeout_seconds=timeout_seconds,
-            )
-        except CodexDesktopUnavailableError:
-            result = _send_codex_thread_message_via_app_server(
-                cleaned_thread_id,
-                cleaned_prompt,
-                images=images,
-                model=cleaned_model,
-                reasoning_effort=cleaned_reasoning_effort,
-                timeout_seconds=timeout_seconds,
-            )
+        result = _send_codex_thread_message_via_app_server(
+            cleaned_thread_id,
+            cleaned_prompt,
+            images=images,
+            model=cleaned_model,
+            reasoning_effort=cleaned_reasoning_effort,
+            timeout_seconds=timeout_seconds,
+        )
     except CodexDesktopControlError as exc:
         error = str(exc)
         _append_codex_message_audit(

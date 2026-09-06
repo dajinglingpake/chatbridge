@@ -170,16 +170,21 @@ class AppServiceConversationTests(unittest.TestCase):
         self.assertIn("task-001", result.message)
         self.assertIn("focus", result.message)
 
-    def test_interrupt_codex_thread_uses_desktop_bridge(self) -> None:
-        with patch.object(app_service, "interrupt_codex_desktop_thread", return_value="turn-001") as interrupt:
+    def test_interrupt_codex_thread_uses_app_server(self) -> None:
+        response = SimpleNamespace(ok=True, error="", payload={"turn_id": "turn-001"})
+        with (
+            patch.object(app_service, "create_request", return_value="request-codex-interrupt") as create,
+            patch.object(app_service, "wait_for_response", return_value=response) as wait_for_response,
+        ):
             result = app_service.interrupt_codex_thread(" thread-001 ", timeout_seconds=9)
 
         self.assertTrue(result.ok)
         self.assertIn("thread-001", result.message)
         self.assertIn("turn-001", result.message)
-        interrupt.assert_called_once_with("thread-001", timeout_seconds=9)
+        create.assert_called_once_with("codex_thread_interrupt", {"thread_id": "thread-001", "timeout_seconds": 9})
+        wait_for_response.assert_called_once_with("request-codex-interrupt", timeout_seconds=11.0)
 
-    def test_send_codex_thread_message_uses_desktop_bridge(self) -> None:
+    def test_send_codex_thread_message_uses_app_server(self) -> None:
         bridge_result = SimpleNamespace(
             mode="steer",
             turn_id="turn-002",
@@ -187,7 +192,7 @@ class AppServiceConversationTests(unittest.TestCase):
             reconciled=True,
         )
         with (
-            patch.object(app_service, "send_codex_desktop_thread_message", return_value=bridge_result) as send,
+            patch.object(app_service, "_send_codex_thread_message_via_app_server", return_value=bridge_result) as send,
             patch.object(app_service, "_append_action_log") as append_log,
         ):
             result = app_service.send_codex_thread_message(
@@ -220,7 +225,7 @@ class AppServiceConversationTests(unittest.TestCase):
         self.assertEqual("gpt-5.6-sol", append_log.call_args.kwargs["model"])
         self.assertEqual("ultra", append_log.call_args.kwargs["reasoning_effort"])
 
-    def test_send_codex_thread_message_falls_back_to_app_server_when_desktop_is_not_discoverable(self) -> None:
+    def test_send_codex_thread_message_forwards_to_app_server(self) -> None:
         requests: list[tuple[str, dict[str, object]]] = []
 
         def create_request(action: str, payload: dict[str, object]) -> str:
@@ -239,11 +244,6 @@ class AppServiceConversationTests(unittest.TestCase):
             },
         )
         with (
-            patch.object(
-                app_service,
-                "send_codex_desktop_thread_message",
-                side_effect=app_service.CodexDesktopUnavailableError("未发现可安全控制的 Codex 桌面窗口"),
-            ),
             patch.object(app_service, "create_request", side_effect=create_request),
             patch.object(app_service, "wait_for_response", return_value=response) as wait_for_response,
             patch.object(app_service, "_append_action_log"),
@@ -267,22 +267,18 @@ class AppServiceConversationTests(unittest.TestCase):
         self.assertEqual("ultra", requests[0][1]["reasoning_effort"])
         wait_for_response.assert_called_once_with("request-codex-message", timeout_seconds=11.0)
 
-    def test_send_codex_thread_message_reports_desktop_bridge_failure(self) -> None:
+    def test_send_codex_thread_message_reports_app_server_failure(self) -> None:
         with (
-            patch.object(
-                app_service,
-                "send_codex_desktop_thread_message",
-                side_effect=app_service.CodexDesktopControlError("desktop unavailable"),
-            ),
+            patch.object(app_service, "_send_codex_thread_message_via_app_server", side_effect=app_service.CodexDesktopControlError("app-server unavailable")),
             patch.object(app_service, "_append_action_log") as append_log,
         ):
             result = app_service.send_codex_thread_message("thread-001", "continue")
 
         self.assertFalse(result.ok)
-        self.assertIn("desktop unavailable", result.message)
-        self.assertEqual("desktop unavailable", result.payload["error"])
+        self.assertIn("app-server unavailable", result.message)
+        self.assertEqual("app-server unavailable", result.payload["error"])
         self.assertEqual("failed", append_log.call_args.kwargs["status"])
-        self.assertEqual("desktop unavailable", append_log.call_args.kwargs["error"])
+        self.assertEqual("app-server unavailable", append_log.call_args.kwargs["error"])
 
     def test_control_codex_thread_goal_uses_desktop_bridge(self) -> None:
         bridge_result = SimpleNamespace(

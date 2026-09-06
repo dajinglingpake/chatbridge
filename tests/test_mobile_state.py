@@ -2690,6 +2690,58 @@ class MobileStateTests(unittest.TestCase):
         start_load.assert_not_called()
         self.assertEqual(["old prompt"], [task["prompt"] for task in state["tasks"]])
 
+    def test_stale_app_server_thread_schedules_app_server_refresh(self) -> None:
+        mobile._CODEX_THREAD_DETAIL_CACHE.clear()
+        mobile._CODEX_THREAD_DETAIL_INFLIGHT.clear()
+        thread_id = "thread-stale-app-server"
+        thread = {
+            "id": thread_id,
+            "source": "codex-app-server",
+            "status": "active",
+            "latest_turn_status": "inProgress",
+            "messages": [],
+        }
+        try:
+            mobile._CODEX_THREAD_DETAIL_CACHE[thread_id] = {
+                "loaded_at": mobile.time.monotonic() - mobile.CODEX_THREAD_CACHE_SECONDS - 1,
+                "thread": thread,
+                "signature_parts_by_limit": {},
+            }
+            with patch("ui.mobile._start_codex_thread_detail_load") as start_load:
+                loaded = mobile._load_codex_thread_cached(thread_id)
+        finally:
+            mobile._CODEX_THREAD_DETAIL_CACHE.clear()
+            mobile._CODEX_THREAD_DETAIL_INFLIGHT.clear()
+
+        start_load.assert_called_once_with(thread_id)
+        self.assertEqual("inProgress", loaded["latest_turn_status"])
+
+    def test_stale_app_server_thread_keeps_original_codex_source(self) -> None:
+        mobile._CODEX_THREAD_DETAIL_CACHE.clear()
+        mobile._CODEX_THREAD_DETAIL_INFLIGHT.clear()
+        thread_id = "thread-stale-vscode-source"
+        try:
+            mobile._CODEX_THREAD_DETAIL_CACHE[thread_id] = {
+                "loaded_at": mobile.time.monotonic() - mobile.CODEX_THREAD_CACHE_SECONDS - 1,
+                "thread": {
+                    "id": thread_id,
+                    "source": "vscode",
+                    "_app_server_authoritative": True,
+                    "status": "idle",
+                    "latest_turn_status": "completed",
+                    "messages": [],
+                },
+                "signature_parts_by_limit": {},
+            }
+            with patch("ui.mobile._start_codex_thread_detail_load") as start_load:
+                loaded = mobile._load_codex_thread_cached(thread_id)
+        finally:
+            mobile._CODEX_THREAD_DETAIL_CACHE.clear()
+            mobile._CODEX_THREAD_DETAIL_INFLIGHT.clear()
+
+        start_load.assert_called_once_with(thread_id)
+        self.assertEqual("vscode", loaded["source"])
+
     def test_codex_thread_detail_refresh_keeps_previous_messages_when_rollout_is_missing(self) -> None:
         mobile._CODEX_THREAD_DETAIL_CACHE.clear()
         mobile._CODEX_THREAD_DETAIL_INFLIGHT.clear()

@@ -165,11 +165,7 @@ class McpServerInjectionTests(unittest.TestCase):
         self.assertEqual("gpt-5.6-sol", turn_start["model"])
         self.assertEqual("ultra", turn_start["effort"])
         self.assertEqual(
-            {
-                "threadId": "thread-1",
-                "path": "C:/tmp/rollout-thread-1.jsonl",
-                "excludeTurns": True,
-            },
+            {"threadId": "thread-1"},
             next(params for method, params, _ in requests if method == "thread/resume"),
         )
         methods = [method for method, _, _ in requests]

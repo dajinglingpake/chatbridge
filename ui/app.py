@@ -566,9 +566,18 @@ def _update_codex_thread_runtime_statuses(
         active_thread_ids.add(thread_id)
         raw_status = str(thread.get("status") or "").strip().lower()
         latest_turn_status = str(thread.get("latest_turn_status") or "").strip().lower().replace("-", "_")
+        app_server_authoritative = (
+            bool(thread.get("_app_server_authoritative"))
+            or str(thread.get("source") or "").strip().lower() == "codex-app-server"
+            or raw_status == "active"
+        )
         runtime_status = "running" if raw_status in known_running_statuses else "idle"
+        if latest_turn_status in known_running_statuses:
+            runtime_status = "running"
+        elif latest_turn_status in definitive_terminal_turn_statuses or latest_turn_status in ambiguous_terminal_turn_statuses:
+            runtime_status = "idle"
         runtime_activity: dict[str, object] = {}
-        if not bool(thread.get("archived")) and checked < CODEX_THREAD_RUNTIME_STATUS_LIMIT:
+        if not app_server_authoritative and not bool(thread.get("archived")) and checked < CODEX_THREAD_RUNTIME_STATUS_LIMIT:
             checked += 1
             path_text = str(thread.get("path") or "").strip()
             try:
@@ -646,6 +655,11 @@ def _update_codex_thread_runtime_statuses(
                 if str(thread.get("runtime_started_at") or "") != thread_runtime_started_at:
                     thread["runtime_started_at"] = thread_runtime_started_at
                     changed = True
+        app_server_started_at = str(thread.get("latest_turn_started_at") or "").strip()
+        if runtime_status == "running" and app_server_authoritative and app_server_started_at:
+            if str(thread.get("runtime_started_at") or "") != app_server_started_at:
+                thread["runtime_started_at"] = app_server_started_at
+                changed = True
         if runtime_status != "running" and str(thread.get("runtime_started_at") or ""):
             thread["runtime_started_at"] = ""
             changed = True
@@ -3909,6 +3923,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             "path": path_text,
             "status": raw_status,
             "archived": archived,
+            "_app_server_authoritative": bool(selected_payload.get("_app_server_authoritative")),
             "latest_turn_status": latest_turn_status,
             "latest_turn_started_at": latest_turn_started_at,
             "latest_turn_completed_at": latest_turn_completed_at,
