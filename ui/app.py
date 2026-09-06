@@ -3600,6 +3600,8 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         "stream_switch_refresh_pending": False,
         "stream_switch_sequence": 0,
         "stream_sidebar_task_limit": STREAM_SIDEBAR_PAGE_SIZE,
+        "stream_sidebar_hub_state_file_signature": None,
+        "stream_sidebar_session_signature": None,
         "stream_sidebar_codex_loaded": False,
         "stream_sidebar_codex_threads": [],
         "stream_sidebar_codex_cursor": "",
@@ -4933,6 +4935,29 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         except (TypeError, ValueError):
             return STREAM_SIDEBAR_PAGE_SIZE
 
+    def _stream_sidebar_session_signature(mobile_state: dict[str, object]) -> tuple[tuple[str, str, str, str, str], ...]:
+        tasks = mobile_state.get("tasks") if isinstance(mobile_state.get("tasks"), list) else []
+        session_counts = mobile_state.get("session_task_counts") if isinstance(mobile_state.get("session_task_counts"), dict) else {}
+        sessions: dict[str, list[dict[str, object]]] = {}
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            session_name = str(task.get("session_name") or "default")
+            sessions.setdefault(session_name, []).append(task)
+        signature: list[tuple[str, str, str, str, str]] = []
+        for session_name in sorted(sessions):
+            latest = max(sessions[session_name], key=_stream_task_order_key)
+            signature.append(
+                (
+                    session_name,
+                    str(session_counts.get(session_name, len(sessions[session_name]))),
+                    str(latest.get("id") or ""),
+                    str(latest.get("status") or "idle"),
+                    str(latest.get("agent_id") or latest.get("agent_name") or ""),
+                )
+            )
+        return tuple(signature)
+
     def _load_more_sidebar_sessions() -> None:
         state["stream_sidebar_task_limit"] = _stream_sidebar_task_limit() + STREAM_SIDEBAR_PAGE_SIZE
         sidebar_sessions_view.refresh()
@@ -5090,10 +5115,13 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
 
     @ui.refreshable
     def sidebar_sessions_view() -> None:
+        sidebar_hub_file_signature = stream_hub_state_file_signature()
         mobile_state = build_stream_sidebar_state_snapshot(
             task_limit=_stream_sidebar_task_limit(),
             include_codex_threads=False,
         )
+        state["stream_sidebar_hub_state_file_signature"] = sidebar_hub_file_signature
+        state["stream_sidebar_session_signature"] = _stream_sidebar_session_signature(mobile_state)
         tasks = mobile_state.get("tasks") if isinstance(mobile_state.get("tasks"), list) else []
         visible_tasks = [task for task in tasks if isinstance(task, dict)]
         session_counts = mobile_state.get("session_task_counts") if isinstance(mobile_state.get("session_task_counts"), dict) else {}
@@ -6825,10 +6853,23 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     if state.get("stream_switch_refresh_pending"):
                         return
                     selected_stream_session = str(state["selected_session_name"] or "").strip()
+                    next_sidebar_hub_file_signature = stream_hub_state_file_signature()
                     if not codex_thread_id_from_session_name(selected_stream_session):
-                        next_hub_file_signature = stream_hub_state_file_signature()
+                        next_hub_file_signature = next_sidebar_hub_file_signature
                     else:
                         next_hub_file_signature = None
+                    sidebar_session_signature_changed = False
+                    if next_sidebar_hub_file_signature != state.get("stream_sidebar_hub_state_file_signature"):
+                        sidebar_state = build_stream_sidebar_state_snapshot(
+                            task_limit=_stream_sidebar_task_limit(),
+                            include_codex_threads=False,
+                        )
+                        next_sidebar_session_signature = _stream_sidebar_session_signature(sidebar_state)
+                        state["stream_sidebar_hub_state_file_signature"] = next_sidebar_hub_file_signature
+                        sidebar_session_signature_changed = next_sidebar_session_signature != state.get("stream_sidebar_session_signature")
+                        if sidebar_session_signature_changed:
+                            state["stream_sidebar_session_signature"] = next_sidebar_session_signature
+                            sidebar_sessions_view.refresh()
                     next_signature = _stream_signature_snapshot()
                     sidebar_runtime_changed, selected_runtime_status_changed, selected_runtime_activity_changed = _refresh_codex_runtime_statuses()
                     if state.get("stream_sidebar_codex_loaded") and sidebar_runtime_changed:

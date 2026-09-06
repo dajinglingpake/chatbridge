@@ -618,7 +618,7 @@ class CodexBackend(AgentBackend):
         if existing_session:
             thread_payload = client.request(
                 "thread/resume",
-                {**thread_params, "threadId": existing_session, "excludeTurns": True},
+                {**thread_params, "threadId": existing_session},
                 timeout=90,
             )
         else:
@@ -1150,8 +1150,7 @@ class CodexBackend(AgentBackend):
             {"threadId": cleaned_thread_id, "includeTurns": False},
         )
         thread = thread_payload.get("thread") if isinstance(thread_payload.get("thread"), dict) else {}
-        # The current app-server resume contract accepts the persisted thread id;
-        # rollout paths and legacy excludeTurns fields are not part of this call.
+        # Resume the persisted thread before inspecting its current turn state.
         request("thread/resume", {"threadId": cleaned_thread_id})
         turns_payload = request(
             "thread/turns/list",

@@ -173,12 +173,6 @@ def query_codex_status_panel(codex_command: str, session_file: Path, workdir: Pa
             "thread/read",
             {"threadId": session_id, "includeTurns": False},
         )
-        if not isinstance(thread_payload.get("thread"), dict):
-            thread_payload = _request_optional(
-                client,
-                "thread/resume",
-                {"threadId": session_id, "excludeTurns": True},
-            )
     finally:
         client.close()
     if not isinstance(thread_payload.get("thread"), dict):

@@ -4426,7 +4426,7 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("document.querySelector('.cb-stream-current-activity')", patch_body)
         self.assertNotIn("stream_messages_view.refresh()", patch_body)
 
-    def test_codex_sidebar_runtime_updates_do_not_rebuild_workspace_disclosures(self) -> None:
+    def test_sidebar_session_status_refreshes_when_hub_task_summary_changes(self) -> None:
         source = Path("ui/app.py").read_text(encoding="utf-8")
         refresh_start = source.index("def refresh_stream() -> None:")
         refresh_end = source.index("client.on_connect", refresh_start)
@@ -4439,7 +4439,16 @@ class StreamComposerTests(unittest.TestCase):
         sidebar_body = source[sidebar_start:sidebar_end]
 
         self.assertIn("_patch_sidebar_codex_runtime_status()", refresh_body)
-        self.assertNotIn("sidebar_sessions_view.refresh()", refresh_body)
+        self.assertIn("_stream_sidebar_session_signature(sidebar_state)", refresh_body)
+        self.assertIn("sidebar_session_signature_changed", refresh_body)
+        self.assertIn("if sidebar_session_signature_changed:", refresh_body)
+        self.assertIn("sidebar_sessions_view.refresh()", refresh_body)
+        self.assertIn('next_sidebar_hub_file_signature != state.get("stream_sidebar_hub_state_file_signature")', refresh_body)
+        self.assertIn('state["stream_sidebar_hub_state_file_signature"] = sidebar_hub_file_signature', sidebar_body)
+        self.assertLess(
+            refresh_body.index("sidebar_sessions_view.refresh()"),
+            refresh_body.index('and next_hub_file_signature == state.get("stream_hub_state_file_signature")'),
+        )
         self.assertIn("document.querySelectorAll('[data-codex-workspace-running]')", patch_body)
         self.assertIn("document.querySelectorAll('[data-codex-thread-running]')", patch_body)
         self.assertIn("data-codex-workspace-running", sidebar_body)

@@ -91,7 +91,7 @@ class CodexDesktopControlTests(unittest.TestCase):
         )
 
         self.assertIn("thread/resume", expression)
-        self.assertIn("excludeTurns: true", expression)
+        self.assertNotIn("excludeTurns", expression)
         self.assertIn("thread/turns/list", expression)
         self.assertIn("turn/steer", expression)
         self.assertIn("expectedTurnId: activeTurnId", expression)
@@ -119,7 +119,7 @@ class CodexDesktopControlTests(unittest.TestCase):
         )
 
         self.assertIn("thread/resume", expression)
-        self.assertIn("excludeTurns: true", expression)
+        self.assertNotIn("excludeTurns", expression)
         self.assertIn("thread/goal/get", expression)
         self.assertIn("thread/goal/set", expression)
         self.assertIn("status = action === 'pause' ? 'paused' : 'active'", expression)

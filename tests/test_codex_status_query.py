@@ -67,10 +67,11 @@ class CodexStatusQueryTests(unittest.TestCase):
         self.assertIn("Model: gpt-5.5", panel)
         self.assertIn("Directory: C:/work", panel)
 
-    def test_query_status_falls_back_to_resume_with_excluded_turns(self) -> None:
+    def test_query_status_uses_thread_read_without_resume_fallback(self) -> None:
         class FakeClient:
             def __init__(self, command: str) -> None:
                 self.calls: list[tuple[str, object]] = []
+                self.resume_called = False
 
             def initialize(self) -> None:
                 pass
@@ -80,10 +81,10 @@ class CodexStatusQueryTests(unittest.TestCase):
                 if method in {"account/read", "account/rateLimits/read"}:
                     return {}
                 if method == "thread/read":
-                    return {}
-                if method == "thread/resume":
-                    self.resume_params = params
                     return {"thread": {"id": "thread-1", "model": "gpt-5.5", "path": "C:/missing.jsonl"}}
+                if method == "thread/resume":
+                    self.resume_called = True
+                    raise AssertionError("status query must not resume a thread")
                 raise AssertionError(f"unexpected request: {method}")
 
             def close(self) -> None:
@@ -100,10 +101,7 @@ class CodexStatusQueryTests(unittest.TestCase):
                 panel = query_codex_status_panel("codex", session_file, Path(tempdir))
 
         self.assertIsNotNone(panel)
-        self.assertEqual(
-            {"threadId": "thread-1", "excludeTurns": True},
-            fake_client.resume_params,
-        )
+        self.assertFalse(fake_client.resume_called)
 
     def test_load_latest_token_usage_reads_last_token_count_event(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
