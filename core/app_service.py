@@ -610,6 +610,15 @@ def read_codex_thread(thread_id: str, *, timeout_seconds: float = 8) -> dict[str
     thread = response.payload.get("thread")
     return thread if isinstance(thread, dict) else {}
 
+
+def list_codex_thread_statuses(*, timeout_seconds: float = 3) -> dict[str, dict[str, object]]:
+    request_id = create_request("codex_thread_statuses", {})
+    response = wait_for_response(request_id, timeout_seconds=timeout_seconds)
+    if not response.ok:
+        raise RuntimeError(response.error or "codex_thread_statuses failed")
+    statuses = response.payload.get("statuses")
+    return statuses if isinstance(statuses, dict) else {}
+
 def switch_active_account(account_id: str, restart_if_running: bool = True) -> ServiceResult:
     cleaned_account_id = account_id.strip()
     if not cleaned_account_id:

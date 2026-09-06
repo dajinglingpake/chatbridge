@@ -30,6 +30,7 @@ from bridge_config import APP_DIR
 from agent_hub import HubConfig
 from core.app_service import (
     list_codex_threads,
+    list_codex_thread_statuses,
     read_codex_thread,
     read_codex_thread_goal,
     run_named_action,
@@ -70,6 +71,7 @@ _CODEX_THREADS_CACHE: dict[str, object] = {"loaded_at": 0.0, "payload": {"thread
 _CODEX_THREAD_DETAIL_CACHE: dict[str, dict[str, object]] = {}
 _CODEX_THREAD_DETAIL_INFLIGHT: set[str] = set()
 _CODEX_THREAD_DETAIL_LOCK = threading.Lock()
+_CODEX_THREAD_STATUS_CACHE: dict[str, object] = {"loaded_at": 0.0, "statuses": {}}
 _MOBILE_RUNTIME_CACHE: dict[str, object] = {"loaded_at": 0.0, "payload": {}}
 _RAW_HUB_STATE_CACHE: dict[str, object] = {"signature": None, "payload": {}}
 _RAW_STREAM_WINDOW_CACHE: dict[str, object] = {"key": None, "window": None}
@@ -320,6 +322,43 @@ def _mobile_runtime_snapshot() -> dict[str, object]:
     _MOBILE_RUNTIME_CACHE["loaded_at"] = now
     _MOBILE_RUNTIME_CACHE["payload"] = snapshot
     return dict(snapshot)
+
+
+def _live_codex_thread_statuses() -> dict[str, dict[str, object]]:
+    now = time.monotonic()
+    loaded_at = float(_CODEX_THREAD_STATUS_CACHE.get("loaded_at") or 0.0)
+    cached = _CODEX_THREAD_STATUS_CACHE.get("statuses")
+    if now - loaded_at <= 0.5 and isinstance(cached, dict):
+        return {str(thread_id): dict(status) for thread_id, status in cached.items() if isinstance(status, dict)}
+    try:
+        statuses = list_codex_thread_statuses(timeout_seconds=3)
+    except Exception:
+        statuses = {}
+    normalized = {
+        str(thread_id).strip(): {
+            "type": str(status.get("type") or "").strip(),
+            "active_flags": [
+                str(flag).strip()
+                for flag in (status.get("active_flags") if isinstance(status.get("active_flags"), list) else [])
+                if str(flag).strip()
+            ],
+        }
+        for thread_id, status in statuses.items()
+        if str(thread_id).strip() and isinstance(status, dict) and str(status.get("type") or "").strip()
+    }
+    _CODEX_THREAD_STATUS_CACHE["loaded_at"] = now
+    _CODEX_THREAD_STATUS_CACHE["statuses"] = normalized
+    return {thread_id: dict(status) for thread_id, status in normalized.items()}
+
+
+def _apply_live_codex_thread_status(thread: dict[str, object]) -> None:
+    thread_id = str(thread.get("id") or thread.get("session_id") or "").strip()
+    status = _live_codex_thread_statuses().get(thread_id)
+    if not isinstance(status, dict):
+        return
+    thread["status"] = str(status.get("type") or "").strip()
+    thread["active_flags"] = list(status.get("active_flags") or [])
+    thread["_app_server_authoritative"] = True
 
 
 def build_mobile_state_snapshot(
@@ -3579,6 +3618,7 @@ def _build_mobile_state(
         selected_codex_thread: dict[str, object] = {}
         if selected_codex_thread_id:
             selected_codex_thread = _load_codex_thread_cached(selected_codex_thread_id)
+            _apply_live_codex_thread_status(selected_codex_thread)
             _apply_codex_rollout_state(selected_codex_thread_id, selected_codex_thread)
             selected_limit = _safe_limit(session_task_limit, MOBILE_SESSION_TASK_LIMIT)
             codex_thread_tasks = _codex_thread_task_payloads_cached(selected_codex_thread_id, selected_codex_thread, limit=selected_limit)
@@ -3643,6 +3683,7 @@ def _build_mobile_state(
     selected_codex_thread: dict[str, object] = {}
     if selected_codex_thread_id:
         selected_codex_thread = _load_codex_thread_cached(selected_codex_thread_id)
+        _apply_live_codex_thread_status(selected_codex_thread)
         _apply_codex_rollout_state(selected_codex_thread_id, selected_codex_thread)
         selected_limit = _safe_limit(session_task_limit, MOBILE_SESSION_TASK_LIMIT)
         codex_thread_tasks = _codex_thread_task_payloads_cached(selected_codex_thread_id, selected_codex_thread, limit=selected_limit)
@@ -3761,6 +3802,7 @@ def _build_stream_state(
     selected_codex_thread: dict[str, object] = {}
     if selected_codex_thread_id:
         selected_codex_thread = _load_codex_thread_cached(selected_codex_thread_id)
+        _apply_live_codex_thread_status(selected_codex_thread)
         _apply_codex_rollout_state(selected_codex_thread_id, selected_codex_thread)
         selected_limit = _safe_limit(session_task_limit, MOBILE_SESSION_TASK_LIMIT)
         codex_thread_tasks = _codex_thread_task_payloads_cached(selected_codex_thread_id, selected_codex_thread, limit=selected_limit)
@@ -3831,6 +3873,7 @@ def load_codex_threads_page(
             if not isinstance(thread, dict):
                 continue
             thread = dict(thread)
+            _apply_live_codex_thread_status(thread)
             thread["archived"] = bool(thread.get("archived", archived))
             normalized_threads.append(_mobile_codex_thread_payload(thread))
         return {
@@ -3883,6 +3926,7 @@ def _load_codex_thread_pages(*, archived: bool) -> dict[str, object]:
             if not isinstance(thread, dict):
                 continue
             thread["archived"] = bool(thread.get("archived", archived))
+            _apply_live_codex_thread_status(thread)
             threads.append(thread)
         backwards_cursor = str(payload.get("backwards_cursor") or backwards_cursor).strip()
         next_cursor = str(payload.get("next_cursor") or "").strip()

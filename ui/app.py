@@ -15,7 +15,7 @@ import uuid
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from core.app_service import cancel_hub_task, control_codex_thread_goal, delete_agent, interrupt_codex_thread, reset_weixin_conversation, run_named_action, run_repair_command, save_agent, schedule_named_action, send_codex_thread_message, set_weixin_notice_enabled, submit_hub_task, switch_active_account, switch_bridge_agent, switch_weixin_session_backend, terminate_external_agent
+from core.app_service import cancel_hub_task, control_codex_thread_goal, delete_agent, interrupt_codex_thread, list_codex_thread_statuses, reset_weixin_conversation, run_named_action, run_repair_command, save_agent, schedule_named_action, send_codex_thread_message, set_weixin_notice_enabled, submit_hub_task, switch_active_account, switch_bridge_agent, switch_weixin_session_backend, terminate_external_agent
 from core.codex_model_catalog import load_codex_model_catalog_cached
 from core.navigation import PRIMARY_PAGES
 from core.shell_schema import APP_SHELL
@@ -3868,6 +3868,22 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             for thread in sidebar_threads
             if str(thread.get("id") or "").strip() != selected_id
         )
+        try:
+            live_statuses = list_codex_thread_statuses(timeout_seconds=3)
+        except Exception:
+            live_statuses = {}
+        for thread in probe_threads:
+            thread_id = str(thread.get("id") or "").strip()
+            status = live_statuses.get(thread_id) if isinstance(live_statuses, dict) else None
+            if not isinstance(status, dict):
+                continue
+            thread["status"] = str(status.get("type") or "").strip()
+            thread["active_flags"] = [
+                str(flag).strip()
+                for flag in (status.get("active_flags") if isinstance(status.get("active_flags"), list) else [])
+                if str(flag).strip()
+            ]
+            thread["_app_server_authoritative"] = True
         if probe_threads:
             _update_codex_thread_runtime_statuses(probe_threads, _stream_codex_runtime_probes())
 

@@ -1067,7 +1067,11 @@ class MultiCodexHub:
             else:
                 request_id = request.id or request_path.stem
             write_response(request_id, response)
-            mark_processed(request_path)
+            try:
+                mark_processed(request_path)
+            except FileNotFoundError:
+                # A duplicate hub poller may have moved the request after it was read.
+                pass
             elapsed_ms = int((time.perf_counter() - request_started) * 1000)
             if elapsed_ms >= int(PERF_LOG_MIN_SECONDS * 1000):
                 print(
@@ -1152,6 +1156,8 @@ class MultiCodexHub:
                 ok=True,
                 payload={"thread": self.read_codex_thread(str(payload.get("thread_id") or ""))},
             )
+        if action == "codex_thread_statuses":
+            return IpcResponseEnvelope(ok=True, payload={"statuses": self.list_codex_thread_statuses()})
         if action == "codex_thread_message":
             return IpcResponseEnvelope(
                 ok=True,
@@ -1249,6 +1255,12 @@ class MultiCodexHub:
         if backend is None or not hasattr(backend, "read_app_server_thread"):
             raise RuntimeError("codex app-server backend is not available")
         return backend.read_app_server_thread(self._codex_backend_context(), thread_id)
+
+    def list_codex_thread_statuses(self) -> dict[str, dict[str, object]]:
+        backend = self.backend_registry.get("codex")
+        if backend is None or not hasattr(backend, "cached_thread_statuses"):
+            return {}
+        return backend.cached_thread_statuses()
 
     def send_codex_thread_message(
         self,

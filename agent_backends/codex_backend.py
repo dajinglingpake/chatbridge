@@ -345,6 +345,33 @@ class _CodexAppServerClient:
             if str(flag).strip()
         ]
 
+    def cache_thread_status(self, thread_id: str, status_type: str, active_flags: list[object] | None = None) -> None:
+        cleaned_id = str(thread_id or "").strip()
+        cleaned_type = str(status_type or "").strip()
+        if not cleaned_id or not cleaned_type:
+            return
+        with self._dispatch_lock:
+            self._thread_statuses[cleaned_id] = {
+                "type": cleaned_type,
+                "active_flags": [str(flag).strip() for flag in (active_flags or []) if str(flag).strip()],
+            }
+
+    def cached_thread_statuses(self) -> dict[str, dict[str, object]]:
+        """Return the latest App Server status notifications without starting a new client."""
+        with self._dispatch_lock:
+            return {
+                thread_id: {
+                    "type": str(status.get("type") or "").strip(),
+                    "active_flags": [
+                        str(flag).strip()
+                        for flag in (status.get("active_flags") if isinstance(status.get("active_flags"), list) else [])
+                        if str(flag).strip()
+                    ],
+                }
+                for thread_id, status in self._thread_statuses.items()
+                if isinstance(status, dict) and str(status.get("type") or "").strip()
+            }
+
     def read_thread(self, thread_id: str, *, include_turns: bool = True) -> dict[str, Any]:
         return self.request(
             "thread/read",
@@ -425,10 +452,7 @@ class _CodexAppServerClient:
         if not status_type:
             return
         active_flags = status.get("activeFlags") if isinstance(status.get("activeFlags"), list) else []
-        self._thread_statuses[thread_id] = {
-            "type": status_type,
-            "active_flags": [str(flag).strip() for flag in active_flags if str(flag).strip()],
-        }
+        self.cache_thread_status(thread_id, status_type, active_flags)
 
     def _subscribe_turn(self, thread_id: str, turn_id: str) -> queue.Queue[dict[str, Any]]:
         turn_key = (thread_id, turn_id)
@@ -1091,6 +1115,7 @@ class CodexBackend(AgentBackend):
         threads = [self._normalize_app_server_thread(item) for item in data if isinstance(item, dict)]
         for thread in threads:
             thread["_app_server_authoritative"] = True
+            client.cache_thread_status(str(thread.get("id") or ""), str(thread.get("status") or ""), thread.get("active_flags"))
             client.apply_cached_thread_status(thread)
         if archived is not None:
             for thread in threads:
@@ -1111,6 +1136,7 @@ class CodexBackend(AgentBackend):
         thread = payload.get("thread") if isinstance(payload.get("thread"), dict) else {}
         normalized = self._normalize_app_server_thread(thread)
         normalized["_app_server_authoritative"] = True
+        client.cache_thread_status(str(normalized.get("id") or ""), str(normalized.get("status") or ""), normalized.get("active_flags"))
         client.apply_cached_thread_status(normalized)
         normalized["messages"] = self._normalize_app_server_thread_messages(thread)
         return normalized
