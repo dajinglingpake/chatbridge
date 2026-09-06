@@ -3973,6 +3973,51 @@ class StreamComposerTests(unittest.TestCase):
         self.assertEqual("2026-09-06T06:50:10Z", thread["runtime_started_at"])
         self.assertEqual({}, thread.get("runtime_activity", {}))
 
+    def test_unloaded_external_thread_uses_live_rollout_runtime(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "external-live.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "timestamp": "2026-09-06T09:40:00Z",
+                                "type": "event_msg",
+                                "payload": {"type": "task_started"},
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-09-06T09:40:01Z",
+                                "type": "response_item",
+                                "payload": {
+                                    "type": "reasoning",
+                                    "summary": [{"text": "正在执行外部 Codex 任务"}],
+                                },
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            now = time.time()
+            os.utime(path, (now, now))
+            thread = {
+                "id": "thread-external-live",
+                "source": "vscode",
+                "status": "notLoaded",
+                "latest_turn_status": "interrupted",
+                "_app_server_authoritative": True,
+                "path": str(path),
+            }
+
+            changed = _update_codex_thread_runtime_statuses([thread], {}, now=now)
+
+            self.assertTrue(changed)
+            self.assertEqual("running", thread["runtime_status"])
+            self.assertEqual("正在执行外部 Codex 任务", thread["runtime_activity"]["text"])
+
     def test_codex_terminal_rollout_overrides_stale_running_thread_status(self) -> None:
         with TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "completed.jsonl"
