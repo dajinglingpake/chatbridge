@@ -351,9 +351,18 @@ class _CodexAppServerClient:
         if not cleaned_id or not cleaned_type:
             return
         with self._dispatch_lock:
+            existing = self._thread_statuses.get(cleaned_id)
+            # A list/read snapshot can report notLoaded while the live status
+            # notification already says active, idle, or systemError.
+            if cleaned_type == "notLoaded" and isinstance(existing, dict) and str(existing.get("type") or "").strip() != "notLoaded":
+                return
             self._thread_statuses[cleaned_id] = {
                 "type": cleaned_type,
-                "active_flags": [str(flag).strip() for flag in (active_flags or []) if str(flag).strip()],
+                "active_flags": [
+                    str(flag).strip()
+                    for flag in (active_flags or [])
+                    if str(flag).strip() in {"waitingOnApproval", "waitingOnUserInput"}
+                ],
             }
 
     def cached_thread_statuses(self) -> dict[str, dict[str, object]]:
@@ -365,7 +374,7 @@ class _CodexAppServerClient:
                     "active_flags": [
                         str(flag).strip()
                         for flag in (status.get("active_flags") if isinstance(status.get("active_flags"), list) else [])
-                        if str(flag).strip()
+                        if str(flag).strip() in {"waitingOnApproval", "waitingOnUserInput"}
                     ],
                 }
                 for thread_id, status in self._thread_statuses.items()
@@ -735,6 +744,14 @@ class CodexBackend(AgentBackend):
             )
             self._app_server.start()
             return self._app_server
+
+    def cached_thread_statuses(self) -> dict[str, dict[str, object]]:
+        """Expose live App Server status notifications to the Hub IPC layer."""
+        with self._app_server_lock:
+            client = self._app_server
+            if client is None or not client.is_alive():
+                return {}
+            return client.cached_thread_statuses()
 
     def _app_server_thread_params(self, agent: AgentLike, workdir: Path, context: BackendContext) -> dict[str, object]:
         config: dict[str, object] = {}
@@ -1163,7 +1180,7 @@ class CodexBackend(AgentBackend):
                     turn
                     for turn in turns
                     if isinstance(turn, dict)
-                    and str(turn.get("status") or "").replace("_", "").lower() in {"inprogress", "running", "active"}
+                    and str(turn.get("status") or "").strip() == "inProgress"
                 ),
                 None,
             )
@@ -1231,7 +1248,7 @@ class CodexBackend(AgentBackend):
                 item
                 for item in turns
                 if isinstance(item, dict)
-                and str(item.get("status") or "").replace("_", "").lower() in {"inprogress", "running"}
+                and str(item.get("status") or "").strip() == "inProgress"
             ),
             None,
         )
@@ -1296,15 +1313,13 @@ class CodexBackend(AgentBackend):
         cwd = str(thread.get("cwd") or "").strip()
         git_info = thread.get("gitInfo") if isinstance(thread.get("gitInfo"), dict) else {}
         status = thread.get("status") if isinstance(thread.get("status"), dict) else {}
-        status_type = str(status.get("type") or thread.get("status") or "").strip()
+        status_type = str(status.get("type") or "").strip()
         active_flags = status.get("activeFlags") if isinstance(status.get("activeFlags"), list) else []
         turns = thread.get("turns") if isinstance(thread.get("turns"), list) else []
         latest_turn = next((turn for turn in reversed(turns) if isinstance(turn, dict)), {})
         latest_turn_status_value = latest_turn.get("status")
         latest_turn_status = (
-            str(latest_turn_status_value.get("type") or latest_turn_status_value.get("status") or "").strip()
-            if isinstance(latest_turn_status_value, dict)
-            else str(latest_turn_status_value or "").strip()
+            str(latest_turn_status_value or "").strip()
         )
         preview = str(thread.get("preview") or "").strip()
         name = str(thread.get("name") or "").strip()
@@ -1324,7 +1339,7 @@ class CodexBackend(AgentBackend):
             "active_flags": [str(flag).strip() for flag in active_flags if str(flag).strip()],
             "latest_turn_status": latest_turn_status,
             "latest_turn_started_at": cls._format_app_server_timestamp(
-                latest_turn.get("startedAt") or latest_turn.get("createdAt")
+                latest_turn.get("startedAt")
             ),
             "latest_turn_completed_at": cls._format_app_server_timestamp(latest_turn.get("completedAt")),
             "branch": str(git_info.get("branch") or "").strip(),

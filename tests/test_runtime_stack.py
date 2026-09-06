@@ -118,8 +118,21 @@ class RuntimeStackTests(unittest.TestCase):
         ):
             status = get_managed_status("Bridge", self.root / "weixin_hub_bridge.py", pid_file, discover=False)
 
-        self.assertFalse(status.running)
-        mocked_clear.assert_not_called()
+            self.assertFalse(status.running)
+            mocked_clear.assert_not_called()
+
+    def test_get_managed_status_matches_forward_slash_script_commandline(self) -> None:
+        pid_file = self.root / "agent.pid"
+        process = SimpleNamespace(pid=303)
+        with (
+            patch("runtime_stack._read_pid_file", return_value=303),
+            patch("runtime_stack._get_process", return_value=process),
+            patch("runtime_stack._cmdline_text", return_value="I:/repo/.venv/Scripts/python.exe I:/repo/agent_hub.py"),
+        ):
+            status = get_managed_status("Hub", Path("I:/repo/agent_hub.py"), pid_file, discover=False)
+
+        self.assertTrue(status.running)
+        self.assertEqual(303, status.pid)
 
     def test_runtime_snapshot_can_skip_qq_login_probe(self) -> None:
         managed = SimpleNamespace(running=False, pid=None)

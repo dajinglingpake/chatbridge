@@ -229,6 +229,17 @@ def _find_processes_by_script(script_path: Path) -> list[object]:
     return _filter_child_process_matches(sorted(matches, key=lambda item: getattr(item, "pid", 0)))
 
 
+def _process_matches_script(proc: object, script_path: Path) -> bool:
+    """Match a managed script independent of Windows path separator style."""
+    target = str(script_path).replace("\\", "/").lower()
+    try:
+        target = str(script_path.resolve()).replace("\\", "/").lower()
+    except OSError:
+        pass
+    cmdline = _cmdline_text(proc).replace("\\", "/").lower()
+    return target in cmdline or str(script_path).replace("\\", "/").lower() in cmdline
+
+
 def _filter_child_process_matches(processes: list[object]) -> list[object]:
     matched_pids = {getattr(proc, "pid", None) for proc in processes}
     filtered: list[object] = []
@@ -384,7 +395,7 @@ def stop_external_agent_process(pid: int) -> str:
 def get_managed_status(name: str, script_path: Path, pid_file: Path, *, discover: bool = True) -> ManagedStatus:
     pid = _read_pid_file(pid_file)
     proc = _get_process(pid) if pid else None
-    if proc and str(script_path) in _cmdline_text(proc):
+    if proc and _process_matches_script(proc, script_path):
         return ManagedStatus(name=name, script_path=script_path, pid_file=pid_file, running=True, pid=proc.pid)
 
     if not discover:

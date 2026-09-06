@@ -6898,6 +6898,8 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     if (
                         next_hub_file_signature is not None
                         and next_hub_file_signature == state.get("stream_hub_state_file_signature")
+                        and not selected_runtime_status_changed
+                        and not selected_runtime_activity_changed
                     ):
                         return
                     if next_hub_file_signature is not None:

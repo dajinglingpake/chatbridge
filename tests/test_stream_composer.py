@@ -4423,6 +4423,8 @@ class StreamComposerTests(unittest.TestCase):
         self.assertIn("selected_runtime_status_changed", refresh_body)
         self.assertIn("elif selected_runtime_activity_changed:", refresh_body)
         self.assertIn("_patch_stream_runtime_activity()", refresh_body)
+        self.assertIn("and not selected_runtime_status_changed", refresh_body)
+        self.assertIn("and not selected_runtime_activity_changed", refresh_body)
         self.assertIn("document.querySelector('.cb-stream-current-activity')", patch_body)
         self.assertNotIn("stream_messages_view.refresh()", patch_body)
 

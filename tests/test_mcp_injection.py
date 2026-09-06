@@ -441,7 +441,7 @@ class McpServerInjectionTests(unittest.TestCase):
                 "method": "thread/status/changed",
                 "params": {
                     "threadId": "thread-live",
-                    "status": {"type": "active", "activeFlags": ["turn", "turn"]},
+                    "status": {"type": "active", "activeFlags": ["waitingOnUserInput", "waitingOnUserInput"]},
                 },
             }
         )
@@ -450,7 +450,22 @@ class McpServerInjectionTests(unittest.TestCase):
         client.apply_cached_thread_status(thread)
 
         self.assertEqual("active", thread["status"])
-        self.assertEqual(["turn", "turn"], thread["active_flags"])
+        self.assertEqual(["waitingOnUserInput", "waitingOnUserInput"], thread["active_flags"])
+
+    def test_codex_app_server_not_loaded_snapshot_does_not_overwrite_live_status(self) -> None:
+        client = _CodexAppServerClient("codex", creationflags=0, start_new_session=False, slim_exec=True)
+        client.cache_thread_status("thread-live", "active", ["waitingOnUserInput"])
+        client.cache_thread_status("thread-live", "notLoaded")
+
+        self.assertEqual(
+            {
+                "thread-live": {
+                    "type": "active",
+                    "active_flags": ["waitingOnUserInput"],
+                }
+            },
+            client.cached_thread_statuses(),
+        )
 
     def test_codex_app_server_normalizes_mcp_tool_calls_for_history(self) -> None:
         message = CodexBackend._normalize_app_server_item(
