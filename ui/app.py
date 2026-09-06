@@ -566,20 +566,15 @@ def _update_codex_thread_runtime_statuses(
         active_thread_ids.add(thread_id)
         raw_status = str(thread.get("status") or "").strip().lower()
         latest_turn_status = str(thread.get("latest_turn_status") or "").strip().lower().replace("-", "_")
-        thread_source = str(thread.get("source") or "").strip().lower()
-        # `thread/read` reports `notLoaded` when this app-server process has no
-        # live subscription. For VS Code/CLI-owned threads, the rollout is the
-        # current runtime event stream; only loaded app-server threads can use
-        # its status as the runtime authority.
-        app_server_authoritative = (
-            thread_source == "codex-app-server"
-            or raw_status == "active"
-            or (
-                bool(thread.get("_app_server_authoritative"))
-                and raw_status not in {"notloaded", "not_loaded"}
-            )
-        )
-        runtime_status = "running" if raw_status in known_running_statuses else "idle"
+        # App Server status is authoritative. `notLoaded` is a protocol state,
+        # not permission to infer runtime status from the persisted rollout.
+        app_server_authoritative = bool(thread.get("_app_server_authoritative")) or thread.get("source") == "codex-app-server"
+        if raw_status in {"systemerror", "system_error"}:
+            runtime_status = "error"
+        elif raw_status in {"notloaded", "not_loaded"}:
+            runtime_status = "unknown"
+        else:
+            runtime_status = "running" if raw_status in known_running_statuses else "idle"
         if latest_turn_status in known_running_statuses:
             runtime_status = "running"
         elif latest_turn_status in definitive_terminal_turn_statuses or latest_turn_status in ambiguous_terminal_turn_statuses:
@@ -5312,6 +5307,16 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                                                 ).classes("cb-chip cb-chip-running")
                                                 if str(thread.get("runtime_status") or "") != "running":
                                                     thread_running_chip.props("hidden")
+                                                thread_state = str(thread.get("runtime_status") or "")
+                                                if thread_state in {"unknown", "error"}:
+                                                    ui.label(
+                                                        t(
+                                                            "ui.web.mobile.codex_thread_state_unknown"
+                                                            if thread_state == "unknown"
+                                                            else "ui.web.mobile.codex_thread_state_error",
+                                                            "未加载" if thread_state == "unknown" else "系统错误",
+                                                        )
+                                                    ).classes("cb-chip cb-chip-warn")
                                                 if bool(thread.get("archived")):
                                                     ui.label(t("ui.web.mobile.codex_thread_archived", "已归档")).classes("cb-chip cb-chip-warn")
                                                 if str(thread.get("branch") or "").strip():

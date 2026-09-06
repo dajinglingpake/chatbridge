@@ -3913,7 +3913,7 @@ def _load_codex_thread_cached(thread_id: str, *, blocking: bool = False) -> dict
     if stale_thread and not retry_failed_detail:
         # App-server is the authoritative source for Codex thread state.
         # Refresh its runtime snapshot directly once the short cache expires.
-        if bool(stale_thread.get("_app_server_authoritative")) or str(stale_thread.get("source") or "").strip().lower() == "codex-app-server":
+        if bool(stale_thread.get("_app_server_authoritative")) or str(stale_thread.get("source") or "").strip() == "codex-app-server":
             _start_codex_thread_detail_load(cleaned_thread_id)
         return stale_thread
     if blocking:
@@ -4006,9 +4006,13 @@ def _codex_thread_runtime_signature_cached(thread_id: str) -> tuple[str, ...]:
         thread = cached.get("thread") if isinstance(cached, dict) else None
         if not isinstance(thread, dict):
             return ()
-        return tuple(
-            str(thread.get(key) or "").strip()
-            for key in ("latest_turn_status", "latest_turn_started_at", "latest_turn_completed_at")
+        active_flags = thread.get("active_flags") if isinstance(thread.get("active_flags"), list) else []
+        return (
+            str(thread.get("latest_turn_status") or "").strip(),
+            str(thread.get("latest_turn_started_at") or "").strip(),
+            str(thread.get("latest_turn_completed_at") or "").strip(),
+            str(thread.get("status") or "").strip(),
+            *tuple(str(flag).strip() for flag in active_flags if str(flag).strip()),
         )
 
 
@@ -4028,6 +4032,12 @@ def _mobile_codex_thread_payload(thread: dict[str, object]) -> dict[str, object]
         "branch": str(thread.get("branch") or "").strip(),
         "archived": bool(thread.get("archived")),
         "status": str(thread.get("status") or "").strip(),
+        "_app_server_authoritative": bool(thread.get("_app_server_authoritative")),
+        "active_flags": [
+            str(flag).strip()
+            for flag in (thread.get("active_flags") if isinstance(thread.get("active_flags"), list) else [])
+            if str(flag).strip()
+        ],
         "path": str(thread.get("path") or "").strip(),
     }
 

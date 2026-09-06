@@ -434,6 +434,24 @@ class McpServerInjectionTests(unittest.TestCase):
         self.assertEqual("shell", activities[0]["metadata"]["name"])
         self.assertEqual("auto", activities[2]["metadata"]["trigger"])
 
+    def test_codex_app_server_status_notification_is_cached(self) -> None:
+        client = _CodexAppServerClient("codex", creationflags=0, start_new_session=False, slim_exec=True)
+        client._dispatch_message(
+            {
+                "method": "thread/status/changed",
+                "params": {
+                    "threadId": "thread-live",
+                    "status": {"type": "active", "activeFlags": ["turn", "turn"]},
+                },
+            }
+        )
+
+        thread = {"id": "thread-live", "status": "notLoaded", "active_flags": []}
+        client.apply_cached_thread_status(thread)
+
+        self.assertEqual("active", thread["status"])
+        self.assertEqual(["turn", "turn"], thread["active_flags"])
+
     def test_codex_app_server_normalizes_mcp_tool_calls_for_history(self) -> None:
         message = CodexBackend._normalize_app_server_item(
             {

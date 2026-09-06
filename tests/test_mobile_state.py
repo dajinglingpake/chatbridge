@@ -1379,6 +1379,9 @@ class MobileStateTests(unittest.TestCase):
             "cwd": "I:/AI/chatbridge",
             "path": "C:/Users/test/.codex/sessions/thread-001.jsonl",
             "updated_at": "2026-07-04T20:00:00",
+            "_app_server_authoritative": True,
+            "status": "active",
+            "active_flags": ["turn"],
             "messages": [
                 {"turn_id": "turn-1", "role": "user", "text": "用户问题", "at": "2026-07-04T20:00:00"},
                 {"turn_id": "turn-1", "role": "reasoning", "text": "先检查状态", "at": "2026-07-04T20:00:01"},
@@ -1404,6 +1407,8 @@ class MobileStateTests(unittest.TestCase):
         self.assertEqual("codex:thread-001", sidebar_item["session_name"])
         self.assertEqual("chatbridge", sidebar_item["project"])
         self.assertEqual("C:/Users/test/.codex/sessions/thread-001.jsonl", sidebar_item["path"])
+        self.assertTrue(sidebar_item["_app_server_authoritative"])
+        self.assertEqual(["turn"], sidebar_item["active_flags"])
         self.assertEqual(1, len(tasks))
         self.assertEqual("codex:thread-001", tasks[0]["session_name"])
         self.assertEqual("thread-001", tasks[0]["session_id"])
@@ -2316,8 +2321,8 @@ class MobileStateTests(unittest.TestCase):
             mobile._CODEX_THREAD_DETAIL_CACHE.clear()
             mobile._CODEX_THREAD_DETAIL_INFLIGHT.clear()
 
-        self.assertEqual(("interrupted", "2026-08-30T04:00:00", ""), interrupted[-3])
-        self.assertEqual(("completed", "2026-08-30T04:00:00", "2026-08-30T04:02:00"), completed[-3])
+        self.assertEqual(("interrupted", "2026-08-30T04:00:00", "", ""), interrupted[-3])
+        self.assertEqual(("completed", "2026-08-30T04:00:00", "2026-08-30T04:02:00", ""), completed[-3])
         self.assertNotEqual(interrupted, completed)
 
     def test_stream_signature_tracks_active_goal_updates(self) -> None:

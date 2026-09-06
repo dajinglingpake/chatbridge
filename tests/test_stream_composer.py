@@ -3973,7 +3973,7 @@ class StreamComposerTests(unittest.TestCase):
         self.assertEqual("2026-09-06T06:50:10Z", thread["runtime_started_at"])
         self.assertEqual({}, thread.get("runtime_activity", {}))
 
-    def test_unloaded_external_thread_uses_live_rollout_runtime(self) -> None:
+    def test_unloaded_external_thread_does_not_use_rollout_runtime(self) -> None:
         with TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "external-live.jsonl"
             path.write_text(
@@ -4015,8 +4015,8 @@ class StreamComposerTests(unittest.TestCase):
             changed = _update_codex_thread_runtime_statuses([thread], {}, now=now)
 
             self.assertTrue(changed)
-            self.assertEqual("running", thread["runtime_status"])
-            self.assertEqual("正在执行外部 Codex 任务", thread["runtime_activity"]["text"])
+            self.assertEqual("idle", thread["runtime_status"])
+            self.assertEqual({}, thread.get("runtime_activity", {}))
 
     def test_codex_terminal_rollout_overrides_stale_running_thread_status(self) -> None:
         with TemporaryDirectory() as temp_dir:
