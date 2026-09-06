@@ -354,8 +354,6 @@ class MultiCodexHub:
                 return task.to_dict()
             if task.status == "running":
                 pid = int(self.running_task_pids.get(cleaned_id) or 0)
-                if pid <= 0:
-                    raise ValueError("running task cannot be canceled right now")
                 self.cancel_requested_task_ids.add(cleaned_id)
                 task_payload = task.to_dict()
             else:
@@ -697,8 +695,15 @@ class MultiCodexHub:
     def _register_running_task_pid(self, task_id: str, pid: int) -> None:
         if pid <= 0:
             return
+        cancel_requested = False
         with self.lock:
             self.running_task_pids[task_id] = pid
+            cancel_requested = task_id in self.cancel_requested_task_ids
+        # The stop request can arrive after the task enters running but before
+        # the backend has spawned its process. Terminate as soon as the PID is
+        # available so subprocess-based backends cannot miss that request.
+        if cancel_requested:
+            terminate_process_tree(pid)
 
     def _clear_running_task_pid(self, task_id: str) -> None:
         with self.lock:

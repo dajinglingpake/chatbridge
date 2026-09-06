@@ -137,6 +137,7 @@ class _CodexAppServerClient:
         on_reasoning: Callable[[str], None] | None = None,
         on_activity: Callable[[dict[str, object]], None] | None = None,
         reasoning_progress_label: Callable[[str], str] | None = None,
+        is_cancel_requested: Callable[[], bool] | None = None,
     ) -> tuple[str, int | None]:
         deadline = time.time() + timeout
         message_queue = self._subscribe_turn(thread_id, turn_id)
@@ -154,6 +155,8 @@ class _CodexAppServerClient:
         command_activities: dict[str, dict[str, object]] = {}
         last_command_output_at: dict[str, float] = {}
         context_left_percent: int | None = None
+        interrupt_sent = False
+        cancel_deadline: float | None = None
 
         def push_live_output(text: str, *, force: bool = False) -> None:
             nonlocal last_output_progress, last_output_progress_at
@@ -228,7 +231,23 @@ class _CodexAppServerClient:
 
         try:
             while time.time() < deadline:
-                message = self._read_message(deadline, message_queue=message_queue)
+                if is_cancel_requested is not None and is_cancel_requested() and not interrupt_sent:
+                    self.request(
+                        "turn/interrupt",
+                        {"threadId": thread_id, "turnId": turn_id},
+                        timeout=15,
+                    )
+                    interrupt_sent = True
+                    cancel_deadline = min(deadline, time.time() + 15)
+                if interrupt_sent and cancel_deadline is not None and time.time() >= cancel_deadline:
+                    raise RuntimeError("Task canceled during execution.")
+                poll_deadline = min(deadline, time.time() + 0.25)
+                try:
+                    message = self._read_message(poll_deadline, message_queue=message_queue)
+                except RuntimeError:
+                    if time.time() >= deadline:
+                        raise
+                    continue
                 method = str(message.get("method") or "")
                 params = message.get("params") if isinstance(message.get("params"), dict) else {}
                 if str(params.get("threadId") or "") not in {"", thread_id}:
@@ -639,6 +658,7 @@ class CodexBackend(AgentBackend):
                 "思考：{text}",
                 text=text,
             ),
+            is_cancel_requested=context.is_cancel_requested,
         )
         if not output.strip():
             raise RuntimeError("Codex app-server returned an empty result")

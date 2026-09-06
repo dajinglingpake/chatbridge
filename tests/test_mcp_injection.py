@@ -323,6 +323,40 @@ class McpServerInjectionTests(unittest.TestCase):
         self.assertEqual("623 passed\n", command_activity["metadata"]["output"])
         self.assertEqual(0, command_activity["metadata"]["exit_code"])
 
+    def test_codex_app_server_interrupts_active_turn_when_canceled(self) -> None:
+        requests: list[tuple[str, dict[str, object]]] = []
+        client = _CodexAppServerClient("codex", creationflags=0, start_new_session=False, slim_exec=True)
+
+        def request(method: str, params: dict[str, object], *, timeout: float) -> dict[str, object]:
+            requests.append((method, params))
+            if method == "turn/interrupt":
+                client._dispatch_message(
+                    {
+                        "method": "turn/completed",
+                        "params": {
+                            "threadId": "thread-1",
+                            "turn": {"id": "turn-1", "status": "interrupted"},
+                        },
+                    }
+                )
+            return {}
+
+        client.request = request  # type: ignore[method-assign]
+
+        with self.assertRaisesRegex(RuntimeError, "turn interrupted"):
+            client.wait_for_turn(
+                "thread-1",
+                "turn-1",
+                timeout=2,
+                on_progress=None,
+                is_cancel_requested=lambda: True,
+            )
+
+        self.assertEqual(
+            [("turn/interrupt", {"threadId": "thread-1", "turnId": "turn-1"})],
+            requests,
+        )
+
     def test_codex_app_server_normalizes_threads_and_reasoning_history(self) -> None:
         backend = CodexBackend()
         thread = {

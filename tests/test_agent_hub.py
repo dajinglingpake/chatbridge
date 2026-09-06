@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -18,6 +19,34 @@ class SleepingBackend:
     key = "codex"
 
     def invoke(self, agent, prompt: str, session_name: str, context) -> dict[str, str]:
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            cwd=agent.workdir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=context.creationflags,
+            start_new_session=context.start_new_session,
+            shell=False,
+        )
+        if context.on_process_started is not None:
+            context.on_process_started(process.pid)
+        _, stderr = process.communicate()
+        if process.returncode != 0:
+            raise RuntimeError(stderr.strip() or f"sleep process exited with code {process.returncode}")
+        return {"output": "done", "session_id": ""}
+
+
+class LateStartBackend:
+    key = "codex"
+
+    def __init__(self) -> None:
+        self.allow_spawn = threading.Event()
+
+    def invoke(self, agent, prompt: str, session_name: str, context) -> dict[str, str]:
+        self.allow_spawn.wait(timeout=10)
         process = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(30)"],
             cwd=agent.workdir,
@@ -201,6 +230,50 @@ class AgentHubCancellationTests(unittest.TestCase):
             self.assertEqual("idle", runtime.status)
             self.assertEqual(0, runtime.failure_count)
             hub.queues["main"].join()
+
+    def test_cancel_running_task_before_process_pid_is_registered(self) -> None:
+        workdir = self.temp_path / "workspace"
+        session_file = self.temp_path / "sessions" / "main.txt"
+        workdir.mkdir(parents=True, exist_ok=True)
+        session_file.parent.mkdir(parents=True, exist_ok=True)
+        config = HubConfig(
+            codex_command=sys.executable,
+            claude_command="claude",
+            opencode_command="opencode",
+            agents=[AgentConfig("main", "Main", str(workdir), str(session_file), backend="codex")],
+        )
+        state_path = self.temp_path / "state" / "agent_hub_state.json"
+
+        with (
+            patch("agent_hub.STATE_PATH", state_path),
+            patch("agent_hub.discover_external_agent_processes", return_value=[]),
+        ):
+            hub = MultiCodexHub(config)
+            backend = LateStartBackend()
+            hub.backend_registry["codex"] = backend
+            task_payload = hub.submit_task("main", "sleep please")
+            task_id = str(task_payload["id"])
+
+            self._wait_until(
+                lambda: (
+                    (task := hub._find_task(task_id)) is not None
+                    and task.status == "running"
+                    and task_id not in hub.running_task_pids
+                )
+            )
+
+            canceled_task = hub.cancel_task(task_id)
+            self.assertEqual(task_id, canceled_task["id"])
+            self.assertIn(task_id, hub.cancel_requested_task_ids)
+
+            backend.allow_spawn.set()
+            self._wait_until(lambda: str((hub.get_task(task_id) or {}).get("status") or "") == "canceled")
+            self._wait_until(lambda: task_id not in hub.running_task_pids)
+            hub.queues["main"].join()
+
+            final_task = hub.get_task(task_id) or {}
+            self.assertEqual("canceled", final_task.get("status"))
+            self.assertIn("canceled", str(final_task.get("error") or "").lower())
 
     def test_render_codex_status_runs_in_hub_context(self) -> None:
         workdir = self.temp_path / "workspace"
