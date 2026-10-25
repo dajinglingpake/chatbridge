@@ -13,11 +13,12 @@ from bridge_config import BridgeConfig
 from core.platform_compat import IS_WINDOWS, command_candidates, creationflags, resolve_command, shell_command
 
 
-DEFAULT_NODE_VERSION = "24.14.1"
+DEFAULT_NODE_VERSION = "24.22.1"
 WEIXIN_ACCOUNTS_DIR = Path(__file__).resolve().parent / "accounts"
 REQUIREMENTS_PATH = Path(__file__).resolve().parent / "requirements.txt"
 IMPORT_NAME_OVERRIDES = {
     "Pillow": "PIL",
+    "websocket-client": "websocket",
 }
 
 
@@ -256,7 +257,7 @@ def suggested_install_commands() -> list[tuple[str, str]]:
             [
                 ("Install NVM for Windows", "winget install CoreyButler.NVMforWindows --accept-package-agreements --accept-source-agreements"),
                 ("Install Node via NVM", build_nvm_node_command()),
-                ("Install Codex CLI", f"{resolve_command('npm')} install -g codex"),
+                ("Install Codex CLI", f"{resolve_command('npm')} install -g @openai/codex"),
                 ("Install Claude Code", f"{resolve_command('npm')} install -g @anthropic-ai/claude-code"),
                 ("Install OpenCode CLI", f"{resolve_command('npm')} install -g opencode-ai"),
             ]
@@ -265,7 +266,7 @@ def suggested_install_commands() -> list[tuple[str, str]]:
         commands.extend(
             [
                 ("Install Node.js", "Use your Linux package manager to install nodejs and npm"),
-                ("Install Codex CLI", f"{resolve_command('npm')} install -g codex"),
+                ("Install Codex CLI", f"{resolve_command('npm')} install -g @openai/codex"),
                 ("Install Claude Code", f"{resolve_command('npm')} install -g @anthropic-ai/claude-code"),
                 ("Install OpenCode CLI", f"{resolve_command('npm')} install -g opencode-ai"),
             ]
@@ -282,7 +283,7 @@ def suggested_upgrade_commands() -> list[tuple[str, str]]:
         commands.append(("Upgrade Node via NVM", build_nvm_node_command()))
     commands.extend(
         [
-            ("Upgrade Codex CLI", f"{resolve_command('npm')} install -g codex@latest"),
+            ("Upgrade Codex CLI", f"{resolve_command('npm')} install -g @openai/codex@latest"),
             ("Upgrade Claude Code", f"{resolve_command('npm')} install -g @anthropic-ai/claude-code@latest"),
             ("Upgrade OpenCode CLI", f"{resolve_command('npm')} install -g opencode-ai@latest"),
         ]

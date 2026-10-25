@@ -167,7 +167,7 @@ python qq_onebot_bridge.py
 - 在可能的情况下自动补齐 Windows 工具链
   - `winget`
   - `nvm for Windows`
-  - `Node.js 24.14.1`
+  - `Node.js 24.22.1`
   - `Codex CLI`
   - `Claude Code`
   - `OpenCode CLI`

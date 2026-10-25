@@ -74,7 +74,7 @@ On first run, the app will automatically:
 - run environment detection
 - try to auto-install missing Windows toolchain components when possible
   - `nvm for Windows`
-  - `Node.js 24.14.1`
+  - `Node.js 24.22.1`
   - `Codex CLI`
   - `Claude Code`
   - `OpenCode CLI`
@@ -94,7 +94,7 @@ The preferred installation path is:
 
 - `winget`
 - `nvm for Windows`
-- `Node.js 24.14.1`
+- `Node.js 24.22.1`
 
 The shared UI layer detects these items and should auto-repair them when the machine supports it.
 

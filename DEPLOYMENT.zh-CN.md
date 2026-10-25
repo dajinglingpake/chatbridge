@@ -74,7 +74,7 @@ python3 ./main.py --host 0.0.0.0 --port 8765
 - 执行环境检测
 - 在可能的情况下自动安装或补齐缺失的 Windows 工具链
   - `nvm for Windows`
-  - `Node.js 24.14.1`
+  - `Node.js 24.22.1`
   - `Codex CLI`
   - `Claude Code`
   - `OpenCode CLI`
@@ -94,7 +94,7 @@ python3 ./main.py --host 0.0.0.0 --port 8765
 
 - `winget`
 - `nvm for Windows`
-- `Node.js 24.14.1`
+- `Node.js 24.22.1`
 
 统一 UI 会检测这些项目，并在机器支持时尝试自动修复。
 

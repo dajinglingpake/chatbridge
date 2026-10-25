@@ -148,7 +148,7 @@ On startup, the unified UI will:
 - auto-repair the Windows toolchain when possible
   - `winget`
   - `nvm for Windows`
-  - `Node.js 24.14.1`
+  - `Node.js 24.22.1`
   - `Codex CLI`
   - `Claude Code`
   - `OpenCode CLI`

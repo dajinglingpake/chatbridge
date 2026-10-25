@@ -4291,7 +4291,7 @@ class StreamComposerTests(unittest.TestCase):
         refresh_body = source[refresh_start:refresh_end]
 
         signature_index = refresh_body.index("next_signature = _stream_signature_snapshot()")
-        runtime_index = refresh_body.index("_refresh_codex_runtime_statuses()")
+        runtime_index = refresh_body.index("_refresh_codex_runtime_statuses(live_statuses)")
 
         self.assertLess(signature_index, runtime_index)
 
@@ -4403,7 +4403,7 @@ class StreamComposerTests(unittest.TestCase):
         refresh_end = source.index("client.on_connect", refresh_start)
         refresh_body = source[refresh_start:refresh_end]
 
-        self.assertIn("_refresh_codex_runtime_statuses()", refresh_body)
+        self.assertIn("_refresh_codex_runtime_statuses(live_statuses)", refresh_body)
         self.assertNotIn("load_codex_threads_page", refresh_body)
         self.assertNotIn("read_codex_thread", refresh_body)
 

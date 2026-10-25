@@ -63,6 +63,13 @@ def _refresh_runtime_status_on_ui_entry() -> None:
     refresh_dashboard_cache(APP_DIR, "runtime")
 
 
+async def _load_codex_runtime_statuses() -> dict[str, dict[str, object]]:
+    try:
+        return await asyncio.to_thread(list_codex_thread_statuses, timeout_seconds=3)
+    except Exception:
+        return {}
+
+
 class _ClientState(MutableMapping[str, object]):
     """Expose one UI state mapping for whichever NiceGUI client is active."""
 
@@ -3844,7 +3851,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
         else:
             stream_state.pop("composer_model_preference", None)
 
-    def _refresh_codex_runtime_statuses() -> tuple[bool, bool, bool]:
+    def _refresh_codex_runtime_statuses(live_statuses: dict[str, dict[str, object]] | None = None) -> tuple[bool, bool, bool]:
         sidebar_value = state.get("stream_sidebar_codex_threads")
         sidebar_threads = [thread for thread in sidebar_value if isinstance(thread, dict)] if isinstance(sidebar_value, list) else []
         selected_thread = _stream_selected_codex_runtime_thread()
@@ -3868,10 +3875,6 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
             for thread in sidebar_threads
             if str(thread.get("id") or "").strip() != selected_id
         )
-        try:
-            live_statuses = list_codex_thread_statuses(timeout_seconds=3)
-        except Exception:
-            live_statuses = {}
         for thread in probe_threads:
             thread_id = str(thread.get("id") or "").strip()
             status = live_statuses.get(thread_id) if isinstance(live_statuses, dict) else None
@@ -6849,7 +6852,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                     hub_file_signature=next_hub_file_signature,
                 )
 
-        def refresh_stream() -> None:
+        async def refresh_stream() -> None:
             timer = timer_ref["timer"]
             if getattr(client, "_deleted", False) or not client.has_socket_connection:
                 _append_stream_ui_log(
@@ -6873,6 +6876,11 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                 try:
                     if state.get("stream_switch_refresh_pending"):
                         return
+                    live_statuses = {}
+                    if _stream_selected_codex_runtime_thread() or state.get("stream_sidebar_codex_threads"):
+                        live_statuses = await _load_codex_runtime_statuses()
+                        if getattr(client, "_deleted", False) or not client.has_socket_connection or state["active_page"] != "stream":
+                            return
                     selected_stream_session = str(state["selected_session_name"] or "").strip()
                     next_sidebar_hub_file_signature = stream_hub_state_file_signature()
                     if not codex_thread_id_from_session_name(selected_stream_session):
@@ -6892,7 +6900,7 @@ def create_ui(host: str = "0.0.0.0", port: int = 8765) -> None:
                             state["stream_sidebar_session_signature"] = next_sidebar_session_signature
                             sidebar_sessions_view.refresh()
                     next_signature = _stream_signature_snapshot()
-                    sidebar_runtime_changed, selected_runtime_status_changed, selected_runtime_activity_changed = _refresh_codex_runtime_statuses()
+                    sidebar_runtime_changed, selected_runtime_status_changed, selected_runtime_activity_changed = _refresh_codex_runtime_statuses(live_statuses)
                     if state.get("stream_sidebar_codex_loaded") and sidebar_runtime_changed:
                         _patch_sidebar_codex_runtime_status()
                     if (
